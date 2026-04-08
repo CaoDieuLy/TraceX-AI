@@ -79,3 +79,27 @@ See each file for the format and examples.
 Prompts and tool calls are **automatically logged** when you use any supported AI tool (Claude Code, Cursor, Codex, Gemini, Copilot). No manual steps needed after running `setup_hooks.sh`.
 
 See [AGENTS.md](./AGENTS.md) for details.
+# Thông tin chung (Project Identity)
+- Tên dự án: Search Engine Video Realtime.
+- Mã đề tài: AI20K-243.
+- Lĩnh vực: VLM.
+- Thành viên nhóm: Bùi Văn Đạt, Dương Văn Hiệp, Cao Diệu Ly.
+
+# Mô tả bài toán (Problem Statement & Solution)
+- Vấn đề: Các hệ thống camera giám sát (CCTV) hiện nay tạo ra hàng petabyte dữ liệu mỗi ngày. Khi cần tìm một đối tượng cụ thể (ví dụ: "Người phụ nữ mặc áo đỏ đi xe máy xanh"), nhân viên an ninh phải xem lại (replay) thủ công hàng giờ đồng hồ, dẫn đến hiệu suất thấp và dễ bỏ lỡ thời điểm vàng.
+
+- Giải pháp: Xây dựng hệ thống Semantic Video Search.Cho phép người dùng truy vấn bằng văn bản tự nhiên.
+- Đối tượng người dùng (User Persona): Quản lý, bảo vệ tòa nhà,...
+
+# Tech Stack & AI Techniques
+- AI Techniques: VLM, rezo-shot, Sử dụng CLIP.
+- Framework/Library: PyTorch, FastAPI (Backend), Streamlit/Next.js (Frontend).
+- Database & Vector DB: Mysql
+
+# Yêu cầu sản phẩm tối thiểu (MVP)
+- Ô tìm kiếm cho phép nhập: "Người đàn ông đeo ba lô" và trả về các đoạn video tương ứng.
+
+# Kiến trúc hệ thống (System Architecture)
+
+
+# Hướng dẫn cài đặt (Installation)
