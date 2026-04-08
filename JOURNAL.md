@@ -72,36 +72,31 @@ Ghi lại hành trình xây dựng sản phẩm mỗi tuần — những gì đ�
 
 ---
 
-### Tuần 2 — 07/04/2026
+### Tuần 2 — 08/04/2026
 
-**Thành viên:** Nguyễn Văn A, Trần Thị B, Lê Văn C
+**Thành viên:** Bùi Văn Đạt, Dương Văn Hiệp, Cao Diệu Ly
 
 #### Đã làm
-- Thêm tool `read_file`, `write_file`, `list_dir`
-- Agent có thể tự đọc file trong repo và đề xuất refactor
-- Implement conversation memory: lưu 20 message gần nhất
-- Thử nghiệm: cho agent tự fix 3 bug đơn giản → thành công 2/3
+- Xác định scope cho bài toán.
+- Chốt xử dụng kĩ thuật Zero-shot learning.
+- Chốt chặt phạm vi đề bài và tính năng sẽ làm 
 
 #### Khó nhất tuần này
-- Memory bị lỗi khi conversation quá dài (vượt context window). Phải implement sliding window: chỉ giữ system prompt + 20 message gần nhất.
-- Agent đôi khi loop vô hạn khi tool trả lỗi — chưa có stop condition tốt.
+- Việc chọn bối cảnh nào để phạm vi bài toán hợp lý và khả thi hơn?
 
 #### AI tool đã dùng
 | Tool | Dùng để làm gì | Kết quả |
 |---|---|---|
-| Claude Code | Thiết kế sliding window memory, review code agent loop | Phát hiện thêm edge case khi tool throw exception |
-| Gemini CLI | So sánh approach lưu memory: file JSON vs SQLite | Tư vấn dùng JSON cho prototype, SQLite khi cần query |
+| ChatGpt | Tìm hiểu về bài toán| Phát hiện bài toán ở nhiều góc độ, hiểu về scope và pain point của nó|
 
 #### Học được
-- Context window là resource có hạn — cần thiết kế memory strategy từ sớm.
-- Stop condition quan trọng không kém gì agent logic: `max_iterations`, `no_new_tool_calls`, `explicit_done`.
-- AI agent review code của mình rất có ích: Claude Code tìm ra 2 potential null pointer mà mình bỏ sót.
-
+- Học được các kiến trúc AI, Prompt Engineering & Tool Calling
+- Pain point cần xác thực với nhu cầu thực tế không nên áp đặt thiên ý cá nhân
 #### Nếu làm lại, sẽ làm khác
-- Viết interface `Memory` trước, rồi implement sau — thay vì hard-code array từ đầu.
-- Log tất cả tool call ra file ngay từ đầu để debug dễ hơn.
+- Dùng AI nhiều hơn để xác nhận pain point. 
 
-#### Kế hoạch tuần tới
-- Fix vòng lặp vô hạn: thêm `max_iterations = 10`
-- Thêm tool `run_tests` để agent tự kiểm tra code sau khi sửa
-- Demo cho instructor cuối tuần
+#### Kế hoạch tuần này 
+- Xây dựng bài toán.
+- Xác nhận tool, công cụ làm bài toán 
+- Tìm data thị trước
+  
