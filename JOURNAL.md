@@ -55,6 +55,12 @@ Ghi lại hành trình xây dựng sản phẩm mỗi tuần — những gì đ�
 
 #### Kế hoạch tuần tới
 - Tìm hiểu bài toán thực tế. 
+  
+#### AI tool đã dùng
+| Tool | Dùng để làm gì | Kết quả |
+|---|---|---|
+| ChatGpt | Tìm hiểu về bài toán| Phát hiện bài toán ở nhiều góc độ, hiểu về scope và pain point của nó|
+| Perplexity | Research bài toán, thị trường các phương pháp xử lý bài toán | Tìm được bài toán có dữ liệu hợp lý |
 
 ---
 
