@@ -97,7 +97,3 @@ Ghi lại hành trình xây dựng sản phẩm mỗi tuần — những gì đ�
 - Hoàn thiện MVP (ổn định hơn, xử lý edge case cơ bản)
 - Tìm hoặc xây dựng bộ data tốt hơn phục vụ bài toán
 - Bắt đầu test với một số case thực tế
-
-
-
-  
