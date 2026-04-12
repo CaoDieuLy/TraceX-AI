@@ -18,7 +18,6 @@ PERSONPATH22_VISIBLE_PATTERNS = ("anno_visible*.json", "anno_visible*/*.json")
 PERSONPATH22_AMODAL_PATTERNS = ("anno_amodal*.json", "anno_amodal*/*.json")
 DEFAULT_PERSON_KEYWORDS = ("person", "pedestrian", "human", "surveillance", "track")
 PERSONPATH22_HTTP_ROOT = "https://tracking-dataset-eccv-2022.s3.amazonaws.com/dataset"
-DEFAULT_PERSONPATH22_KAGGLE_DATASET = "fatehmujtaba/amazon-tracking-dataset-personpath22"
 PERSONPATH22_ANNOTATION_OBJECTS = (
     ("annotation/anno_visible.zip", "annotations"),
     ("annotation/anno_amodal.zip", "annotations"),
@@ -27,6 +26,8 @@ PERSONPATH22_ANNOTATION_OBJECTS = (
 PERSONPATH22_VIDEO_OBJECTS = (
     ("raw_data/videos.zip", "raw_data"),
 )
+PERSONPATH22_CANONICAL_VIDEO_DIRS = ("raw_data", "videos", "video")
+PERSONPATH22_SPLITS = ("train", "val", "test")
 
 
 def _normalize_dataset_type(dataset_type: str) -> str:
@@ -44,16 +45,8 @@ def download_from_huggingface(
     include_videos: bool = False,
     include_docs: bool = False,
     dataset_type: str = DEFAULT_DATASET_TYPE,
-    transport: str = "https",
-    kaggle_dataset: str = DEFAULT_PERSONPATH22_KAGGLE_DATASET,
 ) -> Path:
     _normalize_dataset_type(dataset_type)
-    if transport == "kaggle":
-        return download_personpath22_kaggle(
-            dataset_root=dataset_root,
-            include_videos=include_videos,
-            dataset_handle=kaggle_dataset,
-        )
     return download_personpath22_public(
         dataset_root=dataset_root,
         include_videos=include_videos,
@@ -75,18 +68,80 @@ def download_personpath22_public(
         destination_dir.mkdir(parents=True, exist_ok=True)
         destination_path = destination_dir / Path(object_key).name
         if destination_path.exists() and not force:
+            if destination_path.suffix.lower() == ".zip":
+                if _personpath22_archive_already_materialized(dataset_root, destination_path.name):
+                    if not _is_valid_zip_archive(destination_path):
+                        destination_path.unlink(missing_ok=True)
+                    continue
+                if not _is_valid_zip_archive(destination_path):
+                    destination_path.unlink(missing_ok=True)
             _materialize_personpath22_archives(dataset_root, include_videos=include_videos)
-            continue
+            if destination_path.exists():
+                continue
         url = f"{PERSONPATH22_HTTP_ROOT}/{object_key}"
-        with urllib.request.urlopen(url) as response, destination_path.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
+        _download_url_to_path(url, destination_path)
+        if destination_path.suffix.lower() == ".zip" and not _is_valid_zip_archive(destination_path):
+            destination_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Downloaded archive is not a valid zip file: {destination_path}. "
+                "The download was likely interrupted. Rerun the command to fetch it again."
+            )
         _materialize_personpath22_archives(dataset_root, include_videos=include_videos)
     return dataset_root
 
 
+def _download_url_to_path(url: str, destination_path: Path) -> None:
+    temp_path = destination_path.with_name(f"{destination_path.name}.partial")
+    temp_path.unlink(missing_ok=True)
+    try:
+        with urllib.request.urlopen(url) as response, temp_path.open("wb") as handle:
+            expected_length = response.headers.get("Content-Length")
+            shutil.copyfileobj(response, handle, length=1024 * 1024 * 8)
+        if expected_length:
+            actual_length = temp_path.stat().st_size
+            if actual_length != int(expected_length):
+                raise RuntimeError(
+                    f"Download was incomplete for {destination_path.name}: expected {expected_length} bytes, "
+                    f"received {actual_length} bytes."
+                )
+        temp_path.replace(destination_path)
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _is_valid_zip_archive(zip_path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            archive.infolist()
+        return True
+    except (FileNotFoundError, zipfile.BadZipFile, OSError):
+        return False
+
+
+def _personpath22_archive_already_materialized(dataset_root: Path, archive_name: str) -> bool:
+    annotations_dir = dataset_root / "annotations"
+    raw_data_dir = dataset_root / "raw_data"
+    if archive_name == "anno_visible.zip":
+        return (annotations_dir / "anno_visible_2022").exists()
+    if archive_name == "anno_amodal.zip":
+        return (annotations_dir / "anno_amodal_2022").exists()
+    if archive_name == "videos.zip":
+        return any(raw_data_dir.rglob("*.mp4"))
+    return False
+
+
 def _extract_zip_archive(zip_path: Path) -> None:
-    with zipfile.ZipFile(zip_path) as archive:
-        archive.extractall(zip_path.parent)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            archive.extractall(zip_path.parent)
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(
+            f"Archive is not a valid zip file: {zip_path}. Delete it and rerun the download command."
+        ) from exc
     zip_path.unlink(missing_ok=True)
 
 
@@ -108,90 +163,6 @@ def _materialize_personpath22_archives(dataset_root: Path, include_videos: bool)
             _extract_zip_archive(video_archive)
 
 
-def _copy_file_if_needed(source_path: Path, destination_path: Path, force: bool) -> bool:
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    if destination_path.exists() and not force:
-        return False
-    shutil.copy2(source_path, destination_path)
-    return True
-
-
-def _copy_annotation_payload(source_root: Path, dataset_root: Path, force: bool) -> int:
-    copied = 0
-    destination_dir = dataset_root / "annotations"
-    for source_path in sorted(source_root.rglob("splits.json")):
-        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
-            copied += 1
-
-    for source_path in sorted(source_root.rglob("anno_visible*.zip")) + sorted(source_root.rglob("anno_amodal*.zip")):
-        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
-            copied += 1
-
-    for source_path in sorted(source_root.rglob("anno_visible*.json")) + sorted(source_root.rglob("anno_amodal*.json")):
-        if source_path.parent == source_root:
-            destination_path = destination_dir / source_path.name
-        elif source_path.parent.name.startswith(("anno_visible", "anno_amodal")):
-            destination_path = destination_dir / source_path.parent.name / source_path.name
-        else:
-            destination_path = destination_dir / source_path.name
-        if _copy_file_if_needed(source_path, destination_path, force):
-            copied += 1
-    return copied
-
-
-def _copy_video_payload(source_root: Path, dataset_root: Path, force: bool) -> int:
-    copied = 0
-    destination_dir = dataset_root / "raw_data"
-    for source_path in sorted(source_root.rglob("videos.zip")):
-        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
-            copied += 1
-    for source_path in sorted(source_root.rglob("*.mp4")):
-        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
-            copied += 1
-    return copied
-
-
-def download_personpath22_kaggle(
-    dataset_root: Path,
-    include_videos: bool = False,
-    force: bool = False,
-    dataset_handle: str = DEFAULT_PERSONPATH22_KAGGLE_DATASET,
-) -> Path:
-    try:
-        import kagglehub
-    except ImportError as exc:
-        raise RuntimeError(
-            "kagglehub is required for Kaggle downloads. Install it with `pip install kagglehub`."
-        ) from exc
-
-    dataset_root.mkdir(parents=True, exist_ok=True)
-    direct_download_root = dataset_root / "_kaggle_download"
-    direct_download_root.mkdir(parents=True, exist_ok=True)
-    downloaded_root = Path(
-        kagglehub.dataset_download(
-            dataset_handle,
-            force_download=force,
-            output_dir=str(direct_download_root),
-        )
-    ).expanduser().resolve()
-    copied_annotations = _copy_annotation_payload(downloaded_root, dataset_root, force=force)
-    copied_videos = 0
-    if include_videos:
-        copied_videos = _copy_video_payload(downloaded_root, dataset_root, force=force)
-
-    _materialize_personpath22_archives(dataset_root, include_videos=include_videos)
-
-    if copied_annotations == 0 and not list(_iter_personpath22_annotation_files(dataset_root)):
-        raise FileNotFoundError(
-            f"No PersonPath22 annotation files were found in the Kaggle dataset cache: {downloaded_root}"
-        )
-    if include_videos and copied_videos == 0 and not any((dataset_root / 'raw_data').rglob("*.mp4")):
-        print(
-            "Warning: Kaggle download finished but no .mp4 files were imported into raw_data yet."
-        )
-    return dataset_root
-
-
 def _matches_filters(value: str, wanted_values: set[str]) -> bool:
     return not wanted_values or value in wanted_values
 
@@ -209,20 +180,63 @@ def iter_label_files(
             yield annotation_path
         return
 
-    for gt_path in sorted(dataset_root.rglob("gt.txt")):
+    for gt_path in _iter_personpath22_gt_files(dataset_root):
         yield gt_path
 
 
+def _iter_personpath22_annotation_roots(dataset_root: Path) -> Iterable[Path]:
+    annotations_root = dataset_root / "annotations"
+    if annotations_root.is_dir():
+        yield annotations_root
+    if dataset_root.name == "annotations":
+        yield dataset_root
+
+
+def _iter_personpath22_gt_files(dataset_root: Path) -> Iterable[Path]:
+    for split in PERSONPATH22_SPLITS:
+        split_root = dataset_root / split
+        if not split_root.is_dir():
+            continue
+        for gt_path in sorted(split_root.rglob("gt.txt")):
+            if gt_path.is_file():
+                yield gt_path
+
+
 def _iter_personpath22_annotation_files(dataset_root: Path) -> Iterable[Path]:
+    roots = list(_iter_personpath22_annotation_roots(dataset_root))
+    if not roots:
+        return
     for patterns in (PERSONPATH22_VISIBLE_PATTERNS, PERSONPATH22_AMODAL_PATTERNS):
         matches: list[Path] = []
-        for pattern in patterns:
-            matches.extend(sorted(dataset_root.rglob(pattern)))
+        for root in roots:
+            for pattern in patterns:
+                matches.extend(sorted(root.rglob(pattern)))
         if matches:
             deduped = sorted({path for path in matches if path.is_file() and path.suffix.lower() == ".json"})
             for path in deduped:
                 yield path
             return
+
+
+def _iter_personpath22_video_files(dataset_root: Path) -> Iterable[Path]:
+    yielded: set[Path] = set()
+    for directory_name in PERSONPATH22_CANONICAL_VIDEO_DIRS:
+        video_root = dataset_root / directory_name
+        if not video_root.is_dir():
+            continue
+        for video_path in sorted(video_root.rglob("*.mp4")):
+            if video_path.is_file() and video_path not in yielded:
+                yielded.add(video_path)
+                yield video_path
+
+    for split in PERSONPATH22_SPLITS:
+        split_root = dataset_root / split
+        if not split_root.is_dir():
+            continue
+        for video_path in sorted(split_root.rglob("*.mp4")):
+            if video_path.is_file() and video_path not in yielded:
+                yielded.add(video_path)
+                yield video_path
 
 
 def iter_dataset_source_files(
@@ -239,7 +253,7 @@ def iter_dataset_source_files(
             yield annotation_path
 
     wanted_locations = set(locations or [])
-    for video_path in sorted(dataset_root.rglob("*.mp4")):
+    for video_path in _iter_personpath22_video_files(dataset_root):
         stem = video_path.stem
         if wanted_locations and stem not in wanted_locations and video_path.parent.name not in wanted_locations:
             continue

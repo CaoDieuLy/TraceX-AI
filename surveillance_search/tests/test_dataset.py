@@ -194,6 +194,31 @@ class DatasetParsingTests(unittest.TestCase):
 
         shutil.rmtree(temp_root, ignore_errors=True)
 
+    def test_iter_label_files_ignores_noncanonical_download_cache(self) -> None:
+        temp_root = Path(__file__).resolve().parents[1] / ".tmp-tests"
+        case_root = temp_root / "personpath22-ignore-cache"
+        shutil.rmtree(case_root, ignore_errors=True)
+
+        annotation_dir = case_root / "annotations" / "anno_visible_2022"
+        annotation_dir.mkdir(parents=True, exist_ok=True)
+        canonical_path = annotation_dir / "uid_vid_00000.mp4.json"
+        canonical_path.write_text(
+            json.dumps({"entities": [], "metadata": {"data_path": "uid_vid_00000.mp4"}}),
+            encoding="utf-8",
+        )
+
+        stray_dir = case_root / "_kaggle_download" / "annotations" / "anno_visible_2022"
+        stray_dir.mkdir(parents=True, exist_ok=True)
+        (stray_dir / "wrong.mp4.json").write_text(
+            json.dumps({"entities": [], "metadata": {"data_path": "wrong.mp4"}}),
+            encoding="utf-8",
+        )
+
+        discovered = list(iter_label_files(case_root, dataset_type="personpath22"))
+        self.assertEqual(discovered, [canonical_path])
+
+        shutil.rmtree(temp_root, ignore_errors=True)
+
     def test_attach_existing_visual_assets(self) -> None:
         temp_root = Path(__file__).resolve().parents[1] / ".tmp-tests"
         case_root = temp_root / "case-assets"
