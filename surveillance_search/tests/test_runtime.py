@@ -29,6 +29,30 @@ class RuntimeTests(unittest.TestCase):
 
         shutil.rmtree(temp_root, ignore_errors=True)
 
+    def test_snapshot_dataset_sources_ignores_noncanonical_cache_files(self) -> None:
+        temp_root = Path(__file__).resolve().parents[1] / ".tmp-tests"
+        case_root = temp_root / "runtime-personpath22-ignore-cache"
+        shutil.rmtree(case_root, ignore_errors=True)
+
+        annotation_dir = case_root / "data" / "annotations"
+        annotation_dir.mkdir(parents=True, exist_ok=True)
+        raw_dir = case_root / "data" / "raw_data"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (annotation_dir / "anno_visible_2022.json").write_text(
+            json.dumps({"videos": [], "images": [], "annotations": []}),
+            encoding="utf-8",
+        )
+        (raw_dir / "cam_01.mp4").write_bytes(b"fake-video")
+
+        stray_dir = case_root / "data" / "_kaggle_download" / "raw_data"
+        stray_dir.mkdir(parents=True, exist_ok=True)
+        (stray_dir / "wrong.mp4").write_bytes(b"wrong-video")
+
+        entries = snapshot_dataset_sources(case_root / "data", dataset_type="personpath22")
+        self.assertEqual([entry["path"] for entry in entries], ["annotations/anno_visible_2022.json", "raw_data/cam_01.mp4"])
+
+        shutil.rmtree(temp_root, ignore_errors=True)
+
     def test_save_and_load_runtime_manifest(self) -> None:
         temp_root = Path(__file__).resolve().parents[1] / ".tmp-tests"
         case_root = temp_root / "manifest-case"

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
-import sys
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -53,14 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--transport",
-        choices=("auto", "aws", "https", "kaggle"),
+        choices=("auto", "aws", "https"),
         default="auto",
         help="Download transport. `auto` prefers AWS CLI when available, otherwise falls back to HTTPS.",
-    )
-    parser.add_argument(
-        "--kaggle-dataset",
-        default="fatehmujtaba/amazon-tracking-dataset-personpath22",
-        help="Kaggle dataset handle used when --transport kaggle.",
     )
     return parser
 
@@ -127,23 +121,6 @@ def extract_zip(zip_path: Path, destination_dir: Path, keep_zip: bool) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if args.transport == "kaggle":
-        project_root = Path(__file__).resolve().parents[1]
-        if str(project_root) not in sys.path:
-            sys.path.insert(0, str(project_root))
-        from surveillance_search.dataset import download_personpath22_kaggle
-
-        output_dir = Path(args.output_dir).expanduser().resolve()
-        download_personpath22_kaggle(
-            dataset_root=output_dir,
-            include_videos=args.mode == "full",
-            force=args.force,
-            dataset_handle=args.kaggle_dataset,
-        )
-        print("\nDone.")
-        print(f"Dataset root: {output_dir}")
-        return 0
-
     aws_bin = None
     if args.transport in {"auto", "aws"}:
         try:

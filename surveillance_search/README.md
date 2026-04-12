@@ -8,9 +8,8 @@ This folder contains a full implementation path for Team 119:
 - sparse + dense + CLIP fusion
 - FastAPI backend
 - Streamlit demo UI
-- selective download from Hugging Face or public archives
-
-The project can index either the original LAVA traffic dataset or a person-first tracking dataset such as PersonPath22. It treats the problem as a search engine, not as an object detection training task.
+- selective download from the official public PersonPath22 archive
+The current repo layout and CLI are standardized around the original PersonPath22 release. It treats the problem as a search engine, not as an object detection training task.
 
 ## Why LAVA and PersonPath22
 
@@ -65,12 +64,22 @@ pip install -r requirements.txt
 
 By default the CLI now keeps everything under `./data/`:
 
-- `./data/lava/` for the LAVA dataset
-- `./data/personpath22/` for PersonPath22
+- `./data/personpath22/` for the original PersonPath22 dataset
 - `./data/artifacts/` for generated indexes, manifests, and visual assets
 
-It also still supports the older layouts `./data/<location>/...` and `./data/Lava_Dataset/...` automatically.
-The default dataset type is `lava`. To use PersonPath22, pass `--dataset-type personpath22`.
+Supported PersonPath22 layout:
+
+```text
+data/personpath22/
+├── annotations/
+│   ├── anno_visible_2022/...
+│   ├── anno_amodal_2022/...
+│   └── splits.json
+└── raw_data/
+    └── *.mp4
+```
+
+The default dataset type is `personpath22`.
 
 Recommended strongest setup:
 
@@ -120,42 +129,42 @@ Optional:
 
 ## Full pipeline
 
-### 1. Download selected data from Hugging Face
+### 1. Download the original PersonPath22 dataset
 
-Labels only:
-
-```powershell
-python -m surveillance_search download --locations amsterdam --splits test
-```
-
-Labels + videos:
+Annotations only:
 
 ```powershell
-python -m surveillance_search download --locations amsterdam --splits test --include-videos
+python -m surveillance_search download
 ```
 
-`download` is only implemented for `--dataset-type lava`. PersonPath22 should be downloaded manually and pointed to with `--dataset-root`.
+Annotations + videos:
+
+```powershell
+python -m surveillance_search download --include-videos
+```
+
+This downloads the official public archive into the repo-supported layout under `data/personpath22/`.
 
 ### 1b. One-command bootstrap
 
 For an end-to-end production-style setup, use:
 
 ```powershell
-python -m surveillance_search bootstrap --locations amsterdam --splits test --include-videos --profile strongest
+python -m surveillance_search bootstrap --include-videos --profile strongest
 ```
 
 This command:
 
-- downloads the selected split
+- downloads the official PersonPath22 payload if the canonical local layout is still missing
 - builds searchable moments
 - extracts visual assets if videos exist
 - creates the runtime manifest
 - writes the final bundle under `data/artifacts/full/`
 
-For PersonPath22, use the same command shape but pass the dataset type and local root:
+To point at an existing local copy of the original layout:
 
 ```powershell
-python -m surveillance_search bootstrap --dataset-type personpath22 --dataset-root ".\personpath22" --profile strongest
+python -m surveillance_search bootstrap --dataset-root ".\data\personpath22" --profile strongest
 ```
 
 ### 2. Prepare visual assets
@@ -163,7 +172,7 @@ python -m surveillance_search bootstrap --dataset-type personpath22 --dataset-ro
 This extracts a few representative full frames and object crops per moment.
 
 ```powershell
-python -m surveillance_search prepare-assets --locations amsterdam --splits test
+python -m surveillance_search prepare-assets --dataset-root ".\data\personpath22"
 ```
 
 ### 3. Build the strongest bundle
@@ -176,13 +185,13 @@ This builds:
 - hybrid-ready bundle metadata
 
 ```powershell
-python -m surveillance_search build --profile strongest --locations amsterdam --splits test
+python -m surveillance_search build --profile strongest
 ```
 
-PersonPath22 example:
+Build against an explicit local PersonPath22 root:
 
 ```powershell
-python -m surveillance_search build --dataset-type personpath22 --dataset-root ".\personpath22" --profile strongest
+python -m surveillance_search build --dataset-root ".\data\personpath22" --profile strongest
 ```
 
 Fully end-to-end person-query build:

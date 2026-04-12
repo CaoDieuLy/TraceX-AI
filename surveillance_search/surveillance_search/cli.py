@@ -21,7 +21,7 @@ from .config import (
     default_data_root,
     default_visual_root,
 )
-from .dataset import DEFAULT_PERSONPATH22_KAGGLE_DATASET, collect_moments, download_from_huggingface
+from .dataset import collect_moments, download_from_huggingface
 from .enrichment import apply_enrichment
 from .enrichment_inference import infer_and_write_enrichment
 from .indexer import build_search_bundle, search_index
@@ -103,7 +103,14 @@ def resolve_sentence_model_name(args: argparse.Namespace) -> str:
 def _personpath22_dataset_present(dataset_root: Path) -> bool:
     if not dataset_root.exists():
         return False
-    return any(dataset_root.rglob("*.json")) or any(dataset_root.rglob("gt.txt"))
+    annotations_root = dataset_root / "annotations"
+    if annotations_root.is_dir() and any(annotations_root.rglob("*.json")):
+        return True
+    for split in ("train", "val", "test"):
+        split_root = dataset_root / split
+        if split_root.is_dir() and any(split_root.rglob("gt.txt")):
+            return True
+    return False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -117,8 +124,6 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser.add_argument("--splits", default=None, help="Comma-separated list")
     download_parser.add_argument("--include-videos", action="store_true")
     download_parser.add_argument("--include-docs", action="store_true")
-    download_parser.add_argument("--download-transport", choices=("https", "kaggle"), default="https")
-    download_parser.add_argument("--kaggle-dataset", default=DEFAULT_PERSONPATH22_KAGGLE_DATASET)
 
     bootstrap_parser = subparsers.add_parser("bootstrap", help="Download selected data and build a production-ready bundle")
     bootstrap_parser.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
@@ -132,8 +137,6 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--profile", choices=("strongest", "balanced", "text-only", "lite"), default=DEFAULT_PROFILE)
     bootstrap_parser.add_argument("--include-videos", action="store_true")
     bootstrap_parser.add_argument("--include-docs", action="store_true")
-    bootstrap_parser.add_argument("--download-transport", choices=("https", "kaggle"), default="https")
-    bootstrap_parser.add_argument("--kaggle-dataset", default=DEFAULT_PERSONPATH22_KAGGLE_DATASET)
     bootstrap_parser.add_argument("--max-assets-per-moment", type=int, default=DEFAULT_MAX_ASSETS_PER_MOMENT)
     bootstrap_parser.add_argument("--crop-padding", type=float, default=0.08)
     bootstrap_parser.add_argument("--sentence-model", default=DEFAULT_SENTENCE_MODEL)
@@ -343,8 +346,6 @@ def command_download(args: argparse.Namespace) -> None:
         splits=splits,
         include_videos=args.include_videos,
         include_docs=args.include_docs,
-        transport=args.download_transport,
-        kaggle_dataset=args.kaggle_dataset,
     )
     print(f"Downloaded selected files into {dataset_root}")
 
@@ -358,7 +359,7 @@ def command_bootstrap(args: argparse.Namespace) -> None:
     if has_annotations and (not needs_videos or has_videos):
         print("Skipping download step for PersonPath22 because the requested local data already exists.")
     else:
-        print("Downloading public PersonPath22 files into the local dataset root...")
+        print("Downloading the original public PersonPath22 files into the local dataset root...")
         download_from_huggingface(
             dataset_type=args.dataset_type,
             dataset_root=dataset_root,
@@ -367,8 +368,6 @@ def command_bootstrap(args: argparse.Namespace) -> None:
             splits=[],
             include_videos=args.include_videos,
             include_docs=False,
-            transport=args.download_transport,
-            kaggle_dataset=args.kaggle_dataset,
         )
     manifest = rebuild_runtime_bundle(_runtime_config_from_args(args))
     print(

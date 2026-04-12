@@ -1,7 +1,7 @@
 import unittest
 from argparse import Namespace
 
-from surveillance_search.cli import parse_weights, resolve_profile
+from surveillance_search.cli import build_parser, parse_weights, resolve_profile
 from surveillance_search.indexer import (
     _ranked_indices_with_person_filter,
     _require_person_candidates,
@@ -34,6 +34,11 @@ class CliHelperTests(unittest.TestCase):
             Namespace(no_sparse=False, no_dense=True, no_clip=False),
         )
         self.assertEqual(profile, (True, False, True))
+
+    def test_download_cli_no_longer_accepts_kaggle_transport(self) -> None:
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["download", "--download-transport", "kaggle"])
 
     def test_person_query_expansion(self) -> None:
         expanded = _expand_query_text("person waiting near road", "person")
