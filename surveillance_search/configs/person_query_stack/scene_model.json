@@ -2,8 +2,8 @@
   "name": "scene_relation_baseline",
   "strategy": "clip_zero_shot_baseline",
   "supervision_dataset": "BDD100K",
-  "prepared_dataset_root": "/teamspace/studios/this_studio/project_lab/surveillance_search/data/prepared/bdd100k",
-  "output_artifact": "/teamspace/studios/this_studio/project_lab/surveillance_search/data/artifacts/models/scene_baseline.json",
+  "prepared_dataset_root": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\prepared\\bdd100k",
+  "output_artifact": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\artifacts\\models\\scene_baseline.json",
   "labels_of_interest": [
     "near_road",
     "drivable_area"

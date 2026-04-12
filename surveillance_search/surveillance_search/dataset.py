@@ -3,6 +3,9 @@ from __future__ import annotations
 import csv
 import json
 import re
+import shutil
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Iterable
 
@@ -14,11 +17,21 @@ TOKEN_RE = re.compile(r"[a-z0-9]+")
 PERSONPATH22_VISIBLE_PATTERNS = ("anno_visible*.json", "anno_visible*/*.json")
 PERSONPATH22_AMODAL_PATTERNS = ("anno_amodal*.json", "anno_amodal*/*.json")
 DEFAULT_PERSON_KEYWORDS = ("person", "pedestrian", "human", "surveillance", "track")
+PERSONPATH22_HTTP_ROOT = "https://tracking-dataset-eccv-2022.s3.amazonaws.com/dataset"
+DEFAULT_PERSONPATH22_KAGGLE_DATASET = "fatehmujtaba/amazon-tracking-dataset-personpath22"
+PERSONPATH22_ANNOTATION_OBJECTS = (
+    ("annotation/anno_visible.zip", "annotations"),
+    ("annotation/anno_amodal.zip", "annotations"),
+    ("annotation/splits.json", "annotations"),
+)
+PERSONPATH22_VIDEO_OBJECTS = (
+    ("raw_data/videos.zip", "raw_data"),
+)
 
 
 def _normalize_dataset_type(dataset_type: str) -> str:
     normalized = str(dataset_type or DEFAULT_DATASET_TYPE).strip().lower()
-    if normalized not in {"lava", "personpath22"}:
+    if normalized != "personpath22":
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
     return normalized
 
@@ -31,40 +44,151 @@ def download_from_huggingface(
     include_videos: bool = False,
     include_docs: bool = False,
     dataset_type: str = DEFAULT_DATASET_TYPE,
+    transport: str = "https",
+    kaggle_dataset: str = DEFAULT_PERSONPATH22_KAGGLE_DATASET,
 ) -> Path:
-    dataset_type = _normalize_dataset_type(dataset_type)
-    if dataset_type != "lava":
-        raise RuntimeError(
-            "Automatic download is only implemented for the legacy LAVA Hugging Face dataset. "
-            "For PersonPath22, download the dataset manually and point --dataset-root at the extracted files."
+    _normalize_dataset_type(dataset_type)
+    if transport == "kaggle":
+        return download_personpath22_kaggle(
+            dataset_root=dataset_root,
+            include_videos=include_videos,
+            dataset_handle=kaggle_dataset,
         )
+    return download_personpath22_public(
+        dataset_root=dataset_root,
+        include_videos=include_videos,
+    )
 
+
+def download_personpath22_public(
+    dataset_root: Path,
+    include_videos: bool = False,
+    force: bool = False,
+) -> Path:
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    objects = list(PERSONPATH22_ANNOTATION_OBJECTS)
+    if include_videos:
+        objects.extend(PERSONPATH22_VIDEO_OBJECTS)
+
+    for object_key, relative_dir in objects:
+        destination_dir = dataset_root / relative_dir
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination_path = destination_dir / Path(object_key).name
+        if destination_path.exists() and not force:
+            _materialize_personpath22_archives(dataset_root, include_videos=include_videos)
+            continue
+        url = f"{PERSONPATH22_HTTP_ROOT}/{object_key}"
+        with urllib.request.urlopen(url) as response, destination_path.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+        _materialize_personpath22_archives(dataset_root, include_videos=include_videos)
+    return dataset_root
+
+
+def _extract_zip_archive(zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path) as archive:
+        archive.extractall(zip_path.parent)
+    zip_path.unlink(missing_ok=True)
+
+
+def _materialize_personpath22_archives(dataset_root: Path, include_videos: bool) -> None:
+    annotations_dir = dataset_root / "annotations"
+    for archive_name, extracted_dir_name in (
+        ("anno_visible.zip", "anno_visible_2022"),
+        ("anno_amodal.zip", "anno_amodal_2022"),
+    ):
+        archive_path = annotations_dir / archive_name
+        extracted_dir = annotations_dir / extracted_dir_name
+        if archive_path.exists() and not extracted_dir.exists():
+            _extract_zip_archive(archive_path)
+
+    if include_videos:
+        raw_data_dir = dataset_root / "raw_data"
+        video_archive = raw_data_dir / "videos.zip"
+        if video_archive.exists() and not any(raw_data_dir.rglob("*.mp4")):
+            _extract_zip_archive(video_archive)
+
+
+def _copy_file_if_needed(source_path: Path, destination_path: Path, force: bool) -> bool:
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    if destination_path.exists() and not force:
+        return False
+    shutil.copy2(source_path, destination_path)
+    return True
+
+
+def _copy_annotation_payload(source_root: Path, dataset_root: Path, force: bool) -> int:
+    copied = 0
+    destination_dir = dataset_root / "annotations"
+    for source_path in sorted(source_root.rglob("splits.json")):
+        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
+            copied += 1
+
+    for source_path in sorted(source_root.rglob("anno_visible*.zip")) + sorted(source_root.rglob("anno_amodal*.zip")):
+        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
+            copied += 1
+
+    for source_path in sorted(source_root.rglob("anno_visible*.json")) + sorted(source_root.rglob("anno_amodal*.json")):
+        if source_path.parent == source_root:
+            destination_path = destination_dir / source_path.name
+        elif source_path.parent.name.startswith(("anno_visible", "anno_amodal")):
+            destination_path = destination_dir / source_path.parent.name / source_path.name
+        else:
+            destination_path = destination_dir / source_path.name
+        if _copy_file_if_needed(source_path, destination_path, force):
+            copied += 1
+    return copied
+
+
+def _copy_video_payload(source_root: Path, dataset_root: Path, force: bool) -> int:
+    copied = 0
+    destination_dir = dataset_root / "raw_data"
+    for source_path in sorted(source_root.rglob("videos.zip")):
+        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
+            copied += 1
+    for source_path in sorted(source_root.rglob("*.mp4")):
+        if _copy_file_if_needed(source_path, destination_dir / source_path.name, force):
+            copied += 1
+    return copied
+
+
+def download_personpath22_kaggle(
+    dataset_root: Path,
+    include_videos: bool = False,
+    force: bool = False,
+    dataset_handle: str = DEFAULT_PERSONPATH22_KAGGLE_DATASET,
+) -> Path:
     try:
-        from huggingface_hub import snapshot_download
+        import kagglehub
     except ImportError as exc:
         raise RuntimeError(
-            "huggingface_hub is not installed. Run `pip install -r requirements.txt` first."
+            "kagglehub is required for Kaggle downloads. Install it with `pip install kagglehub`."
         ) from exc
 
-    allow_patterns: list[str] = []
-    for location in locations:
-        for split in splits:
-            prefix = f"{location}/{split}"
-            allow_patterns.append(f"{prefix}/label.json")
-            if include_videos:
-                allow_patterns.append(f"{prefix}/*.mp4")
-
-    if include_docs:
-        allow_patterns.extend(["README*", "*.md"])
-
     dataset_root.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        local_dir=str(dataset_root),
-        allow_patterns=allow_patterns,
-        local_dir_use_symlinks=False,
-    )
+    direct_download_root = dataset_root / "_kaggle_download"
+    direct_download_root.mkdir(parents=True, exist_ok=True)
+    downloaded_root = Path(
+        kagglehub.dataset_download(
+            dataset_handle,
+            force_download=force,
+            output_dir=str(direct_download_root),
+        )
+    ).expanduser().resolve()
+    copied_annotations = _copy_annotation_payload(downloaded_root, dataset_root, force=force)
+    copied_videos = 0
+    if include_videos:
+        copied_videos = _copy_video_payload(downloaded_root, dataset_root, force=force)
+
+    _materialize_personpath22_archives(dataset_root, include_videos=include_videos)
+
+    if copied_annotations == 0 and not list(_iter_personpath22_annotation_files(dataset_root)):
+        raise FileNotFoundError(
+            f"No PersonPath22 annotation files were found in the Kaggle dataset cache: {downloaded_root}"
+        )
+    if include_videos and copied_videos == 0 and not any((dataset_root / 'raw_data').rglob("*.mp4")):
+        print(
+            "Warning: Kaggle download finished but no .mp4 files were imported into raw_data yet."
+        )
     return dataset_root
 
 
@@ -78,20 +202,7 @@ def iter_label_files(
     splits: list[str] | None = None,
     dataset_type: str = DEFAULT_DATASET_TYPE,
 ) -> Iterable[Path]:
-    dataset_type = _normalize_dataset_type(dataset_type)
-    if dataset_type == "lava":
-        wanted_locations = set(locations or [])
-        wanted_splits = set(splits or [])
-        for label_path in sorted(dataset_root.rglob("label.json")):
-            location = label_path.parent.parent.name
-            split = label_path.parent.name
-            if not _matches_filters(location, wanted_locations):
-                continue
-            if not _matches_filters(split, wanted_splits):
-                continue
-            yield label_path
-        return
-
+    _normalize_dataset_type(dataset_type)
     annotation_files = list(_iter_personpath22_annotation_files(dataset_root))
     if annotation_files:
         for annotation_path in annotation_files:
@@ -120,15 +231,7 @@ def iter_dataset_source_files(
     locations: list[str] | None = None,
     splits: list[str] | None = None,
 ) -> Iterable[Path]:
-    dataset_type = _normalize_dataset_type(dataset_type)
-    if dataset_type == "lava":
-        for label_path in iter_label_files(dataset_root, locations=locations, splits=splits, dataset_type=dataset_type):
-            yield label_path
-            video_path = _video_path_for_label(label_path)
-            if video_path.exists():
-                yield video_path
-        return
-
+    _normalize_dataset_type(dataset_type)
     yielded: set[Path] = set()
     for annotation_path in iter_label_files(dataset_root, dataset_type=dataset_type):
         if annotation_path not in yielded:
@@ -145,48 +248,6 @@ def iter_dataset_source_files(
             yield video_path
 
 
-def load_label(label_path: Path) -> list[list[dict]]:
-    try:
-        with label_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except json.JSONDecodeError as exc:
-        file_size = label_path.stat().st_size
-        tail = label_path.read_text(encoding="utf-8", errors="replace")[-160:].strip()
-        truncated_hint = ""
-        if tail and not tail.endswith(("]", "}")):
-            truncated_hint = " The file appears to be truncated near the end."
-        raise ValueError(
-            "Failed to parse label file "
-            f"{label_path} at line {exc.lineno}, column {exc.colno} "
-            f"(char {exc.pos}). Size: {file_size} bytes.{truncated_hint} "
-            f"Tail preview: {tail!r}"
-        ) from exc
-
-
-def normalize_captions(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return [str(value).strip()]
-
-
-def _video_path_for_label(label_path: Path) -> Path:
-    split_name = label_path.parent.name
-    return label_path.with_name(f"{split_name}.mp4")
-
-
-def _bbox_from_object(raw_object: dict) -> list[int]:
-    return [
-        int(raw_object.get("left", 0)),
-        int(raw_object.get("top", 0)),
-        int(raw_object.get("right", 0)),
-        int(raw_object.get("bottom", 0)),
-    ]
-
-
 def _bbox_xywh_to_xyxy(raw_bbox: list[float] | tuple[float, ...]) -> list[int]:
     if len(raw_bbox) < 4:
         return [0, 0, 0, 0]
@@ -200,98 +261,6 @@ def _bbox_xywh_to_xyxy(raw_bbox: list[float] | tuple[float, ...]) -> list[int]:
         int(round(left + width)),
         int(round(top + height)),
     ]
-
-
-def _build_keywords(captions: list[str], location: str, split: str, track_id: str) -> list[str]:
-    text = " ".join(captions + [location, split, track_id]).lower()
-    return sorted(set(TOKEN_RE.findall(text)))
-
-
-def _build_text(captions: list[str], location: str, split: str, track_id: str) -> str:
-    caption_text = ", ".join(captions) if captions else "unlabeled object"
-    return (
-        f"{caption_text}. "
-        f"traffic scene at {location}. "
-        f"dataset split {split}. "
-        f"tracked object {track_id}."
-    )
-
-
-def build_moments_from_label(
-    label_path: Path,
-    fps: float = DEFAULT_FPS,
-    group_by_track: bool = True,
-) -> list[Moment]:
-    frames = load_label(label_path)
-    location = label_path.parent.parent.name
-    split = label_path.parent.name
-    video_path = _video_path_for_label(label_path)
-
-    grouped: dict[str, dict] = {}
-
-    for frame_idx, objects in enumerate(frames):
-        for object_idx, raw_object in enumerate(objects):
-            track_id_value = raw_object.get("track_id")
-            if group_by_track and track_id_value is not None:
-                track_key = str(track_id_value)
-                moment_id = f"{location}:{split}:track:{track_key}"
-            else:
-                track_key = f"frame-{frame_idx}-obj-{object_idx}"
-                moment_id = f"{location}:{split}:{track_key}"
-
-            bbox = _bbox_from_object(raw_object)
-            captions = normalize_captions(raw_object.get("caption"))
-
-            if moment_id not in grouped:
-                grouped[moment_id] = {
-                    "id": moment_id,
-                    "location": location,
-                    "split": split,
-                    "video_path": str(video_path),
-                    "label_path": str(label_path),
-                    "track_id": track_key,
-                    "start_frame": frame_idx,
-                    "end_frame": frame_idx,
-                    "captions": set(captions),
-                    "representative_bbox": bbox,
-                    "sample_frames": [frame_idx],
-                }
-                continue
-
-            entry = grouped[moment_id]
-            entry["end_frame"] = frame_idx
-            entry["captions"].update(captions)
-            if len(entry["sample_frames"]) < 8 and frame_idx not in entry["sample_frames"]:
-                entry["sample_frames"].append(frame_idx)
-
-    moments: list[Moment] = []
-    for payload in grouped.values():
-        captions = sorted(payload["captions"])
-        keywords = _build_keywords(captions, payload["location"], payload["split"], payload["track_id"])
-        start_second = payload["start_frame"] / fps
-        end_second = (payload["end_frame"] + 1) / fps
-        moments.append(
-            Moment(
-                id=payload["id"],
-                location=payload["location"],
-                split=payload["split"],
-                video_path=payload["video_path"],
-                label_path=payload["label_path"],
-                track_id=payload["track_id"],
-                fps=float(fps),
-                start_frame=payload["start_frame"],
-                end_frame=payload["end_frame"],
-                start_second=round(start_second, 3),
-                end_second=round(end_second, 3),
-                captions=captions,
-                representative_bbox=payload["representative_bbox"],
-                sample_frames=payload["sample_frames"],
-                text=_build_text(captions, payload["location"], payload["split"], payload["track_id"]),
-                keywords=keywords,
-            )
-        )
-
-    return sorted(moments, key=lambda item: (item.location, item.split, item.start_frame, item.id))
 
 
 def _load_personpath22_annotation(annotation_path: Path) -> dict:
@@ -882,18 +851,6 @@ def collect_moments(
     dataset_type: str = DEFAULT_DATASET_TYPE,
 ) -> list[Moment]:
     dataset_type = _normalize_dataset_type(dataset_type)
-    if dataset_type == "lava":
-        moments: list[Moment] = []
-        for label_path in iter_label_files(dataset_root, locations=locations, splits=splits, dataset_type=dataset_type):
-            moments.extend(
-                build_moments_from_label(
-                    label_path,
-                    fps=fps,
-                    group_by_track=group_by_track,
-                )
-            )
-        return apply_enrichment(moments, dataset_root)
-
     wanted_locations = set(locations or [])
     wanted_splits = set(splits or [])
     moments = []
