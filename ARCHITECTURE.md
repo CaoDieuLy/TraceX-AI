@@ -1,4 +1,4 @@
-﻿# Architecture
+﻿﻿# Architecture
 
 Tài liệu này mô tả chi tiết kiến trúc kỹ thuật của hệ thống `CCTV Person Search Engine`.
 
@@ -307,4 +307,3 @@ Nếu hệ thống cần hỗ trợ nhiều camera hơn hoặc nhiều user hơn
 - huấn luyện model tùy chỉnh nặng
 - phụ thuộc cloud liên tục để hệ thống hoạt động
 - đảm bảo nhận dạng danh tính tuyệt đối mà không có bước xác nhận của người dùng
-

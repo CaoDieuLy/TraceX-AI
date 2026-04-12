@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.tmp-tests/
+.streamlit-cache/
+data/
+artifacts/
+clips/
+**/images/
+*.mp4
