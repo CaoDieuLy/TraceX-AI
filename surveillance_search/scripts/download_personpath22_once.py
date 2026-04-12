@@ -4,10 +4,12 @@ import argparse
 import shutil
 import subprocess
 import sys
+import urllib.request
 import zipfile
 from pathlib import Path
 
 S3_ROOT = "s3://tracking-dataset-eccv-2022/dataset"
+HTTP_ROOT = "https://tracking-dataset-eccv-2022.s3.amazonaws.com/dataset"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data" / "personpath22"
 ANNOTATION_OBJECTS = (
     ("annotation/anno_visible.zip", "annotations"),
@@ -49,6 +51,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep zip archives after extraction.",
     )
+    parser.add_argument(
+        "--transport",
+        choices=("auto", "aws", "https", "kaggle"),
+        default="auto",
+        help="Download transport. `auto` prefers AWS CLI when available, otherwise falls back to HTTPS.",
+    )
+    parser.add_argument(
+        "--kaggle-dataset",
+        default="fatehmujtaba/amazon-tracking-dataset-personpath22",
+        help="Kaggle dataset handle used when --transport kaggle.",
+    )
     return parser
 
 
@@ -89,6 +102,20 @@ def download_object(aws_bin: str, s3_key: str, destination_dir: Path, force: boo
     return destination_path
 
 
+def download_object_https(s3_key: str, destination_dir: Path, force: bool) -> Path:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination_path = destination_dir / Path(s3_key).name
+    if destination_path.exists() and not force:
+        print(f"Skipping existing file: {destination_path}")
+        return destination_path
+
+    url = f"{HTTP_ROOT}/{s3_key}"
+    print(f"Downloading {url} -> {destination_path}")
+    with urllib.request.urlopen(url) as response, destination_path.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+    return destination_path
+
+
 def extract_zip(zip_path: Path, destination_dir: Path, keep_zip: bool) -> None:
     print(f"Extracting {zip_path} -> {destination_dir}")
     destination_dir.mkdir(parents=True, exist_ok=True)
@@ -100,13 +127,39 @@ def extract_zip(zip_path: Path, destination_dir: Path, keep_zip: bool) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
-    aws_bin = require_aws_cli()
+    if args.transport == "kaggle":
+        project_root = Path(__file__).resolve().parents[1]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        from surveillance_search.dataset import download_personpath22_kaggle
+
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        download_personpath22_kaggle(
+            dataset_root=output_dir,
+            include_videos=args.mode == "full",
+            force=args.force,
+            dataset_handle=args.kaggle_dataset,
+        )
+        print("\nDone.")
+        print(f"Dataset root: {output_dir}")
+        return 0
+
+    aws_bin = None
+    if args.transport in {"auto", "aws"}:
+        try:
+            aws_bin = require_aws_cli()
+        except RuntimeError:
+            if args.transport == "aws":
+                raise
     output_dir = Path(args.output_dir).expanduser().resolve()
 
     downloaded_paths: list[tuple[Path, Path]] = []
     for s3_key, relative_dir in iter_objects(args.mode):
         destination_dir = output_dir / relative_dir
-        path = download_object(aws_bin, s3_key, destination_dir, args.force)
+        if aws_bin:
+            path = download_object(aws_bin, s3_key, destination_dir, args.force)
+        else:
+            path = download_object_https(s3_key, destination_dir, args.force)
         downloaded_paths.append((path, destination_dir))
 
     if args.extract:

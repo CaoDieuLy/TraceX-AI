@@ -1,5 +1,4 @@
 param(
-    [string]$Location = "amsterdam",
     [string]$Split = "test",
     [double]$PollSeconds = 10
 )
@@ -14,4 +13,4 @@ if (-not (Test-Path $python)) {
     throw "Python venv not found. Run .\run_end_to_end.ps1 once first."
 }
 
-& $python -m surveillance_search watch-index --locations $Location --splits $Split --poll-seconds $PollSeconds
+& $python -m surveillance_search watch-index --dataset-type personpath22 --splits $Split --poll-seconds $PollSeconds

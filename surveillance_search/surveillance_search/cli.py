@@ -12,10 +12,8 @@ from .config import (
     DEFAULT_CLIP_PRETRAINED,
     DEFAULT_DATASET_TYPE,
     DEFAULT_FPS,
-    DEFAULT_LOCATIONS,
     DEFAULT_MAX_ASSETS_PER_MOMENT,
     DEFAULT_PROFILE,
-    DEFAULT_REPO_ID,
     DEFAULT_SENTENCE_MODEL,
     DEFAULT_SPLITS,
     DEFAULT_TOP_K,
@@ -23,7 +21,7 @@ from .config import (
     default_data_root,
     default_visual_root,
 )
-from .dataset import collect_moments, download_from_huggingface
+from .dataset import DEFAULT_PERSONPATH22_KAGGLE_DATASET, collect_moments, download_from_huggingface
 from .enrichment import apply_enrichment
 from .enrichment_inference import infer_and_write_enrichment
 from .indexer import build_search_bundle, search_index
@@ -102,32 +100,40 @@ def resolve_sentence_model_name(args: argparse.Namespace) -> str:
     return args.sentence_model
 
 
+def _personpath22_dataset_present(dataset_root: Path) -> bool:
+    if not dataset_root.exists():
+        return False
+    return any(dataset_root.rglob("*.json")) or any(dataset_root.rglob("gt.txt"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Full-featured surveillance multimodal search engine")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    download_parser = subparsers.add_parser("download", help="Download labels, videos and docs from Hugging Face")
-    download_parser.add_argument("--dataset-type", choices=("lava", "personpath22"), default=DEFAULT_DATASET_TYPE)
-    download_parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
+    download_parser = subparsers.add_parser("download", help="Download the public PersonPath22 dataset payload")
+    download_parser.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
     download_parser.add_argument("--dataset-root", default=None)
     download_parser.add_argument("--locations", default=None, help="Comma-separated list")
     download_parser.add_argument("--splits", default=None, help="Comma-separated list")
     download_parser.add_argument("--include-videos", action="store_true")
     download_parser.add_argument("--include-docs", action="store_true")
+    download_parser.add_argument("--download-transport", choices=("https", "kaggle"), default="https")
+    download_parser.add_argument("--kaggle-dataset", default=DEFAULT_PERSONPATH22_KAGGLE_DATASET)
 
     bootstrap_parser = subparsers.add_parser("bootstrap", help="Download selected data and build a production-ready bundle")
-    bootstrap_parser.add_argument("--dataset-type", choices=("lava", "personpath22"), default=DEFAULT_DATASET_TYPE)
-    bootstrap_parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
+    bootstrap_parser.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
     bootstrap_parser.add_argument("--dataset-root", default=None)
     bootstrap_parser.add_argument("--output-dir", default=None)
     bootstrap_parser.add_argument("--assets-dir", default=None)
-    bootstrap_parser.add_argument("--locations", default="amsterdam", help="Comma-separated list")
-    bootstrap_parser.add_argument("--splits", default="test", help="Comma-separated list")
+    bootstrap_parser.add_argument("--locations", default=None, help="Comma-separated list")
+    bootstrap_parser.add_argument("--splits", default=None, help="Comma-separated list")
     bootstrap_parser.add_argument("--group-mode", choices=("track", "frame"), default="track")
     bootstrap_parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
     bootstrap_parser.add_argument("--profile", choices=("strongest", "balanced", "text-only", "lite"), default=DEFAULT_PROFILE)
     bootstrap_parser.add_argument("--include-videos", action="store_true")
     bootstrap_parser.add_argument("--include-docs", action="store_true")
+    bootstrap_parser.add_argument("--download-transport", choices=("https", "kaggle"), default="https")
+    bootstrap_parser.add_argument("--kaggle-dataset", default=DEFAULT_PERSONPATH22_KAGGLE_DATASET)
     bootstrap_parser.add_argument("--max-assets-per-moment", type=int, default=DEFAULT_MAX_ASSETS_PER_MOMENT)
     bootstrap_parser.add_argument("--crop-padding", type=float, default=0.08)
     bootstrap_parser.add_argument("--sentence-model", default=DEFAULT_SENTENCE_MODEL)
@@ -136,13 +142,14 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--clip-pretrained", default=DEFAULT_CLIP_PRETRAINED)
     bootstrap_parser.add_argument("--device", default=None)
     bootstrap_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    bootstrap_parser.add_argument("--ffmpeg-bin", default="ffmpeg")
     bootstrap_parser.add_argument("--no-sparse", action="store_true")
     bootstrap_parser.add_argument("--no-dense", action="store_true")
     bootstrap_parser.add_argument("--no-clip", action="store_true")
     bootstrap_parser.add_argument("--auto-enrich", action="store_true", help="Infer person attributes and scene evidence from visual assets before building the bundle.")
 
     prepare_parser = subparsers.add_parser("prepare-assets", help="Extract frames and crops for CLIP indexing")
-    prepare_parser.add_argument("--dataset-type", choices=("lava", "personpath22"), default=DEFAULT_DATASET_TYPE)
+    prepare_parser.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
     prepare_parser.add_argument("--dataset-root", default=None)
     prepare_parser.add_argument("--assets-dir", default=None)
     prepare_parser.add_argument("--locations", default=None, help="Comma-separated list")
@@ -155,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--ffmpeg-bin", default="ffmpeg")
 
     build_parser_cmd = subparsers.add_parser("build", help="Build a full multimodal search bundle")
-    build_parser_cmd.add_argument("--dataset-type", choices=("lava", "personpath22"), default=DEFAULT_DATASET_TYPE)
+    build_parser_cmd.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
     build_parser_cmd.add_argument("--dataset-root", default=None)
     build_parser_cmd.add_argument("--output-dir", default=None)
     build_parser_cmd.add_argument("--assets-dir", default=None)
@@ -216,7 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
     api_parser.add_argument("--reload", action="store_true")
 
     rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild the bundle from current dataset files")
-    rebuild_parser.add_argument("--dataset-type", choices=("lava", "personpath22"), default=DEFAULT_DATASET_TYPE)
+    rebuild_parser.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
     rebuild_parser.add_argument("--dataset-root", default=None)
     rebuild_parser.add_argument("--output-dir", default=None)
     rebuild_parser.add_argument("--assets-dir", default=None)
@@ -240,7 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild_parser.add_argument("--auto-enrich", action="store_true", help="Infer person attributes and scene evidence from visual assets before rebuilding the bundle.")
 
     watch_parser = subparsers.add_parser("watch-index", help="Poll the dataset directory and rebuild when files change")
-    watch_parser.add_argument("--dataset-type", choices=("lava", "personpath22"), default=DEFAULT_DATASET_TYPE)
+    watch_parser.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
     watch_parser.add_argument("--dataset-root", default=None)
     watch_parser.add_argument("--output-dir", default=None)
     watch_parser.add_argument("--assets-dir", default=None)
@@ -266,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--auto-enrich", action="store_true", help="Infer person attributes and scene evidence during each rebuild cycle.")
 
     enrich_parser = subparsers.add_parser("enrich", help="Infer person attributes and scene evidence from visual assets")
-    enrich_parser.add_argument("--dataset-type", choices=("lava", "personpath22"), default=DEFAULT_DATASET_TYPE)
+    enrich_parser.add_argument("--dataset-type", choices=("personpath22",), default=DEFAULT_DATASET_TYPE)
     enrich_parser.add_argument("--dataset-root", default=None)
     enrich_parser.add_argument("--assets-dir", default=None)
     enrich_parser.add_argument("--locations", default=None, help="Comma-separated list")
@@ -326,37 +333,43 @@ def _runtime_config_from_args(args: argparse.Namespace) -> RuntimeConfig:
 
 
 def command_download(args: argparse.Namespace) -> None:
-    locations = parse_csv(args.locations, DEFAULT_LOCATIONS)
     splits = parse_csv(args.splits, DEFAULT_SPLITS)
     dataset_root = resolve_dataset_root(args)
     download_from_huggingface(
         dataset_type=args.dataset_type,
         dataset_root=dataset_root,
-        repo_id=args.repo_id,
-        locations=locations,
+        repo_id="",
+        locations=[],
         splits=splits,
         include_videos=args.include_videos,
         include_docs=args.include_docs,
+        transport=args.download_transport,
+        kaggle_dataset=args.kaggle_dataset,
     )
     print(f"Downloaded selected files into {dataset_root}")
 
 
 def command_bootstrap(args: argparse.Namespace) -> None:
-    if args.dataset_type == "lava":
-        locations = parse_csv(args.locations, DEFAULT_LOCATIONS)
-        splits = parse_csv(args.splits, DEFAULT_SPLITS)
-        dataset_root = resolve_dataset_root(args)
+    dataset_root = resolve_dataset_root(args)
+    has_annotations = _personpath22_dataset_present(dataset_root)
+    has_videos = any(dataset_root.rglob("*.mp4"))
+    needs_videos = bool(args.include_videos)
+
+    if has_annotations and (not needs_videos or has_videos):
+        print("Skipping download step for PersonPath22 because the requested local data already exists.")
+    else:
+        print("Downloading public PersonPath22 files into the local dataset root...")
         download_from_huggingface(
             dataset_type=args.dataset_type,
             dataset_root=dataset_root,
-            repo_id=args.repo_id,
-            locations=locations,
-            splits=splits,
+            repo_id="",
+            locations=[],
+            splits=[],
             include_videos=args.include_videos,
-            include_docs=args.include_docs,
+            include_docs=False,
+            transport=args.download_transport,
+            kaggle_dataset=args.kaggle_dataset,
         )
-    else:
-        print("Skipping download step for PersonPath22. Expecting local annotations and videos under --dataset-root.")
     manifest = rebuild_runtime_bundle(_runtime_config_from_args(args))
     print(
         f"Bootstrap completed. Built {manifest['moment_count']} moments into "
