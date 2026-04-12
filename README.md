@@ -1,4 +1,4 @@
-﻿# CCTV Person Search Engine - AI20K-243
+﻿﻿# CCTV Person Search Engine - AI20K-243
 
 **Tagline:** Tìm người trong video giám sát bằng mô tả tự nhiên, nhanh hơn và trực quan hơn.
 
@@ -168,13 +168,4 @@ python -m src.agent
 
 - `[Cao Diệu Ly]` - `[Leader, PM, AI Research]`
 - `[Dương Văn Hiệp]` - `[AI Research/ Data, AI Engineer]`
-<<<<<<< HEAD
-<<<<<<< HEAD
 - `[Bùi Văn Đạt]` - `[BE, FE]`
-
-=======
-- `[Bùi Văn Đạt]` - `[BE, FE]`
->>>>>>> 89c5e69 (feat: Update README and JOURNAL with project details and weekly progress)
-=======
-- `[Bùi Văn Đạt]` - `[BE, FE]`
->>>>>>> 89c5e695d42e2e615940814925ad9fc6d9cb5dc9
