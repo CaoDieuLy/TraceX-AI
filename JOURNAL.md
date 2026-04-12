@@ -6,6 +6,7 @@ Ghi lại hành trình xây dựng sản phẩm mỗi tuần — những gì đ�
 
 ---
 
+
 ## Template
 
 ```markdown
