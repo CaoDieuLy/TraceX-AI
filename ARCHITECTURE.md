@@ -306,6 +306,7 @@ Nếu hệ thống cần hỗ trợ nhiều camera hơn hoặc nhiều user hơn
 - giám sát realtime đa camera hoàn chỉnh
 - huấn luyện model tùy chỉnh nặng
 - phụ thuộc cloud liên tục để hệ thống hoạt động
+<<<<<<< HEAD
 - đảm bảo nhận dạng danh tính tuyệt đối mà không có bước xác nhận của người dùng
 # Architecture
 
@@ -617,3 +618,6 @@ Nếu hệ thống cần hỗ trợ nhiều camera hơn hoặc nhiều user hơn
 - phụ thuộc cloud liên tục để hệ thống hoạt động
 - đảm bảo nhận dạng danh tính tuyệt đối mà không có bước xác nhận của người dùng
 
+=======
+- đảm bảo nhận dạng danh tính tuyệt đối mà không có bước xác nhận của người dùng
+>>>>>>> 89c5e695d42e2e615940814925ad9fc6d9cb5dc9

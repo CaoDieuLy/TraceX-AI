@@ -59,19 +59,45 @@ Ghi lại hành trình xây dựng sản phẩm mỗi tuần — những gì đ�
 #### AI tool đã dùng
 | Tool | Dùng để làm gì | Kết quả |
 |---|---|---|
-| Claude Code | Thiết kế sliding window memory, review code agent loop | Phát hiện thêm edge case khi tool throw exception |
-| Gemini CLI | So sánh approach lưu memory: file JSON vs SQLite | Tư vấn dùng JSON cho prototype, SQLite khi cần query |
+| ChatGpt | Tìm hiểu về bài toán| Phát hiện bài toán ở nhiều góc độ, hiểu về scope và pain point của nó|
+| Perplexity | Research bài toán, thị trường các phương pháp xử lý bài toán | Tìm được bài toán có dữ liệu hợp lý |
 
-#### Học được
-- Context window là resource có hạn — cần thiết kế memory strategy từ sớm.
-- Stop condition quan trọng không kém gì agent logic: `max_iterations`, `no_new_tool_calls`, `explicit_done`.
-- AI agent review code của mình rất có ích: Claude Code tìm ra 2 potential null pointer mà mình bỏ sót.
+---
 
-#### Nếu làm lại, sẽ làm khác
-- Viết interface `Memory` trước, rồi implement sau — thay vì hard-code array từ đầu.
-- Log tất cả tool call ra file ngay từ đầu để debug dễ hơn.
+## Tuần 02 - 11/04/2026 
 
-#### Kế hoạch tuần tới
-- Fix vòng lặp vô hạn: thêm `max_iterations = 10`
-- Thêm tool `run_tests` để agent tự kiểm tra code sau khi sửa
-- Demo cho instructor cuối tuần
+**Thành viên:** Dương Văn Hiệp, Cao Diệu Ly, Bùi Văn Đạt
+
+### Đã làm
+- Thu nhỏ scope sản phẩm, tập trung vào 1 use case chính thay vì làm rộng
+- Code MVP demo với các tính năng cơ bản để validate ý tưởng
+- Có thể chạy demo end-to-end (dù còn đơn giản)
+
+### Khó nhất tuần này
+- Khó khăn lớn nhất là tìm dữ liệu phù hợp
+- Data hiện tại không đủ chính xác hoặc không sát với bài toán → ảnh hưởng trực tiếp đến chất lượng output của sản phẩm
+- Mất khá nhiều thời gian thử sai với các nguồn data khác nhau
+
+### AI tool đã dùng
+| Tool | Dùng để làm gì | Kết quả |
+|---|---|---|
+| ChatGPT | Hỗ trợ code MVP, tìm tài liệu, gợi ý cách thu nhỏ scope | Hoàn thành được bản demo tối thiểu để test ý tưởng |
+
+### Học được
+- Quan trọng nhất là xác định đúng **pain point**, không cố giải quyết nhiều vấn đề cùng lúc
+- Làm MVP không phải là làm ít tính năng, mà là làm đúng thứ quan trọng nhất trước
+- Data ảnh hưởng rất lớn đến chất lượng sản phẩm, đặc biệt với các bài toán liên quan đến AI
+
+### Nếu làm lại, sẽ làm khác
+- Dành thời gian validate và tìm data trước khi bắt đầu code
+- Chủ động lên plan rõ ràng hơn để tránh làm lan man
+- Có thể bắt đầu bằng mock data để test flow trước, rồi mới tìm data thật
+
+### Kế hoạch tuần tới
+- Hoàn thiện MVP (ổn định hơn, xử lý edge case cơ bản)
+- Tìm hoặc xây dựng bộ data tốt hơn phục vụ bài toán
+- Bắt đầu test với một số case thực tế
+
+
+
+  
