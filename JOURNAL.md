@@ -36,72 +36,68 @@ Ghi lại hành trình xây dựng sản phẩm mỗi tuần — những gì đ�
 
 ## Ví dụ
 
-### Tuần 1 — 31/03/2026
+### Tuần 1 — 02/04/2026
 
-**Thành viên:** Nguyễn Văn A, Trần Thị B, Lê Văn C
+**Thành viên:** Dương Văn Hiệp, Cao Diệu Ly, Bùi Văn Đạt
 
 #### Đã làm
-- Setup project TypeScript + cấu hình `.env`
-- Xây dựng agent loop cơ bản: nhận input → gọi Claude API → in output
-- Thêm tool `search_web` đầu tiên (dùng Brave Search API)
-- Viết README cho repo nhóm
+- Chốt thành viên nhóm, chốt đề tài.
 
 #### Khó nhất tuần này
-- Tool call response của Claude trả về sai format — mất 2 tiếng debug mới phát hiện ra thiếu `"type": "tool_result"` trong message history.
-- Lần đầu dùng TypeScript nên type error khá nhiều, phải học cách dùng `as` và generic.
+- Đề tài chưa xác nhận được pain point.
 
+#### AI tool đã dùng
+
+#### Học được
+- Học cách xác định Bài toán cho AI.
+#### Nếu làm lại, sẽ làm khác
+- Xác định pain point mà mọi người xung quanh mà mọi người gặp phải tìm bài toán để giải quyết.
+
+#### Kế hoạch tuần tới
+- Tìm hiểu bài toán thực tế. 
+  
 #### AI tool đã dùng
 | Tool | Dùng để làm gì | Kết quả |
 |---|---|---|
-| Claude Code | Giải thích Anthropic tool use API, debug message format | Giải quyết được bug trong 15 phút |
-| Cursor | Autocomplete TypeScript types | Tiết kiệm khoảng 30% thời gian gõ |
-
-#### Học được
-- Tool use trong Claude hoạt động theo vòng lặp: model gọi tool → app trả kết quả → model tiếp tục. Cần giữ đúng message history.
-- `zod` rất hữu ích để validate tool input schema.
-- Nên đặt timeout cho API call ngay từ đầu, không để sau mới thêm.
-
-#### Nếu làm lại, sẽ làm khác
-- Setup TypeScript strict mode ngay từ đầu thay vì thêm sau (refactor mệt hơn).
-- Viết unit test cho `parseToolCall()` trước khi tích hợp vào agent loop.
-
-#### Kế hoạch tuần tới
-- Thêm tool `read_file` và `write_file`
-- Implement memory: lưu conversation history vào file JSON
-- Thử chạy agent giải 1 bài tập thực tế
+| ChatGpt | Tìm hiểu về bài toán| Phát hiện bài toán ở nhiều góc độ, hiểu về scope và pain point của nó|
+| Perplexity | Research bài toán, thị trường các phương pháp xử lý bài toán | Tìm được bài toán có dữ liệu hợp lý |
 
 ---
 
-### Tuần 2 — 07/04/2026
+## Tuần 02 - 11/04/2026 
 
-**Thành viên:** Nguyễn Văn A, Trần Thị B, Lê Văn C
+**Thành viên:** Dương Văn Hiệp, Cao Diệu Ly, Bùi Văn Đạt
 
-#### Đã làm
-- Thêm tool `read_file`, `write_file`, `list_dir`
-- Agent có thể tự đọc file trong repo và đề xuất refactor
-- Implement conversation memory: lưu 20 message gần nhất
-- Thử nghiệm: cho agent tự fix 3 bug đơn giản → thành công 2/3
+### Đã làm
+- Thu nhỏ scope sản phẩm, tập trung vào 1 use case chính thay vì làm rộng
+- Code MVP demo với các tính năng cơ bản để validate ý tưởng
+- Có thể chạy demo end-to-end (dù còn đơn giản)
 
-#### Khó nhất tuần này
-- Memory bị lỗi khi conversation quá dài (vượt context window). Phải implement sliding window: chỉ giữ system prompt + 20 message gần nhất.
-- Agent đôi khi loop vô hạn khi tool trả lỗi — chưa có stop condition tốt.
+### Khó nhất tuần này
+- Khó khăn lớn nhất là tìm dữ liệu phù hợp
+- Data hiện tại không đủ chính xác hoặc không sát với bài toán → ảnh hưởng trực tiếp đến chất lượng output của sản phẩm
+- Mất khá nhiều thời gian thử sai với các nguồn data khác nhau
 
-#### AI tool đã dùng
+### AI tool đã dùng
 | Tool | Dùng để làm gì | Kết quả |
 |---|---|---|
-| Claude Code | Thiết kế sliding window memory, review code agent loop | Phát hiện thêm edge case khi tool throw exception |
-| Gemini CLI | So sánh approach lưu memory: file JSON vs SQLite | Tư vấn dùng JSON cho prototype, SQLite khi cần query |
+| ChatGPT | Hỗ trợ code MVP, tìm tài liệu, gợi ý cách thu nhỏ scope | Hoàn thành được bản demo tối thiểu để test ý tưởng |
 
-#### Học được
-- Context window là resource có hạn — cần thiết kế memory strategy từ sớm.
-- Stop condition quan trọng không kém gì agent logic: `max_iterations`, `no_new_tool_calls`, `explicit_done`.
-- AI agent review code của mình rất có ích: Claude Code tìm ra 2 potential null pointer mà mình bỏ sót.
+### Học được
+- Quan trọng nhất là xác định đúng **pain point**, không cố giải quyết nhiều vấn đề cùng lúc
+- Làm MVP không phải là làm ít tính năng, mà là làm đúng thứ quan trọng nhất trước
+- Data ảnh hưởng rất lớn đến chất lượng sản phẩm, đặc biệt với các bài toán liên quan đến AI
 
-#### Nếu làm lại, sẽ làm khác
-- Viết interface `Memory` trước, rồi implement sau — thay vì hard-code array từ đầu.
-- Log tất cả tool call ra file ngay từ đầu để debug dễ hơn.
+### Nếu làm lại, sẽ làm khác
+- Dành thời gian validate và tìm data trước khi bắt đầu code
+- Chủ động lên plan rõ ràng hơn để tránh làm lan man
+- Có thể bắt đầu bằng mock data để test flow trước, rồi mới tìm data thật
 
-#### Kế hoạch tuần tới
-- Fix vòng lặp vô hạn: thêm `max_iterations = 10`
-- Thêm tool `run_tests` để agent tự kiểm tra code sau khi sửa
-- Demo cho instructor cuối tuần
+### Kế hoạch tuần tới
+- Hoàn thiện MVP (ổn định hơn, xử lý edge case cơ bản)
+- Tìm hoặc xây dựng bộ data tốt hơn phục vụ bài toán
+- Bắt đầu test với một số case thực tế
+
+
+
+  
