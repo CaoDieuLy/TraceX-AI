@@ -1,0 +1,8 @@
+__pycache__/
+model_data/models/*
+videos/*
+*.mp4
+data/NVIDIA_SmartSpaces/
+data/Hospital_Scene_Data/
+data/db/
+.DS_Store
