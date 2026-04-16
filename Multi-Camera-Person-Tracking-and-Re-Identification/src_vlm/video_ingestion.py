@@ -1,9 +1,10 @@
-import os
-import subprocess
-import shutil
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import glob
 import multiprocessing
+import os
+import shutil
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
 import torch
 
 def _detect_hardware():
@@ -57,14 +58,14 @@ def _get_hw_config():
         _HW_CONFIG = _detect_hardware()
     return _HW_CONFIG
 
-def compress_video(input_path, output_dir, use_h265=True):
+def compress_video(input_path, output_dir, use_h265=True, output_filename=None):
     """Nén video sang chuẩn H.264 hoặc H.265 — tự chọn GPU/CPU."""
     hw = _get_hw_config()
     
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     
-    filename = os.path.basename(input_path)
+    filename = output_filename or os.path.basename(input_path)
     output_path = os.path.join(output_dir, filename)
     
     # Nếu file đã tồn tại và có kích thước hợp lệ, skip

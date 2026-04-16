@@ -1,8 +1,59 @@
+# Python
 __pycache__/
-model_data/models/*
-videos/*
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# Video files (large)
 *.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+
+# Data directories (large datasets)
 data/NVIDIA_SmartSpaces/
 data/Hospital_Scene_Data/
 data/db/
+data/videos/
+
+# Model weights & binaries
+model_data/models/*
+*.weights
+*.h5
+*.onnx
+*.pth
+*.pt
+*.pkl
+*.tflite
+
+# Demo videos
+videos/*
+
+# OS files
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs & outputs
+*.log
+output/
+runs/
