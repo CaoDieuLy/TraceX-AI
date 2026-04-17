@@ -1,11 +1,20 @@
+from __future__ import annotations
+
 import json
+import re
+import uuid
 from pathlib import Path
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
+from .auth import hash_password, verify_password
 from .config import settings
-from .models import PersonCandidate
+from .models import PersonCandidate, User, VideoAsset, VideoQuery
+
+
+def _slugify(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-._") or "video"
 
 
 def candidate_to_payload(candidate: PersonCandidate) -> dict:
@@ -20,6 +29,157 @@ def candidate_to_payload(candidate: PersonCandidate) -> dict:
         "metadata_path": candidate.metadata_path,
         "raw_metadata": candidate.raw_metadata,
     }
+
+
+def video_to_payload(video: VideoAsset) -> dict:
+    return {
+        "video_id": video.video_id,
+        "title": video.title,
+        "description": video.description,
+        "storage_path": video.storage_path,
+        "storage_backend": video.storage_backend,
+        "source_filename": video.source_filename,
+        "content_type": video.content_type,
+        "created_at": video.created_at,
+    }
+
+
+def query_to_payload(query: VideoQuery) -> dict:
+    return {
+        "query_id": query.query_id,
+        "video_id": query.video.video_id,
+        "video_title": query.video.title,
+        "storage_path": query.video.storage_path,
+        "query_text": query.query_text,
+        "status": query.status,
+        "ai_job_id": query.ai_job_id,
+        "ai_response": query.ai_response,
+        "created_at": query.created_at,
+        "updated_at": query.updated_at,
+    }
+
+
+def get_user_by_email(session: Session, email: str) -> User | None:
+    return session.scalar(select(User).where(User.email == email.lower().strip()))
+
+
+def create_user(session: Session, email: str, full_name: str, password: str) -> User:
+    existing = get_user_by_email(session, email)
+    if existing is not None:
+        raise ValueError("Email already registered")
+
+    user = User(
+        email=email.lower().strip(),
+        full_name=full_name.strip(),
+        hashed_password=hash_password(password),
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def authenticate_user(session: Session, email: str, password: str) -> User | None:
+    user = get_user_by_email(session, email)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def create_video_asset(
+    session: Session,
+    user: User,
+    title: str,
+    description: str | None,
+    storage_path: str,
+    storage_backend: str,
+    source_filename: str | None,
+    content_type: str | None,
+) -> VideoAsset:
+    video = VideoAsset(
+        user_id=user.id,
+        title=title.strip(),
+        description=(description or "").strip() or None,
+        storage_path=storage_path,
+        storage_backend=storage_backend,
+        source_filename=source_filename,
+        content_type=content_type,
+    )
+    session.add(video)
+    session.commit()
+    session.refresh(video)
+    return video
+
+
+def save_uploaded_video_bytes(filename: str, content: bytes) -> str:
+    storage_root = Path(settings.video_storage_root)
+    storage_root.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename or "").suffix
+    stem = _slugify(Path(filename or "video").stem)
+    target_path = storage_root / f"{uuid.uuid4()}-{stem}{suffix}"
+    target_path.write_bytes(content)
+    return str(target_path)
+
+
+def list_videos(session: Session, user: User) -> list[dict]:
+    statement = select(VideoAsset).where(VideoAsset.user_id == user.id).order_by(VideoAsset.created_at.desc(), VideoAsset.id.desc())
+    return [video_to_payload(video) for video in session.scalars(statement).all()]
+
+
+def get_video_by_public_id(session: Session, user: User, video_id: str) -> VideoAsset | None:
+    return session.scalar(select(VideoAsset).where(VideoAsset.video_id == video_id, VideoAsset.user_id == user.id))
+
+
+def create_video_query(session: Session, user: User, video: VideoAsset, query_text: str) -> VideoQuery:
+    query = VideoQuery(
+        user_id=user.id,
+        video_id=video.id,
+        query_text=query_text.strip(),
+        status="queued",
+    )
+    session.add(query)
+    session.commit()
+    session.refresh(query)
+    return session.scalar(
+        select(VideoQuery).options(joinedload(VideoQuery.video)).where(VideoQuery.id == query.id)
+    )
+
+
+def list_video_queries(session: Session, user: User) -> list[dict]:
+    statement = (
+        select(VideoQuery)
+        .options(joinedload(VideoQuery.video))
+        .where(VideoQuery.user_id == user.id)
+        .order_by(VideoQuery.updated_at.desc(), VideoQuery.id.desc())
+    )
+    return [query_to_payload(query) for query in session.scalars(statement).all()]
+
+
+def get_video_query(session: Session, user: User, query_id: str) -> VideoQuery | None:
+    return session.scalar(
+        select(VideoQuery)
+        .options(joinedload(VideoQuery.video))
+        .where(VideoQuery.query_id == query_id, VideoQuery.user_id == user.id)
+    )
+
+
+def update_video_query(
+    session: Session,
+    query: VideoQuery,
+    status: str | None = None,
+    ai_job_id: str | None = None,
+    ai_response: dict | None = None,
+) -> VideoQuery:
+    if status is not None:
+        query.status = status
+    if ai_job_id is not None:
+        query.ai_job_id = ai_job_id
+    if ai_response is not None:
+        query.ai_response = ai_response
+    session.add(query)
+    session.commit()
+    session.refresh(query)
+    return session.scalar(select(VideoQuery).options(joinedload(VideoQuery.video)).where(VideoQuery.id == query.id))
 
 
 def search_candidates(session: Session, query: str | None = None, limit: int = 20) -> list[dict]:
@@ -46,13 +206,21 @@ def get_candidate(session: Session, candidate_id: str) -> dict | None:
 
 
 def get_overview(session: Session) -> dict:
+    total_users = session.scalar(select(func.count()).select_from(User)) or 0
+    total_managed_videos = session.scalar(select(func.count()).select_from(VideoAsset)) or 0
+    total_queries = session.scalar(select(func.count()).select_from(VideoQuery)) or 0
     total_candidates = session.scalar(select(func.count()).select_from(PersonCandidate)) or 0
     total_cameras = session.scalar(select(func.count(func.distinct(PersonCandidate.camera_id))).select_from(PersonCandidate)) or 0
-    total_videos = session.scalar(select(func.count(func.distinct(PersonCandidate.video_id))).select_from(PersonCandidate)) or 0
+    total_candidate_videos = session.scalar(select(func.count(func.distinct(PersonCandidate.video_id))).select_from(PersonCandidate)) or 0
     return {
-        "total_candidates": int(total_candidates),
-        "total_cameras": int(total_cameras),
-        "total_videos": int(total_videos),
+        "metrics": {
+            "total_users": int(total_users),
+            "total_managed_videos": int(total_managed_videos),
+            "total_queries": int(total_queries),
+            "total_candidates": int(total_candidates),
+            "total_cameras": int(total_cameras),
+            "total_candidate_videos": int(total_candidate_videos),
+        }
     }
 
 

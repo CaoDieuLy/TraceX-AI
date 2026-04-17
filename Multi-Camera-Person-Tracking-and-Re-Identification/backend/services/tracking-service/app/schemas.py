@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -12,3 +15,25 @@ class TrackingResponse(BaseModel):
     relative_output_path: str | None = None
     exists: bool
     tracking_use_mock: bool
+
+
+class AiProcessRequest(BaseModel):
+    query_id: str | None = None
+    video_id: str
+    video_title: str | None = None
+    storage_path: str
+    query_text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiProcessResponse(BaseModel):
+    status: str
+    provider: str
+    mode: str
+    query_id: str | None = None
+    video_id: str
+    job_id: str
+    summary: str
+    file_exists: bool
+    processed_at: datetime
+    raw_response: dict[str, Any]

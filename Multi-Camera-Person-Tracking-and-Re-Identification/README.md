@@ -1,52 +1,45 @@
-# Multi-Camera Person Tracking and Re-Identification
+# MCPT Video AI Platform
 
-Project này đã được tách từ dạng monolith sang kiến trúc microservice để dễ phát triển và triển khai hơn:
+Website quan ly video tich hop AI duoc tach theo kien truc microservice:
 
-- `frontend/`: giao diện người dùng bằng Next.js
-- `backend/services/api-gateway/`: FastAPI gateway cho frontend
-- `backend/services/metadata-service/`: FastAPI + PostgreSQL cho metadata/search
-- `backend/services/tracking-service/`: FastAPI bọc legacy tracking engine
-- `backend/legacy-engine/`: code tracking/ReID hiện có, giữ nguyên để tương thích
-- `infra/postgres/`: SQL khởi tạo PostgreSQL
+- `frontend/`: Next.js cho end-user
+- `backend/services/api-gateway/`: FastAPI gateway cho domain/frontend
+- `backend/services/metadata-service/`: FastAPI cho auth, video, text query, PostgreSQL
+- `backend/services/tracking-service/`: AI orchestration service goi LightningAI GPU
+- `backend/legacy-engine/`: legacy ReID code duoc giu lai de tai su dung
+- `infra/postgres/`: khoi tao PostgreSQL
 
-## Cấu trúc thư mục
+## Chuc nang da scaffold
 
-```text
-Multi-Camera-Person-Tracking-and-Re-Identification/
-|- frontend/
-|- backend/
-|  |- legacy-engine/
-|  |- services/
-|     |- api-gateway/
-|     |- metadata-service/
-|     |- tracking-service/
-|- infra/
-|  |- postgres/
-|- docker-compose.yml
-```
+- Dang ky va dang nhap tai khoan bang JWT
+- Upload video vao local Docker volume hoac dang ky URL/path san co
+- PostgreSQL chi luu metadata va duong dan `storage_path`
+- Tao text query theo video
+- API gateway goi AI service, AI service goi LightningAI endpoint
+- Mock mode de local dev van chay du khi chua co GPU endpoint that
+- Docker compose cho Next.js, FastAPI, PostgreSQL
+- GitHub Actions scaffold cho CI/CD deploy VPS
 
-## Kiến trúc microservice
+## Kien truc
 
 ```text
-Next.js Frontend
-        |
-        v
-FastAPI API Gateway
-   |            |
-   v            v
-Metadata Service   Tracking Service
-   |                 |
-   v                 v
-PostgreSQL       Legacy ReID Engine
+Next.js
+   |
+   v
+API Gateway (FastAPI)
+   |
+   +--> Metadata Service (FastAPI + PostgreSQL)
+   |
+   +--> Tracking / AI Service (FastAPI -> LightningAI GPU)
 ```
 
-## Chạy bằng Docker Compose
+## Chay local
 
 ```bash
 docker compose up --build
 ```
 
-Sau khi chạy:
+Mac dinh:
 
 - Frontend: `http://localhost:3000`
 - API Gateway: `http://localhost:8000`
@@ -54,17 +47,40 @@ Sau khi chạy:
 - Tracking Service: `http://localhost:8002`
 - PostgreSQL: `localhost:5432`
 
-## Build Docker image riêng
+## Bien moi truong quan trong
 
-```bash
-docker build -t mcpt-frontend:latest ./frontend
-docker build -t mcpt-api-gateway:latest ./backend/services/api-gateway
-docker build -t mcpt-metadata-service:latest -f backend/services/metadata-service/Dockerfile .
-docker build -t mcpt-tracking-service:latest -f backend/services/tracking-service/Dockerfile .
-```
+Xem [`.env.example`](./.env.example).
 
-## Ghi chú vận hành
+Canh bao:
 
-- `tracking-service` mặc định chạy `TRACKING_USE_MOCK=true` để container có thể lên nhanh mà chưa bắt buộc đủ weights/model runtime.
-- Metadata cũ trong `backend/legacy-engine/data/metadata` có thể import vào PostgreSQL bằng nút trong frontend hoặc API `/api/v1/candidates/import-legacy`.
-- Nếu muốn chạy inference thật, mount thêm weights/video vào `backend/legacy-engine` và đặt `TRACKING_USE_MOCK=false`.
+- `TRACKING_USE_MOCK=true` se tra ket qua AI gia lap
+- Muon goi LightningAI that, set:
+  - `TRACKING_USE_MOCK=false`
+  - `LIGHTNING_API_BASE_URL`
+  - `LIGHTNING_API_ENDPOINT`
+  - `LIGHTNING_API_TOKEN`
+
+## CI/CD VPS
+
+Workflow mau nam tai [`.github/workflows/mcpt-ci-cd.yml`](../.github/workflows/mcpt-ci-cd.yml).
+
+Can cung cap GitHub Secrets sau:
+
+- `VPS_HOST`
+- `VPS_PORT`
+- `VPS_USERNAME`
+- `VPS_SSH_KEY`
+- `VPS_APP_DIR`
+
+Pipeline hien tai:
+
+1. Build Docker stack
+2. Copy source len VPS
+3. Chay `docker compose up -d --build` tren VPS
+
+## Mo rong tiep theo
+
+- Gan domain vao reverse proxy/Nginx tren VPS
+- Chuyen local volume sang object storage (S3/MinIO)
+- Kich hoat LightningAI GPU endpoint production
+- Them migration Alembic va role-based access

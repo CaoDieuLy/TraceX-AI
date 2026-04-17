@@ -49,6 +49,7 @@ backend/legacy-engine/model_data/models/*
 
 # Docker / local infra
 postgres_data/
+storage/
 
 # OS files
 .DS_Store

@@ -26,9 +26,13 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD:-mcpt_password}@postgres:5432/${POSTGRES_DB:-mcpt}
       LEGACY_METADATA_DIR: /workspace/backend/legacy-engine/data/metadata
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      VIDEO_STORAGE_ROOT: ${VIDEO_STORAGE_ROOT:-/workspace/storage/videos}
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - storage_data:/workspace/storage
     ports:
       - "${METADATA_SERVICE_PORT:-8001}:8000"
 
@@ -41,6 +45,14 @@ services:
     environment:
       LEGACY_ROOT: /workspace/backend/legacy-engine
       TRACKING_USE_MOCK: ${TRACKING_USE_MOCK:-true}
+      LIGHTNING_API_BASE_URL: ${LIGHTNING_API_BASE_URL:-}
+      LIGHTNING_API_ENDPOINT: ${LIGHTNING_API_ENDPOINT:-/predict}
+      LIGHTNING_API_TOKEN: ${LIGHTNING_API_TOKEN:-}
+      LIGHTNING_API_AUTH_HEADER: ${LIGHTNING_API_AUTH_HEADER:-Authorization}
+      LIGHTNING_API_AUTH_PREFIX: ${LIGHTNING_API_AUTH_PREFIX:-Bearer }
+      LIGHTNING_TIMEOUT_SECONDS: ${LIGHTNING_TIMEOUT_SECONDS:-180}
+    volumes:
+      - storage_data:/workspace/storage
     ports:
       - "${TRACKING_SERVICE_PORT:-8002}:8000"
 
@@ -75,3 +87,4 @@ services:
 
 volumes:
   postgres_data:
+  storage_data:
