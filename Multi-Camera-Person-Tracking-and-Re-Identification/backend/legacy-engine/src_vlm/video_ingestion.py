@@ -5,11 +5,14 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-import torch
+try:
+    import torch
+except Exception:  # pragma: no cover - optional dependency on lightweight images
+    torch = None
 
 def _detect_hardware():
     """Tự động phát hiện GPU hay CPU, trả về cấu hình tối ưu."""
-    has_gpu = torch.cuda.is_available()
+    has_gpu = bool(torch and torch.cuda.is_available())
     cpu_cores = multiprocessing.cpu_count()
     
     # Kiểm tra ffmpeg có hỗ trợ nvenc không

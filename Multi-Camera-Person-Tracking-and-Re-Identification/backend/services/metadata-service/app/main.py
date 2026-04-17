@@ -7,12 +7,17 @@ from .auth import create_access_token
 from .database import Base, engine, get_session
 from .deps import get_current_user
 from .models import User
+from .queue_runtime import QueueSyncService
 from .schemas import (
     AuthTokenResponse,
     CandidateListResponse,
     CandidateResponse,
     ImportResponse,
     OverviewResponse,
+    QueueBootstrapRequest,
+    QueueBootstrapResponse,
+    QueueProcessResponse,
+    QueueVideoListResponse,
     UserLoginRequest,
     UserRegisterRequest,
     UserResponse,
@@ -33,6 +38,7 @@ from .service import (
     get_video_by_public_id,
     get_video_query,
     import_legacy_metadata,
+    list_queue_videos,
     list_video_queries,
     list_videos,
     save_uploaded_video_bytes,
@@ -197,3 +203,31 @@ def candidate_detail(candidate_id: str, session: Session = Depends(get_session))
 @app.post("/api/v1/candidates/import-legacy", response_model=ImportResponse)
 def import_candidates(session: Session = Depends(get_session)) -> dict:
     return import_legacy_metadata(session)
+
+
+@app.get("/api/v1/queue/videos", response_model=QueueVideoListResponse)
+def queue_videos(session: Session = Depends(get_session)) -> dict:
+    items = list_queue_videos(session)
+    return {"count": len(items), "items": items}
+
+
+@app.post("/api/v1/queue/bootstrap", response_model=QueueBootstrapResponse)
+def bootstrap_queue(payload: QueueBootstrapRequest, session: Session = Depends(get_session)) -> dict:
+    try:
+        return QueueSyncService().bootstrap_from_source_dir(
+            session,
+            limit=payload.limit,
+            reset_remote_queue=payload.reset_remote_queue,
+        )
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/queue/process-imports", response_model=QueueProcessResponse)
+def process_imports(session: Session = Depends(get_session)) -> dict:
+    try:
+        return QueueSyncService().process_import_queue(session)
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

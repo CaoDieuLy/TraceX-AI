@@ -1,7 +1,14 @@
 from fastapi import FastAPI
 
-from .schemas import AiProcessRequest, AiProcessResponse, TrackingRequest, TrackingResponse
-from .service import get_pipeline_config, process_video_query, run_tracking
+from .schemas import (
+    AiProcessRequest,
+    AiProcessResponse,
+    TrackingRequest,
+    TrackingResponse,
+    VideoIngestionRequest,
+    VideoIngestionResponse,
+)
+from .service import get_pipeline_config, process_video_ingestion, process_video_query, run_tracking
 
 app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
 
@@ -33,3 +40,8 @@ def ai_process(payload: AiProcessRequest) -> dict:
 @app.post("/api/v1/tracking/run", response_model=TrackingResponse)
 def tracking_run(payload: TrackingRequest) -> dict:
     return run_tracking(payload.candidate_info)
+
+
+@app.post("/api/v1/ingestion/process", response_model=VideoIngestionResponse)
+def ingestion_process(payload: VideoIngestionRequest) -> dict:
+    return process_video_ingestion(payload.model_dump())

@@ -46,3 +46,37 @@ class AiProcessResponse(BaseModel):
     file_exists: bool
     processed_at: datetime
     raw_response: dict[str, Any]
+
+
+class VideoIngestionRequest(BaseModel):
+    source_path: str | None = None
+    source_drive_file_id: str | None = None
+    source_filename: str | None = None
+    camera_id: str | None = None
+    recorded_start: datetime | None = None
+    output_video_dir: str | None = None
+    output_metadata_dir: str | None = None
+    output_basename: str | None = None
+    destination_video_folder_id: str | None = None
+    destination_metadata_folder_id: str | None = None
+    upload_outputs_to_drive: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VideoIngestionResponse(BaseModel):
+    status: str
+    processing_backend: str
+    pipeline_profile: str | None = None
+    gpu_hardware_profile: dict[str, Any] | None = None
+    acceleration_state: dict[str, Any] | None = None
+    source_path: str
+    compressed_path: str
+    metadata_path: str
+    drive_video_file_id: str | None = None
+    drive_metadata_file_id: str | None = None
+    drive_video_link: str | None = None
+    drive_metadata_link: str | None = None
+    video: dict[str, Any]
+    people: list[dict[str, Any]] = Field(default_factory=list)
+    person_count: int
+    processed_at: datetime

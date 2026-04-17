@@ -5,12 +5,12 @@ import re
 import uuid
 from pathlib import Path
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from .auth import hash_password, verify_password
 from .config import settings
-from .models import PersonCandidate, User, VideoAsset, VideoQuery
+from .models import PersonCandidate, QueueVideoAsset, User, VideoAsset, VideoQuery
 
 
 def _slugify(value: str) -> str:
@@ -113,6 +113,23 @@ def query_to_payload(query: VideoQuery) -> dict:
         "ai_response": query.ai_response,
         "created_at": query.created_at,
         "updated_at": query.updated_at,
+    }
+
+
+def queue_video_to_payload(video: QueueVideoAsset) -> dict:
+    return {
+        "video_id": video.video_id,
+        "camera_id": video.camera_id,
+        "title": video.title,
+        "queue_position": video.queue_position,
+        "storage_backend": video.storage_backend,
+        "available_link_video": video.available_link_video,
+        "available_link_metadata": video.available_link_metadata,
+        "source_filename": video.source_filename,
+        "source_mode": video.source_mode,
+        "created_at": video.created_at,
+        "updated_at": video.updated_at,
+        "raw_video_metadata": video.raw_video_metadata,
     }
 
 
@@ -269,6 +286,7 @@ def get_overview(session: Session) -> dict:
     total_candidates = session.scalar(select(func.count()).select_from(PersonCandidate)) or 0
     total_cameras = session.scalar(select(func.count(func.distinct(PersonCandidate.camera_id))).select_from(PersonCandidate)) or 0
     total_candidate_videos = session.scalar(select(func.count(func.distinct(PersonCandidate.video_id))).select_from(PersonCandidate)) or 0
+    total_queue_videos = session.scalar(select(func.count()).select_from(QueueVideoAsset)) or 0
     return {
         "metrics": {
             "total_users": int(total_users),
@@ -277,6 +295,7 @@ def get_overview(session: Session) -> dict:
             "total_candidates": int(total_candidates),
             "total_cameras": int(total_cameras),
             "total_candidate_videos": int(total_candidate_videos),
+            "total_queue_videos": int(total_queue_videos),
         }
     }
 
@@ -326,3 +345,99 @@ def import_legacy_metadata(session: Session) -> dict:
         "updated_count": updated_count,
         "file_count": file_count,
     }
+
+
+def list_queue_videos(session: Session) -> list[dict]:
+    statement = select(QueueVideoAsset).order_by(QueueVideoAsset.queue_position.asc(), QueueVideoAsset.id.asc())
+    return [queue_video_to_payload(video) for video in session.scalars(statement).all()]
+
+
+def get_queue_video_rows(session: Session) -> list[QueueVideoAsset]:
+    statement = select(QueueVideoAsset).order_by(QueueVideoAsset.queue_position.asc(), QueueVideoAsset.id.asc())
+    return list(session.scalars(statement).all())
+
+
+def upsert_queue_video_asset(
+    session: Session,
+    *,
+    video_id: str,
+    camera_id: str | None,
+    title: str,
+    queue_position: int,
+    available_link_video: str,
+    available_link_metadata: str | None,
+    storage_backend: str,
+    source_filename: str | None,
+    source_mode: str | None,
+    drive_video_file_id: str | None,
+    drive_metadata_file_id: str | None,
+    local_video_path: str | None,
+    local_metadata_path: str | None,
+    raw_video_metadata: dict,
+) -> QueueVideoAsset:
+    row = session.scalar(select(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
+    values = {
+        "video_id": video_id,
+        "camera_id": camera_id,
+        "title": title,
+        "queue_position": queue_position,
+        "available_link_video": available_link_video,
+        "available_link_metadata": available_link_metadata,
+        "storage_backend": storage_backend,
+        "source_filename": source_filename,
+        "source_mode": source_mode,
+        "drive_video_file_id": drive_video_file_id,
+        "drive_metadata_file_id": drive_metadata_file_id,
+        "local_video_path": local_video_path,
+        "local_metadata_path": local_metadata_path,
+        "raw_video_metadata": raw_video_metadata,
+    }
+    if row is None:
+        row = QueueVideoAsset(**values)
+        session.add(row)
+    else:
+        for key, value in values.items():
+            setattr(row, key, value)
+    session.flush()
+    return row
+
+
+def delete_queue_video_asset(session: Session, video_id: str) -> None:
+    session.execute(delete(PersonCandidate).where(PersonCandidate.video_id == video_id))
+    session.execute(delete(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
+    session.flush()
+
+
+def upsert_person_candidates(session: Session, people: list[dict], metadata_path: str) -> dict[str, int]:
+    imported_count = 0
+    updated_count = 0
+
+    for person in people:
+        if not isinstance(person, dict):
+            continue
+        candidate_id = str(person.get("candidate_id") or "").strip()
+        if not candidate_id:
+            continue
+
+        existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
+        values = {
+            "candidate_id": candidate_id,
+            "camera_id": person.get("camera_id"),
+            "video_id": person.get("video_id"),
+            "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
+            "human_key": person.get("human_key"),
+            "frame_idx": int(person.get("frame_idx") or 0),
+            "search_text": _candidate_search_document(person),
+            "metadata_path": metadata_path,
+            "raw_metadata": person,
+        }
+        if existing:
+            for key, value in values.items():
+                setattr(existing, key, value)
+            updated_count += 1
+        else:
+            session.add(PersonCandidate(**values))
+            imported_count += 1
+
+    session.flush()
+    return {"imported_count": imported_count, "updated_count": updated_count}

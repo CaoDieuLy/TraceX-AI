@@ -562,11 +562,13 @@ def _build_detected_people(
     camera_id: str,
     recorded_start: datetime,
     vlm_engine,
+    metadata_dir: Path | None = None,
 ) -> tuple[dict, list[dict]]:
     probe = _probe_video(compressed_path)
     fps = max(float(probe.get("fps") or 0.0), 1.0)
     frame_count = int(probe.get("frame_count") or 0)
-    metadata_path = METADATA_DIR / f"{compressed_path.stem}.json"
+    metadata_root = Path(metadata_dir or METADATA_DIR)
+    metadata_path = metadata_root / f"{compressed_path.stem}.json"
     video_payload = _build_video_payload(
         source_path=source_path,
         compressed_path=compressed_path,

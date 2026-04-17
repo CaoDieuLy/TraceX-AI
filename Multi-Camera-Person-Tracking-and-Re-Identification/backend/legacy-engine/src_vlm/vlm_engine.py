@@ -1,19 +1,32 @@
 import os
 import cv2
 from PIL import Image
-import torch
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
+
+try:
+    import torch
+except Exception:  # pragma: no cover - optional dependency in service containers
+    torch = None
 
 class VLM_Metadata_Engine:
     def __init__(self, use_mock=True):
         self.use_mock = use_mock
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = "cuda" if torch and torch.cuda.is_available() else "cpu"
         self.cpu_cores = multiprocessing.cpu_count()
         self.model_id = "mock-blip"
-        
+
         if not use_mock:
-            from transformers import BlipProcessor, BlipForConditionalGeneration
+            if torch is None:
+                print("[VLM Engine] Torch unavailable, fallback sang Mock mode.")
+                self.use_mock = True
+                return
+            try:
+                from transformers import BlipForConditionalGeneration, BlipProcessor
+            except Exception:
+                print("[VLM Engine] Transformers unavailable, fallback sang Mock mode.")
+                self.use_mock = True
+                return
             print(f"[VLM Engine] Device: {'🟢 GPU CUDA' if self.device == 'cuda' else f'🔵 CPU ({self.cpu_cores} cores, multi-threaded)'}")
             self.model_id = "Salesforce/blip-image-captioning-large"
             self.processor = BlipProcessor.from_pretrained(self.model_id)

@@ -110,6 +110,46 @@ class ImportResponse(BaseModel):
     file_count: int
 
 
+class QueueVideoResponse(BaseModel):
+    video_id: str
+    camera_id: str | None = None
+    title: str
+    queue_position: int
+    storage_backend: str
+    available_link_video: str
+    available_link_metadata: str | None = None
+    source_filename: str | None = None
+    source_mode: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    raw_video_metadata: dict[str, Any]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class QueueVideoListResponse(BaseModel):
+    count: int
+    items: list[QueueVideoResponse]
+
+
+class QueueBootstrapRequest(BaseModel):
+    limit: int = Field(default=31, ge=1, le=500)
+    reset_remote_queue: bool = True
+
+
+class QueueBootstrapResponse(BaseModel):
+    processed_videos: int
+    queue_size: int
+    people_indexed: int
+    evicted_video_ids: list[str] = Field(default_factory=list)
+
+
+class QueueProcessResponse(BaseModel):
+    processed_videos: int
+    evicted_video_ids: list[str] = Field(default_factory=list)
+    imported_source_files: list[str] = Field(default_factory=list)
+
+
 class OverviewMetrics(BaseModel):
     total_users: int
     total_managed_videos: int
@@ -117,6 +157,7 @@ class OverviewMetrics(BaseModel):
     total_candidates: int
     total_cameras: int
     total_candidate_videos: int
+    total_queue_videos: int
 
 
 class OverviewResponse(BaseModel):

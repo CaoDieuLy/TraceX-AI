@@ -60,6 +60,36 @@ Canh bao:
   - `LIGHTNING_API_ENDPOINT`
   - `LIGHTNING_API_TOKEN`
 
+## Queue Google Drive va xu ly video
+
+Kien truc queue da duoc tach thanh 2 vai tro:
+
+- `queue-worker`: poll `VinUni/Import_New`, download file, goi `tracking-service`, upload `.h265` va metadata len `VinUni/Queue`, xu ly FIFO, cap nhat PostgreSQL.
+- `tracking-service`: nhan job ingestion video qua `POST /api/v1/ingestion/process`, chiu trach nhiem detect / re-id / sinh metadata chi tiet.
+
+API moi o metadata-service:
+
+- `GET /api/v1/queue/videos`
+- `POST /api/v1/queue/bootstrap`
+- `POST /api/v1/queue/process-imports`
+
+Chay bootstrap tu folder nguon local:
+
+```bash
+docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --once
+```
+
+Dong bo `Import_New` lien tuc:
+
+```bash
+docker compose up -d queue-worker
+```
+
+Luu y:
+
+- `GOOGLE_DRIVE_CREDENTIALS_FILE` phai tro dung file service account va folder Drive phai share quyen cho service account.
+- Neu `TRACKING_USE_MOCK=false` va trong `tracking-service` co model/GPU day du, metadata se duoc sinh boi processor thuc te trong service nay.
+
 ## CI/CD VPS
 
 Workflow mau nam tai [`.github/workflows/mcpt-ci-cd.yml`](../.github/workflows/mcpt-ci-cd.yml).
