@@ -88,6 +88,12 @@ class CandidateResponse(BaseModel):
     frame_idx: int | None = None
     search_text: str | None = None
     metadata_path: str | None = None
+    appearance_summary: str | None = None
+    semantic_attributes: list[str] = Field(default_factory=list)
+    visibility_scores: dict[str, Any] = Field(default_factory=dict)
+    world_position: dict[str, Any] | None = None
+    reid_profile: str | None = None
+    pipeline_profile: str | None = None
     raw_metadata: dict[str, Any]
 
     model_config = ConfigDict(from_attributes=True)

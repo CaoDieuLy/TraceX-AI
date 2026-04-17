@@ -17,7 +17,58 @@ def _slugify(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-._") or "video"
 
 
+def _coerce_string_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _coerce_mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _candidate_search_document(person: dict) -> str:
+    parts: list[str] = []
+    for key in (
+        "search_text",
+        "appearance_summary",
+        "person_caption",
+        "caption",
+    ):
+        text = str(person.get(key) or "").strip()
+        if text:
+            parts.append(text)
+
+    attributes = _coerce_string_list(person.get("semantic_attributes"))
+    if attributes:
+        parts.append("attributes: " + ", ".join(attributes))
+
+    timeline = person.get("timeline")
+    if isinstance(timeline, list):
+        actions = [str(item.get("action_summary") or "").strip() for item in timeline if isinstance(item, dict)]
+        actions = [item for item in actions if item]
+        if actions:
+            parts.append("timeline: " + " ".join(actions))
+
+    world_position = person.get("world_position") or person.get("top_point_projection")
+    if isinstance(world_position, dict) and world_position:
+        axis_tokens = []
+        for axis in ("x", "y", "z"):
+            if axis in world_position:
+                axis_tokens.append(f"{axis}={world_position[axis]}")
+        if axis_tokens:
+            parts.append("world: " + ", ".join(axis_tokens))
+
+    return " ".join(parts).strip()
+
+
 def candidate_to_payload(candidate: PersonCandidate) -> dict:
+    raw_metadata = candidate.raw_metadata or {}
     return {
         "candidate_id": candidate.candidate_id,
         "camera_id": candidate.camera_id,
@@ -27,7 +78,13 @@ def candidate_to_payload(candidate: PersonCandidate) -> dict:
         "frame_idx": candidate.frame_idx,
         "search_text": candidate.search_text,
         "metadata_path": candidate.metadata_path,
-        "raw_metadata": candidate.raw_metadata,
+        "appearance_summary": raw_metadata.get("appearance_summary") or raw_metadata.get("person_caption"),
+        "semantic_attributes": _coerce_string_list(raw_metadata.get("semantic_attributes")),
+        "visibility_scores": _coerce_mapping(raw_metadata.get("visibility_scores")),
+        "world_position": raw_metadata.get("world_position") or raw_metadata.get("top_point_projection"),
+        "reid_profile": raw_metadata.get("reid_profile"),
+        "pipeline_profile": raw_metadata.get("pipeline_profile"),
+        "raw_metadata": raw_metadata,
     }
 
 
@@ -250,7 +307,7 @@ def import_legacy_metadata(session: Session) -> dict:
                 "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
                 "human_key": person.get("human_key"),
                 "frame_idx": int(person.get("frame_idx") or 0),
-                "search_text": person.get("search_text") or person.get("person_caption") or person.get("caption"),
+                "search_text": _candidate_search_document(person),
                 "metadata_path": str(metadata_path),
                 "raw_metadata": person,
             }

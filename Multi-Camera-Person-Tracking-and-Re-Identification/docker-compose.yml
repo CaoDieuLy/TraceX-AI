@@ -42,15 +42,27 @@ services:
       dockerfile: ./backend/services/tracking-service/Dockerfile
     image: mcpt-tracking-service:latest
     container_name: mcpt-tracking-service
+    gpus: all
+    shm_size: "8gb"
     environment:
       LEGACY_ROOT: /workspace/backend/legacy-engine
       TRACKING_USE_MOCK: ${TRACKING_USE_MOCK:-true}
+      TRACKING_RUNTIME_MODE: ${TRACKING_RUNTIME_MODE:-design_ready}
+      PIPELINE_PROFILE: ${PIPELINE_PROFILE:-accuracy_first}
+      GPU_HARDWARE_PROFILE: ${GPU_HARDWARE_PROFILE:-l4}
+      GPU_COUNT: ${GPU_COUNT:-1}
+      HOST_CPU_COUNT: ${HOST_CPU_COUNT:-16}
+      HOST_RAM_GB: ${HOST_RAM_GB:-64}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
       LIGHTNING_API_BASE_URL: ${LIGHTNING_API_BASE_URL:-}
       LIGHTNING_API_ENDPOINT: ${LIGHTNING_API_ENDPOINT:-/predict}
       LIGHTNING_API_TOKEN: ${LIGHTNING_API_TOKEN:-}
       LIGHTNING_API_AUTH_HEADER: ${LIGHTNING_API_AUTH_HEADER:-Authorization}
       LIGHTNING_API_AUTH_PREFIX: ${LIGHTNING_API_AUTH_PREFIX:-Bearer }
       LIGHTNING_TIMEOUT_SECONDS: ${LIGHTNING_TIMEOUT_SECONDS:-180}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
       - storage_data:/workspace/storage
     ports:

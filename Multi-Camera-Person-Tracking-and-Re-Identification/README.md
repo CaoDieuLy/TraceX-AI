@@ -84,3 +84,4 @@ Pipeline hien tai:
 - Chuyen local volume sang object storage (S3/MinIO)
 - Kich hoat LightningAI GPU endpoint production
 - Them migration Alembic va role-based access
+- Xem tai lieu `../docs/ACCURACY_FIRST_REARCHITECTURE.md` de theo profile `accuracy_first`

@@ -16,6 +16,15 @@ def pipeline_config() -> dict:
     return get_pipeline_config()
 
 
+@app.get("/api/v1/pipeline/hardware")
+def pipeline_hardware() -> dict:
+    config = get_pipeline_config()
+    return {
+        "gpu_hardware_profile": config.get("gpu_hardware_profile"),
+        "execution_plan": config.get("execution_plan"),
+    }
+
+
 @app.post("/api/v1/ai/process", response_model=AiProcessResponse)
 def ai_process(payload: AiProcessRequest) -> dict:
     return process_video_query(payload.model_dump())

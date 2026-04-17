@@ -13,8 +13,14 @@ class TrackingRequest(BaseModel):
 class TrackingResponse(BaseModel):
     output_path: str | None = None
     relative_output_path: str | None = None
+    manifest_path: str | None = None
+    relative_manifest_path: str | None = None
     exists: bool
-    tracking_use_mock: bool
+    tracking_use_mock: bool | None = None
+    pipeline_profile: str | None = None
+    gpu_hardware_profile: str | None = None
+    runtime_mode: str | None = None
+    acceleration_state: dict[str, Any] | None = None
 
 
 class AiProcessRequest(BaseModel):
@@ -30,6 +36,9 @@ class AiProcessResponse(BaseModel):
     status: str
     provider: str
     mode: str
+    pipeline_profile: str | None = None
+    gpu_hardware_profile: dict[str, Any] | None = None
+    acceleration_state: dict[str, Any] | None = None
     query_id: str | None = None
     video_id: str
     job_id: str

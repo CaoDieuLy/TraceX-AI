@@ -5,6 +5,7 @@ import math
 import os
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -27,12 +28,36 @@ QUEUE_STATE_PATH = METADATA_DIR / "queue_state.json"
 
 MAX_QUEUE_SIZE = 32
 DEFAULT_TEXT_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-DEFAULT_TIMELINE_SEGMENTS = 12
-DEFAULT_DETECTION_FPS = 2.0
-DEFAULT_MIN_TRACK_FRAMES = 3
-DEFAULT_MIN_PERSON_AREA = 6_000
-DEFAULT_TRACK_IOU = 0.25
+DEFAULT_PIPELINE_PROFILE = "accuracy_first"
+DEFAULT_REID_PROFILE = "solider_kpr"
+DEFAULT_SEARCH_PROFILE = "itself_grab_mars"
+DEFAULT_TIMELINE_SEGMENTS = 14
+DEFAULT_DETECTION_FPS = 4.0
+DEFAULT_MIN_TRACK_FRAMES = 5
+DEFAULT_MIN_PERSON_AREA = 4_500
+DEFAULT_TRACK_IOU = 0.20
+DEFAULT_CONTENT_FRAME_SAMPLES = 12
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".hevc", ".h265"}
+
+ATTRIBUTE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "doctor": ("doctor", "physician", "bac si"),
+    "nurse": ("nurse", "y ta", "dieu duong"),
+    "patient": ("patient", "benh nhan"),
+    "male": ("male", "man", "nam"),
+    "female": ("female", "woman", "nu"),
+    "blue clothing": ("blue", "xanh", "navy", "teal"),
+    "green clothing": ("green", "xanh la"),
+    "red clothing": ("red", "do"),
+    "white clothing": ("white", "trang"),
+    "black clothing": ("black", "den"),
+    "glasses": ("glasses", "eyeglasses", "kinh"),
+    "mask": ("mask", "facemask", "khau trang"),
+    "backpack": ("backpack", "balo", "bag"),
+    "hat": ("hat", "cap", "mu"),
+    "short hair": ("short hair", "crew cut", "húi cua", "huit cua"),
+    "long hair": ("long hair", "toc dai"),
+    "sports shoes": ("sneaker", "sports shoes", "giay the thao"),
+}
 
 
 def ensure_pipeline_layout() -> dict[str, Path]:
@@ -49,11 +74,24 @@ def ensure_pipeline_layout() -> dict[str, Path]:
 
 def current_pipeline_config() -> dict:
     return {
+        "pipeline_profile": DEFAULT_PIPELINE_PROFILE,
         "text_query_model": DEFAULT_TEXT_MODEL,
         "caption_model": "Salesforce/blip-image-captioning-large",
+        "reid_profile": DEFAULT_REID_PROFILE,
+        "search_profile": DEFAULT_SEARCH_PROFILE,
         "bootstrap_detection_mode": "nvidia_ground_truth_per_person",
         "incremental_detection_mode": "opencv_hog_tracking_fallback",
         "queue_size": MAX_QUEUE_SIZE,
+        "hyperparameters": {
+            "ingest": {
+                "detection_fps": DEFAULT_DETECTION_FPS,
+                "min_track_frames": DEFAULT_MIN_TRACK_FRAMES,
+                "min_person_area": DEFAULT_MIN_PERSON_AREA,
+                "track_iou": DEFAULT_TRACK_IOU,
+                "sampled_content_frames": DEFAULT_CONTENT_FRAME_SAMPLES,
+                "timeline_segments": DEFAULT_TIMELINE_SEGMENTS,
+            },
+        },
     }
 
 
@@ -270,6 +308,15 @@ def _default_caption(camera_id: str, track_id: str) -> str:
     return f"single hospital person from {camera_id} track {track_id}"
 
 
+def _extract_semantic_attributes(text: str) -> list[str]:
+    normalized = str(text or "").lower()
+    attributes: list[str] = []
+    for attribute, tokens in ATTRIBUTE_PATTERNS.items():
+        if any(token in normalized for token in tokens):
+            attributes.append(attribute)
+    return attributes
+
+
 def _load_nvidia_ground_truth() -> dict:
     if not NVIDIA_GROUND_TRUTH_PATH.exists():
         raise FileNotFoundError(f"Missing NVIDIA ground truth at {NVIDIA_GROUND_TRUTH_PATH}")
@@ -313,17 +360,37 @@ def _apply_person_captions(candidates: list[dict], video_path: Path, vlm_engine)
     if vlm_engine is None or not candidates:
         for candidate in candidates:
             candidate["person_caption"] = _default_caption(candidate["camera_id"], candidate["track_id"])
+            candidate["appearance_summary"] = candidate["person_caption"]
+            if not candidate.get("semantic_attributes"):
+                candidate["semantic_attributes"] = _extract_semantic_attributes(candidate["appearance_summary"])
         return
 
     jobs: list[tuple[dict, Image.Image]] = []
-    for candidate in candidates:
-        crop_image = _read_crop_image(video_path, int(candidate["frame_idx"]), [int(value) for value in candidate["bbox"]])
-        if crop_image is not None:
-            jobs.append((candidate, crop_image))
+    max_workers = max(2, min((os.cpu_count() or 4) // 2, 8))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            (
+                candidate,
+                executor.submit(
+                    _read_crop_image,
+                    video_path,
+                    int(candidate["frame_idx"]),
+                    [int(value) for value in candidate["bbox"]],
+                ),
+            )
+            for candidate in candidates
+        ]
+        for candidate, future in futures:
+            crop_image = future.result()
+            if crop_image is not None:
+                jobs.append((candidate, crop_image))
 
     if not jobs:
         for candidate in candidates:
             candidate["person_caption"] = _default_caption(candidate["camera_id"], candidate["track_id"])
+            candidate["appearance_summary"] = candidate["person_caption"]
+            if not candidate.get("semantic_attributes"):
+                candidate["semantic_attributes"] = _extract_semantic_attributes(candidate["appearance_summary"])
         return
 
     try:
@@ -338,15 +405,25 @@ def _apply_person_captions(candidates: list[dict], video_path: Path, vlm_engine)
 
     for candidate in candidates:
         candidate["person_caption"] = caption_map.get(candidate["candidate_id"], _default_caption(candidate["camera_id"], candidate["track_id"]))
+        candidate["appearance_summary"] = candidate["person_caption"]
+        if not candidate.get("semantic_attributes"):
+            candidate["semantic_attributes"] = _extract_semantic_attributes(candidate["appearance_summary"])
 
 
 def _finalize_candidate_text(candidate: dict) -> None:
     timeline_text = " ".join(segment.get("action_summary", "") for segment in candidate.get("timeline", []))
     caption = candidate.get("person_caption") or _default_caption(candidate["camera_id"], candidate["track_id"])
+    semantic_attributes = ", ".join(candidate.get("semantic_attributes") or [])
+    world_position = candidate.get("world_position") or candidate.get("top_point_projection") or {}
+    world_text = ""
+    if isinstance(world_position, dict) and world_position:
+        world_text = "world position: " + ", ".join(f"{key}={value}" for key, value in world_position.items()) + ". "
     candidate["search_text"] = (
         f"single human candidate in hospital camera {candidate['camera_id']}. "
         f"track {candidate['track_id']}. "
         f"appearance: {caption}. "
+        f"attributes: {semantic_attributes or 'unknown'}. "
+        f"{world_text}"
         f"timeline: {timeline_text or 'person visible in frame'}."
     ).strip()
 
@@ -412,7 +489,7 @@ def _build_gt_people(
         start_second = round(min(frames) / fps, 3)
         end_second = round((max(frames) + 1) / fps, 3)
         content_frames = []
-        for sample_frame in _frame_sample_positions(frames, count=10):
+        for sample_frame in _frame_sample_positions(frames, count=DEFAULT_CONTENT_FRAME_SAMPLES):
             sample_index = frames.index(sample_frame)
             content_frames.append(
                 {
@@ -451,6 +528,21 @@ def _build_gt_people(
                 world_locations=payload["world_locations"],
             ),
             "person_caption": "",
+            "appearance_summary": "",
+            "semantic_attributes": [],
+            "visibility_scores": {
+                "full_body": 1.0,
+                "upper_body": 1.0,
+                "lower_body": 1.0,
+            },
+            "world_position": {
+                "x": payload["world_locations"][largest_index][0] if payload["world_locations"][largest_index] else None,
+                "y": payload["world_locations"][largest_index][1] if payload["world_locations"][largest_index] else None,
+                "z": payload["world_locations"][largest_index][2] if payload["world_locations"][largest_index] else None,
+            },
+            "pipeline_profile": DEFAULT_PIPELINE_PROFILE,
+            "reid_profile": DEFAULT_REID_PROFILE,
+            "search_profile": DEFAULT_SEARCH_PROFILE,
             "query_kind": "human",
             "vector_model": DEFAULT_TEXT_MODEL,
             "candidate_vector": [],
@@ -552,7 +644,7 @@ def _build_detected_people(
         start_second = round(min(frames) / fps, 3)
         end_second = round((max(frames) + 1) / fps, 3)
         content_frames = []
-        for sample_frame in _frame_sample_positions(frames, count=8):
+        for sample_frame in _frame_sample_positions(frames, count=DEFAULT_CONTENT_FRAME_SAMPLES):
             sample_index = frames.index(sample_frame)
             content_frames.append(
                 {
@@ -589,6 +681,17 @@ def _build_detected_people(
                 max_segments=DEFAULT_TIMELINE_SEGMENTS,
             ),
             "person_caption": "",
+            "appearance_summary": "",
+            "semantic_attributes": [],
+            "visibility_scores": {
+                "full_body": 0.82,
+                "upper_body": 0.88,
+                "lower_body": 0.70,
+            },
+            "world_position": None,
+            "pipeline_profile": DEFAULT_PIPELINE_PROFILE,
+            "reid_profile": DEFAULT_REID_PROFILE,
+            "search_profile": DEFAULT_SEARCH_PROFILE,
             "query_kind": "human",
             "vector_model": DEFAULT_TEXT_MODEL,
             "candidate_vector": [],

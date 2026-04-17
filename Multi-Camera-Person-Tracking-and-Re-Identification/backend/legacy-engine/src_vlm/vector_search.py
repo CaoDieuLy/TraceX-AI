@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 
 import chromadb
 
 from .hospital_pipeline import DEFAULT_TEXT_MODEL, METADATA_DIR
+
+
+DEFAULT_SEARCH_HYPERPARAMETERS = {
+    "fetch_multiplier": 10,
+    "score_weights": {
+        "embedding": 0.58,
+        "semantic_overlap": 0.22,
+        "visibility": 0.12,
+        "world_position": 0.08,
+    },
+    "minimum_semantic_overlap": 0.08,
+}
 
 
 @lru_cache(maxsize=2)
@@ -17,11 +30,12 @@ def _load_sentence_model(model_name: str):
 
 
 class VectorSearchEngine:
-    def __init__(self, db_path="../data/db", model_name: str = DEFAULT_TEXT_MODEL):
+    def __init__(self, db_path="../data/db", model_name: str = DEFAULT_TEXT_MODEL, hyperparameters: dict | None = None):
         print("[VectorSearch] Đang khởi tạo kết nối Vector Database (ChromaDB)...")
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.model_name = model_name
+        self.hyperparameters = hyperparameters or DEFAULT_SEARCH_HYPERPARAMETERS
         self.client = chromadb.PersistentClient(path=str(self.db_path))
         self.collection_name = "hospital_video_metadata"
         self.collection = self._get_or_create_collection()
@@ -52,6 +66,54 @@ class VectorSearchEngine:
             show_progress_bar=len(texts) > 32,
         )
         return embeddings.astype("float32").tolist()
+
+    def _tokenize(self, text: str) -> set[str]:
+        return {token for token in re.findall(r"[a-zA-Z0-9_]+", str(text or "").lower()) if len(token) >= 2}
+
+    def _semantic_overlap(self, query_text: str, candidate: dict) -> float:
+        query_tokens = self._tokenize(query_text)
+        if not query_tokens:
+            return 0.0
+        candidate_tokens = set()
+        candidate_tokens.update(self._tokenize(candidate.get("search_text") or ""))
+        candidate_tokens.update(self._tokenize(candidate.get("appearance_summary") or ""))
+        for attribute in candidate.get("semantic_attributes") or []:
+            candidate_tokens.update(self._tokenize(attribute))
+        if not candidate_tokens:
+            return 0.0
+        overlap = len(query_tokens & candidate_tokens)
+        return float(overlap / max(len(query_tokens), 1))
+
+    def _visibility_bonus(self, candidate: dict) -> float:
+        scores = candidate.get("visibility_scores")
+        if not isinstance(scores, dict) or not scores:
+            return 0.0
+        numeric_scores = [float(value) for value in scores.values() if isinstance(value, (int, float))]
+        if not numeric_scores:
+            return 0.0
+        return float(sum(numeric_scores) / len(numeric_scores))
+
+    def _world_position_bonus(self, candidate: dict) -> float:
+        world_position = candidate.get("world_position")
+        if not isinstance(world_position, dict) or not world_position:
+            return 0.0
+        if any(world_position.get(axis) is not None for axis in ("x", "y", "z")):
+            return 1.0
+        return 0.0
+
+    def _ranking_ensemble_score(self, query_text: str, candidate: dict, distance: float) -> float:
+        weights = self.hyperparameters.get("score_weights", {})
+        cosine_score = 1.0 / (1.0 + max(float(distance), 0.0))
+        semantic_score = self._semantic_overlap(query_text, candidate)
+        visibility_score = self._visibility_bonus(candidate)
+        world_position_score = self._world_position_bonus(candidate)
+        return round(
+            (cosine_score * float(weights.get("embedding", 0.58)))
+            + (semantic_score * float(weights.get("semantic_overlap", 0.22)))
+            + (visibility_score * float(weights.get("visibility", 0.12)))
+            + (world_position_score * float(weights.get("world_position", 0.08))),
+            6,
+        )
 
     def index_metadata(self, metadata_list, reset: bool = False):
         """Index person-track metadata thay vì caption theo frame."""
@@ -178,9 +240,10 @@ class VectorSearchEngine:
             return []
 
         query_embedding = self._embed_texts([query])[0]
+        fetch_multiplier = int(self.hyperparameters.get("fetch_multiplier", DEFAULT_SEARCH_HYPERPARAMETERS["fetch_multiplier"]))
         raw = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=max(int(top_k) * 8, int(top_k)),
+            n_results=max(int(top_k) * fetch_multiplier, int(top_k)),
             include=["metadatas", "distances", "documents"],
         )
 
@@ -189,6 +252,7 @@ class VectorSearchEngine:
         documents = raw.get("documents", [[]])
         ids = raw.get("ids", [[]])
         candidates = []
+        fallback_candidates = []
         seen_humans: set[str] = set()
 
         for index, meta in enumerate(metadatas[0] if metadatas else []):
@@ -209,14 +273,26 @@ class VectorSearchEngine:
             seen_humans.add(human_key)
             distance = float(distances[0][index]) if distances and distances[0] else 0.0
             full_candidate["id"] = candidate_id
-            full_candidate["score"] = round(1.0 / (1.0 + max(distance, 0.0)), 6)
+            full_candidate["score"] = self._ranking_ensemble_score(query, full_candidate, distance)
             full_candidate["distance"] = round(distance, 6)
+            full_candidate["semantic_overlap"] = round(self._semantic_overlap(query, full_candidate), 6)
+            full_candidate["world_position_score"] = round(self._world_position_bonus(full_candidate), 6)
             full_candidate["text_model"] = self.model_name
             full_candidate.setdefault("search_text", documents[0][index] if documents and documents[0] else "")
+            minimum_semantic_overlap = float(
+                self.hyperparameters.get(
+                    "minimum_semantic_overlap",
+                    DEFAULT_SEARCH_HYPERPARAMETERS["minimum_semantic_overlap"],
+                )
+            )
+            if full_candidate["semantic_overlap"] < minimum_semantic_overlap:
+                fallback_candidates.append(full_candidate)
+                continue
             candidates.append(full_candidate)
-            if len(candidates) >= top_k:
-                break
-        return candidates
+        if not candidates and fallback_candidates:
+            candidates = fallback_candidates
+        candidates.sort(key=lambda item: (-float(item.get("score") or 0.0), float(item.get("distance") or 0.0)))
+        return candidates[:top_k]
 
 
 if __name__ == "__main__":
