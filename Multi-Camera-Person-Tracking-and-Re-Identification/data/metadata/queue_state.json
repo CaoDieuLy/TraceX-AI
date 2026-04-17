@@ -1,0 +1,198 @@
+{
+  "max_size": 32,
+  "videos": [
+    {
+      "video_id": "Camera_01.mp4",
+      "camera_id": "Camera_01",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_01.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_01.json"
+    },
+    {
+      "video_id": "Camera_02.mp4",
+      "camera_id": "Camera_02",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_02.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_02.json"
+    },
+    {
+      "video_id": "Camera_03.mp4",
+      "camera_id": "Camera_03",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_03.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_03.json"
+    },
+    {
+      "video_id": "Camera_04.mp4",
+      "camera_id": "Camera_04",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_04.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_04.json"
+    },
+    {
+      "video_id": "Camera_05.mp4",
+      "camera_id": "Camera_05",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_05.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_05.json"
+    },
+    {
+      "video_id": "Camera_06.mp4",
+      "camera_id": "Camera_06",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_06.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_06.json"
+    },
+    {
+      "video_id": "Camera_07.mp4",
+      "camera_id": "Camera_07",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_07.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_07.json"
+    },
+    {
+      "video_id": "Camera_08.mp4",
+      "camera_id": "Camera_08",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_08.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_08.json"
+    },
+    {
+      "video_id": "Camera_09.mp4",
+      "camera_id": "Camera_09",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_09.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_09.json"
+    },
+    {
+      "video_id": "Camera_10.mp4",
+      "camera_id": "Camera_10",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_10.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_10.json"
+    },
+    {
+      "video_id": "Camera_11.mp4",
+      "camera_id": "Camera_11",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_11.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_11.json"
+    },
+    {
+      "video_id": "Camera_12.mp4",
+      "camera_id": "Camera_12",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_12.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_12.json"
+    },
+    {
+      "video_id": "Camera_13.mp4",
+      "camera_id": "Camera_13",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_13.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_13.json"
+    },
+    {
+      "video_id": "Camera_14.mp4",
+      "camera_id": "Camera_14",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_14.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_14.json"
+    },
+    {
+      "video_id": "Camera_15.mp4",
+      "camera_id": "Camera_15",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_15.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_15.json"
+    },
+    {
+      "video_id": "Camera_16.mp4",
+      "camera_id": "Camera_16",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_16.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_16.json"
+    },
+    {
+      "video_id": "Camera_17.mp4",
+      "camera_id": "Camera_17",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_17.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_17.json"
+    },
+    {
+      "video_id": "Camera_18.mp4",
+      "camera_id": "Camera_18",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_18.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_18.json"
+    },
+    {
+      "video_id": "Camera_19.mp4",
+      "camera_id": "Camera_19",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_19.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_19.json"
+    },
+    {
+      "video_id": "Camera_20.mp4",
+      "camera_id": "Camera_20",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_20.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_20.json"
+    },
+    {
+      "video_id": "Camera_21.mp4",
+      "camera_id": "Camera_21",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_21.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_21.json"
+    },
+    {
+      "video_id": "Camera_22.mp4",
+      "camera_id": "Camera_22",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_22.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_22.json"
+    },
+    {
+      "video_id": "Camera_23.mp4",
+      "camera_id": "Camera_23",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_23.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_23.json"
+    },
+    {
+      "video_id": "Camera_24.mp4",
+      "camera_id": "Camera_24",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_24.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_24.json"
+    },
+    {
+      "video_id": "Camera_25.mp4",
+      "camera_id": "Camera_25",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_25.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_25.json"
+    },
+    {
+      "video_id": "Camera_26.mp4",
+      "camera_id": "Camera_26",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_26.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_26.json"
+    },
+    {
+      "video_id": "Camera_27.mp4",
+      "camera_id": "Camera_27",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_27.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_27.json"
+    },
+    {
+      "video_id": "Camera_28.mp4",
+      "camera_id": "Camera_28",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_28.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_28.json"
+    },
+    {
+      "video_id": "Camera_29.mp4",
+      "camera_id": "Camera_29",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_29.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_29.json"
+    },
+    {
+      "video_id": "Camera_30.mp4",
+      "camera_id": "Camera_30",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_30.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_30.json"
+    },
+    {
+      "video_id": "Camera_31.mp4",
+      "camera_id": "Camera_31",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_31.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_31.json"
+    },
+    {
+      "video_id": "Camera_32_20260415T130952Z.mp4",
+      "camera_id": "Camera_32",
+      "compressed_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/videos/compressed/Camera_32_20260415T130952Z.mp4",
+      "metadata_path": "/teamspace/studios/this_studio/Multi-Camera-Person-Tracking-and-Re-Identification/data/metadata/Camera_32_20260415T130952Z.json"
+    }
+  ],
+  "people": []
+}
