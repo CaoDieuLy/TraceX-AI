@@ -24,6 +24,7 @@ LOGGER = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".hevc", ".h265"}
 DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 DRIVE_SCOPES = ("https://www.googleapis.com/auth/drive",)
+BOOTSTRAP_CAMERA_PATTERN = re.compile(r"Camera_\d{2}")
 
 
 class QueueSyncService:
@@ -324,7 +325,9 @@ class QueueSyncService:
             raise NotADirectoryError(f"Bootstrap source path must be a directory: {source_root}")
 
         source_videos = sorted(
-            path for path in source_root.glob("Camera_*.mp4") if re.fullmatch(r"Camera_\d{2}", path.stem)
+            path
+            for path in source_root.iterdir()
+            if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS and BOOTSTRAP_CAMERA_PATTERN.fullmatch(path.stem)
         )[:limit]
 
         processed_videos = 0
@@ -335,7 +338,7 @@ class QueueSyncService:
                 source_path=source_path,
                 camera_id=source_path.stem,
                 recorded_start=None,
-                output_basename=f"{source_path.stem}.h265",
+                output_basename=f"{source_path.stem}{source_path.suffix}" if source_path.suffix.lower() in {".h265", ".hevc"} else f"{source_path.stem}.h265",
                 source_mode="bootstrap_dataset",
             )
             evicted_video_ids.extend(
@@ -374,7 +377,12 @@ class QueueSyncService:
 
             recorded_start = datetime.now(timezone.utc).replace(microsecond=0)
             camera_id = self._slug(Path(original_name).stem)
-            output_basename = f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}.h265"
+            original_suffix = Path(original_name).suffix.lower()
+            output_basename = (
+                f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}{original_suffix}"
+                if original_suffix in {".h265", ".hevc"}
+                else f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}.h265"
+            )
             result = self._request_tracking_processing(
                 source_path=local_source_path,
                 camera_id=camera_id,

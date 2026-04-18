@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     ffmpeg_overwrite_output: bool = False
 
     lightning_api_base_url: str = ""
-    lightning_api_endpoint: str = "/predict"
+    lightning_api_endpoint: str = "/api/v1/ai/worker"
     lightning_api_token: str = ""
     lightning_api_auth_header: str = "Authorization"
     lightning_api_auth_prefix: str = "Bearer "

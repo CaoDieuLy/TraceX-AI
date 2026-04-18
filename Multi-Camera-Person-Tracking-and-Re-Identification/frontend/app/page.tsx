@@ -58,7 +58,7 @@ type QueryItem = {
 
 type AuthMode = "login" | "register";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "http://localhost:8000";
+const API_BASE = (process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "").replace(/\/$/, "");
 const TOKEN_KEY = "mcpt_access_token";
 
 const defaultRegister = {

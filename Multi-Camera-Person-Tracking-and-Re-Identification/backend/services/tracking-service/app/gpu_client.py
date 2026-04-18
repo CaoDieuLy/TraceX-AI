@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ import httpx
 from .config import settings
 
 logger = logging.getLogger(__name__)
+SAFE_SELF_CALL_ENDPOINT = "/api/v1/ai/worker"
 
 
 class LightningAIError(Exception):
@@ -41,7 +43,7 @@ class LightningAIClient:
             timeout_seconds: Request timeout
         """
         self.base_url = (base_url or settings.lightning_api_base_url).rstrip("/")
-        self.endpoint = (endpoint or settings.lightning_api_endpoint).lstrip("/")
+        self.endpoint = self._normalize_endpoint(endpoint or settings.lightning_api_endpoint)
         self.token = token or settings.lightning_api_token
         self.timeout = timeout_seconds or settings.lightning_timeout_seconds
 
@@ -50,6 +52,14 @@ class LightningAIClient:
 
         if not self.base_url:
             raise ValueError("Lightning AI base URL is required")
+
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        normalized = f"/{str(endpoint or '').strip().lstrip('/')}" if endpoint else SAFE_SELF_CALL_ENDPOINT
+        if normalized == "/api/v1/ai/process":
+            logger.info("Remapping Lightning API endpoint from /api/v1/ai/process to /api/v1/ai/worker to avoid self-call recursion.")
+            normalized = SAFE_SELF_CALL_ENDPOINT
+        return normalized.lstrip("/")
 
     def _build_headers(self) -> dict[str, str]:
         """Build authentication headers."""
@@ -129,7 +139,7 @@ class LightningAIClient:
             "query_id": query_id or str(uuid.uuid4()),
             "video_id": video_id or str(uuid.uuid4()),
             "query_text": query_text,
-            "metadata": metadata or {},
+            "metadata": json.dumps(metadata or {}),
         }
 
         # Optional fields
@@ -138,13 +148,13 @@ class LightningAIClient:
         if pipeline_profile is not None:
             data["pipeline_profile"] = pipeline_profile
         if hyperparameters:
-            data["hyperparameters"] = hyperparameters
+            data["hyperparameters"] = json.dumps(hyperparameters)
         if gpu_hardware_profile:
-            data["gpu_hardware_profile"] = gpu_hardware_profile
+            data["gpu_hardware_profile"] = json.dumps(gpu_hardware_profile)
         if execution_plan:
-            data["execution_plan"] = execution_plan
+            data["execution_plan"] = json.dumps(execution_plan)
         if acceleration_state:
-            data["acceleration_state"] = acceleration_state
+            data["acceleration_state"] = json.dumps(acceleration_state)
 
         # Send request
         url = self._get_url()

@@ -193,6 +193,16 @@ async def run_video_query(payload: dict[str, Any], request: Request) -> dict:
         raise HTTPException(status_code=502, detail=f"Service error: {exc}") from exc
 
 
+@app.post("/api/v1/ai/process")
+async def ai_process(payload: dict[str, Any]) -> dict:
+    try:
+        return await _post_json(f"{settings.tracking_service_url}/api/v1/ai/process", payload)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Tracking service error: {exc}") from exc
+
+
 @app.post("/api/v1/candidates/import-legacy")
 async def import_legacy() -> dict:
     try:
@@ -216,6 +226,36 @@ async def candidates(
 async def candidate_detail(candidate_id: str) -> dict:
     try:
         return await _get_json(f"{settings.metadata_service_url}/api/v1/candidates/{candidate_id}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.get("/api/v1/queue/videos")
+async def queue_videos() -> dict:
+    try:
+        return await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.post("/api/v1/queue/bootstrap")
+async def queue_bootstrap(payload: dict[str, Any]) -> dict:
+    try:
+        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/bootstrap", payload)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.post("/api/v1/queue/process-imports")
+async def queue_process_imports(payload: dict[str, Any] | None = None) -> dict:
+    try:
+        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/process-imports", payload or {})
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:

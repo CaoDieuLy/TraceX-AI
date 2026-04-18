@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, UploadFile
 
 from .schemas import (
     AiProcessRequest,
@@ -8,7 +10,8 @@ from .schemas import (
     VideoIngestionRequest,
     VideoIngestionResponse,
 )
-from .service import get_pipeline_config, process_video_ingestion, process_video_query, run_tracking
+from .config import settings
+from .service import get_pipeline_config, process_video_ingestion, process_video_query, process_video_query_worker, run_tracking
 
 app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
 
@@ -35,6 +38,42 @@ def pipeline_hardware() -> dict:
 @app.post("/api/v1/ai/process", response_model=AiProcessResponse)
 def ai_process(payload: AiProcessRequest) -> dict:
     return process_video_query(payload.model_dump())
+
+
+@app.post("/api/v1/ai/worker")
+async def ai_worker(
+    file: UploadFile = File(...),
+    query_id: str | None = Form(default=None),
+    video_id: str = Form(...),
+    query_text: str = Form(default=""),
+    video_title: str | None = Form(default=None),
+    metadata: str | None = Form(default=None),
+    pipeline_profile: str | None = Form(default=None),
+    hyperparameters: str | None = Form(default=None),
+    gpu_hardware_profile: str | None = Form(default=None),
+    execution_plan: str | None = Form(default=None),
+    acceleration_state: str | None = Form(default=None),
+) -> dict:
+    worker_input_dir = Path(settings.ingestion_work_root) / "remote-ai-inputs"
+    worker_input_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "").suffix or ".bin"
+    local_input_path = worker_input_dir / f"{(video_id or 'query-video').strip() or 'query-video'}-{query_id or 'worker'}{suffix}"
+    local_input_path.write_bytes(await file.read())
+    return process_video_query_worker(
+        {
+            "query_id": query_id,
+            "video_id": video_id,
+            "video_title": video_title,
+            "query_text": query_text,
+            "source_path": str(local_input_path),
+            "metadata": metadata,
+            "pipeline_profile": pipeline_profile,
+            "hyperparameters": hyperparameters,
+            "gpu_hardware_profile": gpu_hardware_profile,
+            "execution_plan": execution_plan,
+            "acceleration_state": acceleration_state,
+        }
+    )
 
 
 @app.post("/api/v1/tracking/run", response_model=TrackingResponse)

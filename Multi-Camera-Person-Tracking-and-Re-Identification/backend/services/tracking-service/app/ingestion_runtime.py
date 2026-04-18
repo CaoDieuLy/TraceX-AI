@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ def _dict_or_empty(value: object) -> dict:
 
 
 DRIVE_SCOPES = ("https://www.googleapis.com/auth/drive",)
+ALREADY_COMPRESSED_SUFFIXES = {".h265", ".hevc"}
 
 
 class VideoIngestionRuntime:
@@ -140,6 +142,43 @@ class VideoIngestionRuntime:
             return target_path
         raise ValueError("Provide either source_path or source_drive_file_id")
 
+    @staticmethod
+    def _normalize_output_name(source_path: Path, output_basename: str | None) -> str:
+        if output_basename:
+            suffix = Path(output_basename).suffix.lower()
+            if suffix in ALREADY_COMPRESSED_SUFFIXES:
+                return output_basename
+            return f"{output_basename}{source_path.suffix}"
+        return source_path.name
+
+    def _prepare_compressed_video(
+        self,
+        *,
+        source_path: Path,
+        target_video_dir: Path,
+        output_basename: str | None,
+    ) -> Path:
+        target_video_dir.mkdir(parents=True, exist_ok=True)
+        if source_path.suffix.lower() in ALREADY_COMPRESSED_SUFFIXES:
+            output_name = self._normalize_output_name(source_path, output_basename)
+            target_path = target_video_dir / output_name
+            if source_path.resolve() != target_path.resolve():
+                shutil.copy2(source_path, target_path)
+            return target_path
+
+        with legacy_workdir():
+            from src_vlm import video_ingestion
+
+            output_name = output_basename or f"{source_path.stem}.h265"
+            return Path(
+                video_ingestion.compress_video(
+                    str(source_path),
+                    str(target_video_dir),
+                    use_h265=True,
+                    output_filename=output_name,
+                )
+            )
+
     def process_video(
         self,
         *,
@@ -178,18 +217,14 @@ class VideoIngestionRuntime:
         vlm_engine = self._get_vlm_engine()
 
         with legacy_workdir():
-            from src_vlm import hospital_pipeline, video_ingestion
+            from src_vlm import hospital_pipeline
 
             start_time = recorded_start or datetime.fromtimestamp(resolved_source.stat().st_mtime, tz=timezone.utc)
             camera_slug = hospital_pipeline._slug(camera_id or resolved_source.stem)
-            output_name = output_basename or f"{camera_slug}_{start_time.strftime('%Y%m%dT%H%M%SZ')}.h265"
-            compressed_path = Path(
-                video_ingestion.compress_video(
-                    str(resolved_source),
-                    str(target_video_dir),
-                    use_h265=True,
-                    output_filename=output_name,
-                )
+            compressed_path = self._prepare_compressed_video(
+                source_path=resolved_source,
+                target_video_dir=target_video_dir,
+                output_basename=output_basename or f"{camera_slug}_{start_time.strftime('%Y%m%dT%H%M%SZ')}.h265",
             )
             video_payload, people = hospital_pipeline._build_detected_people(
                 compressed_path=compressed_path,

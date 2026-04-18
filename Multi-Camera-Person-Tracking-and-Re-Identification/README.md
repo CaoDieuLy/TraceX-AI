@@ -114,6 +114,91 @@ Pipeline hien tai:
 2. Copy source len VPS
 3. Chay `docker compose up -d --build` tren VPS
 
+## Deploy production len `search-engine-119.smartnovi.tech`
+
+Repo da co san bo script VPS va nginx host-level de deploy end-to-end:
+
+- `infra/vps/provision.sh`: cai Docker, nginx, certbot
+- `infra/vps/deploy.sh`: build va chay stack Docker
+- `infra/vps/configure_nginx.sh`: tao virtual host nginx cho domain
+- `infra/vps/enable_https.sh`: bat Let's Encrypt
+- `infra/vps/.env.vps.example`: mau env production
+
+Kien truc production khuyen nghi:
+
+- VPS chay `frontend`, `api-gateway`, `metadata-service`, `queue-worker`, `postgres`
+- `tracking-service` local la tuy chon va mac dinh khong bat
+- `TRACKING_SERVICE_URL` tro sang LightningAI GPU public endpoint
+- nginx tren host reverse proxy:
+  - `/` -> Next.js frontend
+  - `/api/` -> FastAPI api-gateway
+
+Trinh tu deploy tren Ubuntu VPS:
+
+```bash
+apt update
+apt install -y git
+mkdir -p /opt/mcpt
+cd /opt/mcpt
+git clone <your-repo-url> app
+cd app
+bash infra/vps/provision.sh
+mkdir -p secrets
+cp infra/vps/.env.vps.example .env
+```
+
+Copy file service-account Google Drive vao:
+
+```bash
+/opt/mcpt/app/secrets/drive-sa.json
+```
+
+Sua `.env` production:
+
+- `POSTGRES_PASSWORD`
+- `JWT_SECRET_KEY`
+- `LETSENCRYPT_EMAIL`
+- `GOOGLE_DRIVE_VINUNI_FOLDER_ID`
+- `LIGHTNING_API_TOKEN`
+- `TRACKING_SERVICE_URL`
+- `LIGHTNING_API_BASE_URL`
+
+Sau do deploy app:
+
+```bash
+cd /opt/mcpt/app
+bash infra/vps/deploy.sh
+```
+
+Cau hinh nginx cho domain:
+
+```bash
+cd /opt/mcpt/app
+bash infra/vps/configure_nginx.sh search-engine-119.smartnovi.tech 13000 18000
+```
+
+Bat HTTPS:
+
+```bash
+cd /opt/mcpt/app
+bash infra/vps/enable_https.sh search-engine-119.smartnovi.tech your-email@example.com
+```
+
+Kiem tra:
+
+- `https://search-engine-119.smartnovi.tech`
+- `https://search-engine-119.smartnovi.tech/api/v1/overview`
+
+Ghi chu production:
+
+- Port container tren VPS duoc bind vao `127.0.0.1` de chi co nginx host moi public ra Internet.
+- Frontend production mac dinh goi API cung origin, khong con phu thuoc `localhost:8000`.
+- Neu sau nay muon bat `tracking-service` local co GPU tren VPS, chay them:
+
+```bash
+COMPOSE_PROFILES=local-gpu docker compose up -d --build tracking-service
+```
+
 ## Mo rong tiep theo
 
 - Gan domain vao reverse proxy/Nginx tren VPS
