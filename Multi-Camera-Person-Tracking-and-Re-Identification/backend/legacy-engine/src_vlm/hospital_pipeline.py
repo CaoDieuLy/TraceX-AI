@@ -16,7 +16,7 @@ from PIL import Image
 import torch
 from ultralytics import YOLO
 import open_clip
-from transformers import AutoProcessor, AutoModelForVision2Seq, pipeline
+from transformers import AutoProcessor, AutoModelForImageTextToText, pipeline
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
@@ -493,15 +493,30 @@ def _probe_video(video_path: Path) -> dict:
             "width": 0,
             "height": 0,
         }
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+    fps_raw = cap.get(cv2.CAP_PROP_FPS)
+    frame_count_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     cap.release()
+
+    # Validate fps
+    fps = float(fps_raw) if fps_raw and fps_raw > 0 else 25.0
+
+    # Validate frame_count (can be negative for some codecs)
+    frame_count = 0
+    if frame_count_raw is not None and frame_count_raw > 0:
+        frame_count = int(frame_count_raw)
+
+    # Calculate duration safely
+    duration_seconds = 0.0
+    if fps > 0 and frame_count > 0:
+        duration_seconds = frame_count / fps
+
     return {
         "fps": fps,
         "frame_count": frame_count,
-        "duration_seconds": (frame_count / fps) if fps > 0 else 0.0,
+        "duration_seconds": duration_seconds,
         "width": width,
         "height": height,
     }
@@ -759,7 +774,18 @@ def _build_video_payload(
     recorded_start: datetime,
     probe: dict,
 ) -> dict:
-    recorded_end = recorded_start + timedelta(seconds=float(probe.get("duration_seconds") or 0.0))
+    duration_seconds = float(probe.get("duration_seconds") or 0.0)
+    # Guard against invalid duration (overflow protection)
+    if duration_seconds < 0 or duration_seconds > 86400:  # Max 24 hours
+        print(f"[WARNING] Invalid duration: {duration_seconds}s, clamping to 0")
+        duration_seconds = 0.0
+
+    try:
+        recorded_end = recorded_start + timedelta(seconds=duration_seconds)
+    except OverflowError:
+        print(f"[WARNING] Overflow when calculating recorded_end, using recorded_start")
+        recorded_end = recorded_start
+
     return {
         "video_id": compressed_path.name,
         "camera_id": camera_id,
@@ -772,7 +798,7 @@ def _build_video_payload(
         "recorded_end": _iso(recorded_end),
         "fps": float(probe.get("fps") or 0.0),
         "frame_count": int(probe.get("frame_count") or 0),
-        "duration_seconds": round(float(probe.get("duration_seconds") or 0.0), 3),
+        "duration_seconds": round(duration_seconds, 3),
         "width": int(probe.get("width") or 0),
         "height": int(probe.get("height") or 0),
         "file_size_bytes": compressed_path.stat().st_size if compressed_path.exists() else 0,

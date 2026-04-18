@@ -1,19 +1,50 @@
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import load_dotenv
+import os
+
+# Load .env from tracking-service root (2 levels up from this file)
+_here = Path(__file__).parent
+_env_file = _here.parent / ".env"
+if _env_file.exists():
+    load_dotenv(_env_file, override=True)
+    print(f"[config] Loaded .env from {_env_file}")
+else:
+    print(f"[config] WARNING: .env not found at {_env_file}")
+
+# Compute PROJECT_ROOT from env or file location
+PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", _here.parent.parent.parent.parent))
 
 
 class Settings(BaseSettings):
     app_name: str = "mcpt-tracking-service"
-    legacy_root: str = "/workspace/backend/legacy-engine"
-    ingestion_work_root: str = "/workspace/storage/tracking-ingestion"
-    video_conversion_output_dir: str = "/workspace/storage/video-conversion"
-    video_download_output_dir: str = "/workspace/storage/tracking-outputs"
+
+    # Paths - auto-detect from PROJECT_ROOT
+    legacy_root: str = str(PROJECT_ROOT / "backend" / "legacy-engine")
+    ingestion_work_root: str = str(PROJECT_ROOT / "storage" / "tracking-ingestion")
+    video_conversion_output_dir: str = str(PROJECT_ROOT / "storage" / "video-conversion")
+    video_download_output_dir: str = str(PROJECT_ROOT / "storage" / "tracking-outputs")
 
     # Camera calibration for 3D world projection
-    camera_calibration_path: str = "/workspace/backend/config/camera_calibration.json"
+    camera_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "camera_calibration.json")
+
+    # PostgreSQL
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_database: str = "video_tracking"
+    postgres_user: str = "mcpt_user"
+    postgres_password: str = "Mcpt@2026!Secure"
 
     google_drive_enabled: bool = False
-    google_drive_credentials_file: str = ""
+    google_drive_credentials_file: Path = Path("")
     google_drive_make_public: bool = True
+    google_drive_root_folder_id: str = ""
+    google_drive_vinuni_folder_id: str = ""
+    google_drive_vinuni_folder_name: str = "VinUni"
+    google_drive_queue_folder_name: str = "Queue"
+    google_drive_import_folder_name: str = "Import_New"
+    google_drive_h265_folder_name: str = ".h265"
+    google_drive_metadata_folder_name: str = "Metadata"
 
     tracking_runtime_mode: str = "production_ready"
     pipeline_profile: str = "accuracy_first"
@@ -41,7 +72,12 @@ class Settings(BaseSettings):
     enable_geometry_gating: bool = True
     enable_corrective_cascade: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Compute .env path relative to this config file
+    _here = Path(__file__).parent
+    model_config = SettingsConfigDict(
+        env_file=str(_here / ".env"),
+        extra="ignore"
+    )
 
 
 settings = Settings()

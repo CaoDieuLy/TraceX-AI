@@ -64,6 +64,10 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Google Drive credentials (SENSITIVE - DO NOT COMMIT)
+backend/services/tracking-service/credentials/
+backend/services/metadata-service/credentials/
+
 # Logs & outputs
 *.log
 output/
