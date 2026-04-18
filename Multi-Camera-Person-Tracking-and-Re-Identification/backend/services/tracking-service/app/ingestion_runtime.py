@@ -6,7 +6,7 @@ from typing import Any
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from .config import settings
 from .cuda_runtime import configure_torch_runtime
@@ -97,8 +97,10 @@ class VideoIngestionRuntime:
         service = self._build_drive_service()
         request = service.files().get_media(fileId=file_id)
         target_path.parent.mkdir(parents=True, exist_ok=True)
+        import io
         with target_path.open("wb") as handle:
-            downloader = MediaFileDownload(handle, request)
+            fh = io.FileIO(handle.name, mode='wb')
+            downloader = MediaIoBaseDownload(fh, request)
             done = False
             while not done:
                 _status, done = downloader.next_chunk()

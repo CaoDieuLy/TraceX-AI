@@ -6,6 +6,11 @@ ENV UVICORN_WORKERS=1
 ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
 
+# Install FFmpeg for video conversion
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY backend/services/tracking-service/requirements.txt ./requirements.txt
