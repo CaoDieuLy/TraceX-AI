@@ -15,9 +15,7 @@ from PIL import Image
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
-NVIDIA_HOSPITAL_ROOT = DATA_DIR / "NVIDIA_SmartSpaces" / "MTMC_Tracking_2025" / "val" / "Hospital_000"
-NVIDIA_VIDEO_DIR = NVIDIA_HOSPITAL_ROOT / "videos"
-NVIDIA_GROUND_TRUTH_PATH = NVIDIA_HOSPITAL_ROOT / "ground_truth.json"
+# Production directories
 COMPRESSED_VIDEO_DIR = DATA_DIR / "videos" / "compressed"
 UPLOADED_VIDEO_DIR = DATA_DIR / "videos" / "uploads"
 METADATA_DIR = DATA_DIR / "metadata"
@@ -91,17 +89,6 @@ def current_pipeline_config() -> dict:
             },
         },
     }
-
-
-def list_nvidia_hospital_videos(limit: int = 31) -> list[Path]:
-    if not NVIDIA_VIDEO_DIR.exists():
-        return []
-    videos = sorted(
-        path
-        for path in NVIDIA_VIDEO_DIR.iterdir()
-        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS and re.fullmatch(r"Camera_\d{2}", path.stem)
-    )
-    return videos[:limit]
 
 
 def parse_recorded_start(value: str | datetime | None, fallback: datetime) -> datetime:
@@ -319,14 +306,8 @@ def _extract_semantic_attributes(text: str) -> list[str]:
     return attributes
 
 
-def _load_nvidia_ground_truth() -> dict:
-    if not NVIDIA_GROUND_TRUTH_PATH.exists():
-        raise FileNotFoundError(f"Missing NVIDIA ground truth at {NVIDIA_GROUND_TRUTH_PATH}")
-    with NVIDIA_GROUND_TRUTH_PATH.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if not isinstance(payload, dict):
-        raise ValueError("Unexpected NVIDIA ground truth format.")
-    return payload
+# NVIDIA ground truth bootstrap functions removed - these were only for demo/dev with NVIDIA dataset
+# For production, use _build_detected_people() with HOG detection + BLIP captioning
 
 
 def _build_video_payload(
@@ -428,133 +409,6 @@ def _finalize_candidate_text(candidate: dict) -> None:
         f"{world_text}"
         f"timeline: {timeline_text or 'person visible in frame'}."
     ).strip()
-
-
-def _build_gt_people(
-    *,
-    compressed_path: Path,
-    source_path: Path,
-    camera_id: str,
-    recorded_start: datetime,
-    ground_truth: dict,
-    vlm_engine,
-) -> tuple[dict, list[dict]]:
-    probe = _probe_video(compressed_path)
-    fps = max(float(probe.get("fps") or 0.0), 1.0)
-    grouped: dict[str, dict] = {}
-    for raw_frame_idx, entries in ground_truth.items():
-        try:
-            frame_idx = int(raw_frame_idx)
-        except Exception:
-            continue
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            visible = entry.get("2d bounding box visible") or {}
-            bbox = visible.get(camera_id)
-            if not bbox:
-                continue
-            object_id = str(entry.get("object id"))
-            record = grouped.setdefault(
-                object_id,
-                {
-                    "frames": [],
-                    "bboxes": [],
-                    "world_locations": [],
-                },
-            )
-            record["frames"].append(frame_idx)
-            record["bboxes"].append([int(value) for value in bbox])
-            record["world_locations"].append(entry.get("3d location") or [])
-
-    metadata_path = METADATA_DIR / f"{camera_id}.json"
-    video_payload = _build_video_payload(
-        source_path=source_path,
-        compressed_path=compressed_path,
-        metadata_path=metadata_path,
-        camera_id=camera_id,
-        recorded_start=recorded_start,
-        probe=probe,
-    )
-
-    candidates: list[dict] = []
-    for object_id, payload in sorted(grouped.items(), key=lambda item: int(item[0])):
-        frames = payload["frames"]
-        bboxes = payload["bboxes"]
-        if not frames:
-            continue
-        largest_index = max(range(len(bboxes)), key=lambda index: _bbox_area(bboxes[index]))
-        representative_frame = int(frames[largest_index])
-        representative_bbox = [int(value) for value in bboxes[largest_index]]
-        start_second = round(min(frames) / fps, 3)
-        end_second = round((max(frames) + 1) / fps, 3)
-        content_frames = []
-        for sample_frame in _frame_sample_positions(frames, count=DEFAULT_CONTENT_FRAME_SAMPLES):
-            sample_index = frames.index(sample_frame)
-            content_frames.append(
-                {
-                    "frame_idx": int(sample_frame),
-                    "second": round(sample_frame / fps, 3),
-                    "actual_time": _iso(recorded_start + timedelta(seconds=(sample_frame / fps))),
-                    "bbox": [int(value) for value in bboxes[sample_index]],
-                    "world_location": payload["world_locations"][sample_index],
-                }
-            )
-        candidate = {
-            "candidate_id": f"{camera_id}_person_{object_id}",
-            "human_key": str(object_id),
-            "global_person_id": str(object_id),
-            "video_id": compressed_path.name,
-            "camera_id": camera_id,
-            "track_id": str(object_id),
-            "candidate_type": "person_track",
-            "source_mode": "nvidia_ground_truth",
-            "frame_idx": representative_frame,
-            "start_frame": int(min(frames)),
-            "end_frame": int(max(frames)),
-            "start_second": start_second,
-            "end_second": end_second,
-            "actual_start_time": _iso(recorded_start + timedelta(seconds=start_second)),
-            "actual_end_time": _iso(recorded_start + timedelta(seconds=end_second)),
-            "bbox": representative_bbox,
-            "representative_bbox": representative_bbox,
-            "content_frames": content_frames,
-            "timeline": _segment_track_timeline(
-                frames=frames,
-                bboxes=bboxes,
-                fps=fps,
-                recorded_start=recorded_start,
-                max_segments=DEFAULT_TIMELINE_SEGMENTS,
-                world_locations=payload["world_locations"],
-            ),
-            "person_caption": "",
-            "appearance_summary": "",
-            "semantic_attributes": [],
-            "visibility_scores": {
-                "full_body": 1.0,
-                "upper_body": 1.0,
-                "lower_body": 1.0,
-            },
-            "world_position": {
-                "x": payload["world_locations"][largest_index][0] if payload["world_locations"][largest_index] else None,
-                "y": payload["world_locations"][largest_index][1] if payload["world_locations"][largest_index] else None,
-                "z": payload["world_locations"][largest_index][2] if payload["world_locations"][largest_index] else None,
-            },
-            "pipeline_profile": DEFAULT_PIPELINE_PROFILE,
-            "reid_profile": DEFAULT_REID_PROFILE,
-            "search_profile": DEFAULT_SEARCH_PROFILE,
-            "query_kind": "human",
-            "vector_model": DEFAULT_TEXT_MODEL,
-            "candidate_vector": [],
-        }
-        candidates.append(candidate)
-
-    _apply_person_captions(candidates, compressed_path, vlm_engine)
-    for candidate in candidates:
-        _finalize_candidate_text(candidate)
-    return video_payload, candidates
 
 
 def _build_detected_people(
@@ -787,58 +641,6 @@ def reset_managed_artifacts() -> None:
     for path in COMPRESSED_VIDEO_DIR.iterdir():
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
             path.unlink(missing_ok=True)
-
-
-def bootstrap_nvidia_hospital_dataset(vlm_engine, limit: int = 31) -> dict:
-    ensure_pipeline_layout()
-    reset_managed_artifacts()
-    ground_truth = _load_nvidia_ground_truth()
-    source_videos = list_nvidia_hospital_videos(limit=limit)
-    if not source_videos:
-        raise FileNotFoundError(
-            f"No .h265/.hevc Camera_XX inputs found in {NVIDIA_VIDEO_DIR}. "
-            "The bootstrap flow now expects pre-encoded H.265 inputs."
-        )
-    base_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    queue_entries: list[dict] = []
-    processed: list[dict] = []
-
-    for index, source_path in enumerate(source_videos):
-        camera_id = source_path.stem
-        compressed_path = _ensure_managed_h265_copy(source_path, COMPRESSED_VIDEO_DIR, source_path.name)
-        video_payload, people = _build_gt_people(
-            compressed_path=compressed_path,
-            source_path=source_path,
-            camera_id=camera_id,
-            recorded_start=base_start + timedelta(seconds=index * 10),
-            ground_truth=ground_truth,
-            vlm_engine=vlm_engine,
-        )
-        metadata_path = Path(video_payload["metadata_path"])
-        _write_video_metadata(metadata_path, video_payload, people)
-        queue_entries.append(
-            {
-                "video_id": video_payload["video_id"],
-                "camera_id": camera_id,
-                "compressed_path": str(compressed_path),
-                "metadata_path": str(metadata_path),
-            }
-        )
-        processed.append(
-            {
-                "video_id": video_payload["video_id"],
-                "camera_id": camera_id,
-                "person_count": len(people),
-            }
-        )
-
-    _write_queue_state(queue_entries)
-    return {
-        "processed_videos": len(processed),
-        "queue_size": len(queue_entries),
-        "people_indexed": sum(item["person_count"] for item in processed),
-        "videos": processed,
-    }
 
 
 def save_uploaded_video(file_bytes: bytes, original_name: str) -> Path:

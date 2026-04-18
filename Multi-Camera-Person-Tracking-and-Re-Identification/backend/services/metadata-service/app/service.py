@@ -301,50 +301,122 @@ def get_overview(session: Session) -> dict:
 
 
 def import_legacy_metadata(session: Session) -> dict:
-    metadata_root = Path(settings.legacy_metadata_dir)
-    metadata_root.mkdir(parents=True, exist_ok=True)
+    """
+    Import person candidates từ Google Drive Metadata folder (Queue) vào PostgreSQL.
+    Trong production, metadata được sinh bởi ingestion pipeline và đã có trong DB qua queue worker.
+    Endpoint này chỉ dùng để migrate/restore từ Drive nếu cần.
+    """
+    if settings.google_drive_enabled:
+        # Đọc từ Google Drive Metadata folder
+        from .queue_runtime import QueueSyncService
 
-    imported_count = 0
-    updated_count = 0
-    file_count = 0
+        qs = QueueSyncService()
+        drive_service = qs._build_drive_service()
+        layout = qs.ensure_drive_layout()
+        metadata_folder_id = layout["queue_metadata_id"]
 
-    for metadata_path in sorted(metadata_root.glob("*.json")):
-        file_count += 1
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-        for person in payload.get("people") or []:
-            if not isinstance(person, dict):
-                continue
-            candidate_id = str(person.get("candidate_id") or "").strip()
-            if not candidate_id:
-                continue
+        # Query tất cả JSON files trong Metadata folder
+        query = f"'{metadata_folder_id}' in parents and trashed = false and mimeType='application/json'"
+        files = drive_service.files().list(q=query, fields="files(id, name)").execute().get("files", [])
 
-            existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
-            values = {
-                "candidate_id": candidate_id,
-                "camera_id": person.get("camera_id"),
-                "video_id": person.get("video_id"),
-                "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
-                "human_key": person.get("human_key"),
-                "frame_idx": int(person.get("frame_idx") or 0),
-                "search_text": _candidate_search_document(person),
-                "metadata_path": str(metadata_path),
-                "raw_metadata": person,
-            }
+        imported_count = 0
+        updated_count = 0
+        file_count = len(files)
 
-            if existing:
-                for key, value in values.items():
-                    setattr(existing, key, value)
-                updated_count += 1
-            else:
-                session.add(PersonCandidate(**values))
-                imported_count += 1
+        for file_meta in files:
+            file_id = file_meta["id"]
+            filename = file_meta["name"]
+            # Download file content
+            import io
+            request = drive_service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            content = fh.getvalue().decode("utf-8")
+            payload = json.loads(content)
+            # Import persons from this metadata file
+            for person in payload.get("people") or []:
+                if not isinstance(person, dict):
+                    continue
+                candidate_id = str(person.get("candidate_id") or "").strip()
+                if not candidate_id:
+                    continue
 
-    session.commit()
-    return {
-        "imported_count": imported_count,
-        "updated_count": updated_count,
-        "file_count": file_count,
-    }
+                existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
+                values = {
+                    "candidate_id": candidate_id,
+                    "camera_id": person.get("camera_id"),
+                    "video_id": person.get("video_id"),
+                    "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
+                    "human_key": person.get("human_key"),
+                    "frame_idx": int(person.get("frame_idx") or 0),
+                    "search_text": _candidate_search_document(person),
+                    "metadata_path": f"drive://{file_id}/{filename}",
+                    "raw_metadata": person,
+                }
+
+                if existing:
+                    for key, value in values.items():
+                        setattr(existing, key, value)
+                    updated_count += 1
+                else:
+                    session.add(PersonCandidate(**values))
+                    imported_count += 1
+
+        session.commit()
+        return {
+            "imported_count": imported_count,
+            "updated_count": updated_count,
+            "file_count": file_count,
+        }
+    else:
+        # Fallback: đọc từ local LEGACY_METADATA_DIR (development only)
+        metadata_root = Path(settings.legacy_metadata_dir)
+        metadata_root.mkdir(parents=True, exist_ok=True)
+
+        imported_count = 0
+        updated_count = 0
+        file_count = 0
+
+        for metadata_path in sorted(metadata_root.glob("*.json")):
+            file_count += 1
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            for person in payload.get("people") or []:
+                if not isinstance(person, dict):
+                    continue
+                candidate_id = str(person.get("candidate_id") or "").strip()
+                if not candidate_id:
+                    continue
+
+                existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
+                values = {
+                    "candidate_id": candidate_id,
+                    "camera_id": person.get("camera_id"),
+                    "video_id": person.get("video_id"),
+                    "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
+                    "human_key": person.get("human_key"),
+                    "frame_idx": int(person.get("frame_idx") or 0),
+                    "search_text": _candidate_search_document(person),
+                    "metadata_path": str(metadata_path),
+                    "raw_metadata": person,
+                }
+
+                if existing:
+                    for key, value in values.items():
+                        setattr(existing, key, value)
+                    updated_count += 1
+                else:
+                    session.add(PersonCandidate(**values))
+                    imported_count += 1
+
+        session.commit()
+        return {
+            "imported_count": imported_count,
+            "updated_count": updated_count,
+            "file_count": file_count,
+        }
 
 
 def list_queue_videos(session: Session) -> list[dict]:

@@ -91,8 +91,9 @@ services:
       dockerfile: ./backend/services/tracking-service/Dockerfile
     image: mcpt-tracking-service:latest
     container_name: mcpt-tracking-service
-    gpus: all
-    shm_size: "8gb"
+    # Tracking service is OPTIONAL in production; enable with COMPOSE_PROFILES=local-gpu
+    # Default compose up will NOT start this service to avoid missing GPU dependencies
+    # To enable: COMPOSE_PROFILES=local-gpu docker compose up --build tracking-service
     environment:
       LEGACY_ROOT: /workspace/backend/legacy-engine
       INGESTION_WORK_ROOT: ${INGESTION_WORK_ROOT:-/workspace/storage/tracking-ingestion}

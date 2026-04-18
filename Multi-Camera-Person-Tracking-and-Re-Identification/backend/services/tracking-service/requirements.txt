@@ -13,3 +13,9 @@ psycopg2-binary==2.9.10
 rclone==0.2.3
 watchdog==6.0.0
 python-dotenv==1.0.0
+# AI/ML dependencies for VLM and ingestion
+torch==2.2.2
+torchvision==0.17.2
+transformers==4.30.0
+accelerate==0.25.0
+safetensors==0.4.0
