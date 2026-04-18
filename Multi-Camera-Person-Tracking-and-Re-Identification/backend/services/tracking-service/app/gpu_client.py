@@ -130,7 +130,7 @@ class LightningAIClient:
             "file": (
                 Path(video_path).name,
                 video_bytes,
-                "video/mp4",  # or video/x-m4v, application/octet-stream
+                "video/h265",
             )
         }
 

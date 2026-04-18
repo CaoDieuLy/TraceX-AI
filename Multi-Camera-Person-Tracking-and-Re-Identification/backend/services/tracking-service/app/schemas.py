@@ -16,7 +16,6 @@ class TrackingResponse(BaseModel):
     manifest_path: str | None = None
     relative_manifest_path: str | None = None
     exists: bool
-    tracking_use_mock: bool | None = None
     pipeline_profile: str | None = None
     gpu_hardware_profile: str | None = None
     runtime_mode: str | None = None

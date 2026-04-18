@@ -12,8 +12,7 @@ class Settings(BaseSettings):
     google_drive_credentials_file: str = ""
     google_drive_make_public: bool = True
 
-    tracking_use_mock: bool = True
-    tracking_runtime_mode: str = "design_ready"
+    tracking_runtime_mode: str = "production_ready"
     pipeline_profile: str = "accuracy_first"
     tracking_hyperparameter_overrides_json: str = ""
     gpu_hardware_profile: str = "l4"

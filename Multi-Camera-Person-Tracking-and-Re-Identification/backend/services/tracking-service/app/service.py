@@ -175,25 +175,15 @@ def _resolve_query_source_path(storage_path: str, video_id: str | None = None) -
 
 
 def _prepare_remote_query_video(source_path: Path, video_id: str | None = None) -> Path:
-    conversion_dir = Path(settings.video_conversion_output_dir)
-    conversion_dir.mkdir(parents=True, exist_ok=True)
     if source_path.suffix.lower() in ALREADY_COMPRESSED_SUFFIXES:
+        conversion_dir = Path(settings.video_conversion_output_dir)
+        conversion_dir.mkdir(parents=True, exist_ok=True)
         target_path = conversion_dir / f"{(video_id or source_path.stem).strip() or source_path.stem}{source_path.suffix.lower()}"
         if source_path.resolve() != target_path.resolve():
             shutil.copy2(source_path, target_path)
         return target_path
-
-    from .video_converter import convert_to_h265
-
-    return Path(
-        convert_to_h265(
-            source_path,
-            output_path=conversion_dir / f"{source_path.stem}.h265.mp4",
-            crf=settings.ffmpeg_crf,
-            preset=settings.ffmpeg_preset,
-            audio_codec=settings.ffmpeg_audio_codec,
-            overwrite=settings.ffmpeg_overwrite_output,
-        )
+    raise ValueError(
+        f"Only pre-encoded .h265/.hevc inputs are supported for query processing. Got: {source_path.name}"
     )
 
 
@@ -232,7 +222,7 @@ def _resolve_profile_from_payload(default_profile: str, metadata: dict | None = 
 
 @lru_cache(maxsize=1)
 def get_pipeline_config() -> dict:
-    mode = "mock" if settings.tracking_use_mock or not settings.lightning_api_base_url else "remote"
+    mode = "remote" if settings.lightning_api_base_url else "local"
     profile = _resolve_profile_from_payload(settings.pipeline_profile)
     hardware_profile, execution_plan = resolve_execution_plan(
         pipeline_profile=profile,
@@ -345,42 +335,44 @@ def process_video_query(payload: dict) -> dict:
     )
     file_exists = bool(storage_path)
 
-    # Mock mode (no Lightning AI)
-    if settings.tracking_use_mock or not settings.lightning_api_base_url.strip():
-        logger.info("Using mock mode for video processing")
+    if not settings.lightning_api_base_url.strip():
+        logger.info("Using local accuracy-first worker mode for video processing")
+        input_path = _resolve_query_source_path(storage_path, video_id=video_id or None)
+        file_exists = input_path.exists()
+        local_result = process_video_query_worker(
+            {
+                "query_id": query_id,
+                "video_id": video_id,
+                "video_title": payload.get("video_title"),
+                "query_text": query_text,
+                "source_path": str(input_path),
+                "metadata": {
+                    **metadata,
+                    "pipeline_profile": profile["profile"],
+                    "gpu_hardware_profile": hardware_profile,
+                    "execution_plan": execution_plan,
+                    "acceleration_state": acceleration_state,
+                },
+                "pipeline_profile": profile["profile"],
+                "gpu_hardware_profile": json.dumps(hardware_profile),
+                "execution_plan": json.dumps(execution_plan),
+                "acceleration_state": json.dumps(acceleration_state),
+            }
+        )
         return {
-            "status": "completed",
-            "provider": "lightningai",
-            "mode": "mock",
+            "status": local_result["status"],
+            "provider": "local",
+            "mode": "local",
             "pipeline_profile": profile["profile"],
-            "query_id": query_id,
-            "video_id": video_id,
-            "job_id": str(uuid4()),
-            "summary": (
-                f"Mock accuracy-first response for '{query_text}' on video '{video_id}'. "
-                f"Configured pipeline: {profile['components']['detector']['name']} + {profile['components']['tracker']['name']} + "
-                f"{profile['components']['reid']['name']}."
-            ),
-            "file_exists": file_exists,
-            "processed_at": processed_at,
             "gpu_hardware_profile": hardware_profile,
             "acceleration_state": acceleration_state,
-            "raw_response": {
-                "matched_segments": [
-                    {
-                        "start_second": 12.5,
-                        "end_second": 19.0,
-                        "confidence": 0.92,
-                        "note": "Demo segment generated in mock mode.",
-                    }
-                ],
-                "pipeline_profile": profile,
-                "gpu_hardware_profile": hardware_profile,
-                "execution_plan": execution_plan,
-                "acceleration_state": acceleration_state,
-                "storage_path": storage_path,
-                "metadata": metadata,
-            },
+            "query_id": query_id,
+            "video_id": video_id,
+            "job_id": local_result["job_id"],
+            "summary": local_result["summary"],
+            "file_exists": file_exists,
+            "processed_at": processed_at,
+            "raw_response": local_result,
         }
 
     # Remote mode: use Lightning AI
@@ -420,7 +412,7 @@ def process_video_query(payload: dict) -> dict:
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 # Generate output filename
-                output_filename = f"{video_id or input_path.stem}_tracked.h265.mp4"
+                output_filename = f"{video_id or input_path.stem}_tracked.h265"
                 downloaded_output_path = output_dir / output_filename
 
                 # Download file
@@ -464,7 +456,6 @@ def process_video_query(payload: dict) -> dict:
 
     except Exception as e:
         logger.error(f"Lightning AI processing failed: {e}", exc_info=True)
-        # Fallback to mock on error
         return {
             "status": "failed",
             "provider": "lightningai",
@@ -549,13 +540,11 @@ def process_video_query_worker(payload: dict) -> dict:
 
 def run_tracking(candidate_info: dict) -> dict:
     runtime = get_runtime()
-    result = runtime.run(
+    return runtime.run(
         candidate_info,
         "data/videos/compressed",
         "data/videos/tracking_output",
     )
-    result["tracking_use_mock"] = settings.tracking_use_mock
-    return result
 
 
 def process_video_ingestion(payload: dict) -> dict:

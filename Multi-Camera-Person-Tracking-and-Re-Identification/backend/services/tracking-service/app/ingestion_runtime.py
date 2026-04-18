@@ -56,7 +56,7 @@ class VideoIngestionRuntime:
         with legacy_workdir():
             from src_vlm.vlm_engine import VLM_Metadata_Engine
 
-            self._vlm_engine = VLM_Metadata_Engine(use_mock=settings.tracking_use_mock)
+            self._vlm_engine = VLM_Metadata_Engine(use_mock=False)
         return self._vlm_engine
 
     def _build_drive_service(self):
@@ -136,7 +136,7 @@ class VideoIngestionRuntime:
                 raise FileNotFoundError(f"Missing source video: {resolved_source}")
             return resolved_source
         if source_drive_file_id:
-            filename = Path(source_filename or f"{source_drive_file_id}.mp4").name
+            filename = Path(source_filename or f"{source_drive_file_id}.h265").name
             target_path = self.default_source_dir / filename
             self._download_drive_file(source_drive_file_id, target_path)
             return target_path
@@ -165,19 +165,9 @@ class VideoIngestionRuntime:
             if source_path.resolve() != target_path.resolve():
                 shutil.copy2(source_path, target_path)
             return target_path
-
-        with legacy_workdir():
-            from src_vlm import video_ingestion
-
-            output_name = output_basename or f"{source_path.stem}.h265"
-            return Path(
-                video_ingestion.compress_video(
-                    str(source_path),
-                    str(target_video_dir),
-                    use_h265=True,
-                    output_filename=output_name,
-                )
-            )
+        raise ValueError(
+            f"Only pre-encoded .h265/.hevc inputs are supported in the production ingestion flow. Got: {source_path.name}"
+        )
 
     def process_video(
         self,

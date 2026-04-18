@@ -13,9 +13,6 @@ from pathlib import Path
 import cv2
 from PIL import Image
 
-from .video_ingestion import compress_video
-
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 NVIDIA_HOSPITAL_ROOT = DATA_DIR / "NVIDIA_SmartSpaces" / "MTMC_Tracking_2025" / "val" / "Hospital_000"
@@ -37,7 +34,7 @@ DEFAULT_MIN_TRACK_FRAMES = 5
 DEFAULT_MIN_PERSON_AREA = 4_500
 DEFAULT_TRACK_IOU = 0.20
 DEFAULT_CONTENT_FRAME_SAMPLES = 12
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".hevc", ".h265"}
+VIDEO_EXTENSIONS = {".hevc", ".h265"}
 
 ATTRIBUTE_PATTERNS: dict[str, tuple[str, ...]] = {
     "doctor": ("doctor", "physician", "bac si"),
@@ -79,8 +76,9 @@ def current_pipeline_config() -> dict:
         "caption_model": "Salesforce/blip-image-captioning-large",
         "reid_profile": DEFAULT_REID_PROFILE,
         "search_profile": DEFAULT_SEARCH_PROFILE,
+        "input_video_format": "pre_encoded_h265_or_hevc",
         "bootstrap_detection_mode": "nvidia_ground_truth_per_person",
-        "incremental_detection_mode": "opencv_hog_tracking_fallback",
+        "incremental_detection_mode": "opencv_hog_tracking",
         "queue_size": MAX_QUEUE_SIZE,
         "hyperparameters": {
             "ingest": {
@@ -98,7 +96,11 @@ def current_pipeline_config() -> dict:
 def list_nvidia_hospital_videos(limit: int = 31) -> list[Path]:
     if not NVIDIA_VIDEO_DIR.exists():
         return []
-    videos = sorted(path for path in NVIDIA_VIDEO_DIR.glob("Camera_*.mp4") if re.fullmatch(r"Camera_\d{2}", path.stem))
+    videos = sorted(
+        path
+        for path in NVIDIA_VIDEO_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS and re.fullmatch(r"Camera_\d{2}", path.stem)
+    )
     return videos[:limit]
 
 
@@ -754,6 +756,19 @@ def _delete_managed_file(path_value: str | None) -> None:
         path.unlink()
 
 
+def _ensure_managed_h265_copy(source_path: Path, target_dir: Path, output_name: str | None = None) -> Path:
+    if source_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError(
+            f"Only .h265/.hevc inputs are supported in the production queue flow. Got: {source_path.name}"
+        )
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_name = output_name or source_path.name
+    target_path = target_dir / target_name
+    if source_path.resolve() != target_path.resolve():
+        shutil.copy2(source_path, target_path)
+    return target_path
+
+
 def _evict_oldest(entries: list[dict], max_size: int = MAX_QUEUE_SIZE) -> list[dict]:
     evicted: list[dict] = []
     while len(entries) > max_size:
@@ -779,20 +794,18 @@ def bootstrap_nvidia_hospital_dataset(vlm_engine, limit: int = 31) -> dict:
     reset_managed_artifacts()
     ground_truth = _load_nvidia_ground_truth()
     source_videos = list_nvidia_hospital_videos(limit=limit)
+    if not source_videos:
+        raise FileNotFoundError(
+            f"No .h265/.hevc Camera_XX inputs found in {NVIDIA_VIDEO_DIR}. "
+            "The bootstrap flow now expects pre-encoded H.265 inputs."
+        )
     base_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     queue_entries: list[dict] = []
     processed: list[dict] = []
 
     for index, source_path in enumerate(source_videos):
         camera_id = source_path.stem
-        compressed_path = Path(
-            compress_video(
-                str(source_path),
-                str(COMPRESSED_VIDEO_DIR),
-                use_h265=True,
-                output_filename=source_path.name,
-            )
-        )
+        compressed_path = _ensure_managed_h265_copy(source_path, COMPRESSED_VIDEO_DIR, source_path.name)
         video_payload, people = _build_gt_people(
             compressed_path=compressed_path,
             source_path=source_path,
@@ -831,7 +844,9 @@ def bootstrap_nvidia_hospital_dataset(vlm_engine, limit: int = 31) -> dict:
 def save_uploaded_video(file_bytes: bytes, original_name: str) -> Path:
     ensure_pipeline_layout()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    suffix = Path(original_name).suffix or ".mp4"
+    suffix = Path(original_name).suffix.lower() or ".h265"
+    if suffix not in VIDEO_EXTENSIONS:
+        raise ValueError(f"Only .h265/.hevc uploads are supported. Got: {original_name}")
     target_path = UPLOADED_VIDEO_DIR / f"{timestamp}_{_slug(Path(original_name).stem)}{suffix}"
     target_path.write_bytes(file_bytes)
     return target_path
@@ -848,18 +863,14 @@ def add_single_video(
     source_path = Path(source_path)
     if not source_path.exists():
         raise FileNotFoundError(f"Missing source video: {source_path}")
+    if source_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError(f"Only .h265/.hevc inputs are supported. Got: {source_path.name}")
 
     resolved_camera = _slug(camera_id or source_path.stem)
     resolved_start = parse_recorded_start(recorded_start, datetime.fromtimestamp(source_path.stat().st_mtime, tz=timezone.utc))
-    video_id = f"{resolved_camera}_{resolved_start.strftime('%Y%m%dT%H%M%SZ')}.mp4"
-    compressed_path = Path(
-        compress_video(
-            str(source_path),
-            str(COMPRESSED_VIDEO_DIR),
-            use_h265=True,
-            output_filename=video_id,
-        )
-    )
+    target_suffix = source_path.suffix.lower()
+    video_id = f"{resolved_camera}_{resolved_start.strftime('%Y%m%dT%H%M%SZ')}{target_suffix}"
+    compressed_path = _ensure_managed_h265_copy(source_path, COMPRESSED_VIDEO_DIR, video_id)
     video_payload, people = _build_detected_people(
         compressed_path=compressed_path,
         source_path=source_path,

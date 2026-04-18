@@ -21,7 +21,7 @@ from .service import (
 
 
 LOGGER = logging.getLogger(__name__)
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".hevc", ".h265"}
+VIDEO_EXTENSIONS = {".hevc", ".h265"}
 DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 DRIVE_SCOPES = ("https://www.googleapis.com/auth/drive",)
 BOOTSTRAP_CAMERA_PATTERN = re.compile(r"Camera_\d{2}")
@@ -338,7 +338,7 @@ class QueueSyncService:
                 source_path=source_path,
                 camera_id=source_path.stem,
                 recorded_start=None,
-                output_basename=f"{source_path.stem}{source_path.suffix}" if source_path.suffix.lower() in {".h265", ".hevc"} else f"{source_path.stem}.h265",
+                output_basename=f"{source_path.stem}{source_path.suffix}",
                 source_mode="bootstrap_dataset",
             )
             evicted_video_ids.extend(
@@ -370,7 +370,7 @@ class QueueSyncService:
         evicted_video_ids: list[str] = []
 
         for import_file in self.list_import_files():
-            original_name = str(import_file.get("name") or "imported_video.mp4")
+            original_name = str(import_file.get("name") or "imported_video.h265")
             source_file_id = str(import_file["id"])
             local_source_path = self.local_download_dir / original_name
             self._download_drive_file(source_file_id, local_source_path)
@@ -378,11 +378,7 @@ class QueueSyncService:
             recorded_start = datetime.now(timezone.utc).replace(microsecond=0)
             camera_id = self._slug(Path(original_name).stem)
             original_suffix = Path(original_name).suffix.lower()
-            output_basename = (
-                f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}{original_suffix}"
-                if original_suffix in {".h265", ".hevc"}
-                else f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}.h265"
-            )
+            output_basename = f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}{original_suffix}"
             result = self._request_tracking_processing(
                 source_path=local_source_path,
                 camera_id=camera_id,

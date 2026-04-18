@@ -10,34 +10,28 @@ except Exception:  # pragma: no cover - optional dependency in service container
     torch = None
 
 class VLM_Metadata_Engine:
-    def __init__(self, use_mock=True):
+    def __init__(self, use_mock=False):
         self.use_mock = use_mock
         self.device = "cuda" if torch and torch.cuda.is_available() else "cpu"
         self.cpu_cores = multiprocessing.cpu_count()
-        self.model_id = "mock-blip"
+        self.model_id = "Salesforce/blip-image-captioning-large"
 
-        if not use_mock:
-            if torch is None:
-                print("[VLM Engine] Torch unavailable, fallback sang Mock mode.")
-                self.use_mock = True
-                return
-            try:
-                from transformers import BlipForConditionalGeneration, BlipProcessor
-            except Exception:
-                print("[VLM Engine] Transformers unavailable, fallback sang Mock mode.")
-                self.use_mock = True
-                return
-            print(f"[VLM Engine] Device: {'🟢 GPU CUDA' if self.device == 'cuda' else f'🔵 CPU ({self.cpu_cores} cores, multi-threaded)'}")
-            self.model_id = "Salesforce/blip-image-captioning-large"
-            self.processor = BlipProcessor.from_pretrained(self.model_id)
-            self.model = BlipForConditionalGeneration.from_pretrained(self.model_id).to(self.device)
-            self.model.eval()  # Inference mode — tắt dropout, nhanh hơn
-            
-            if self.device == "cpu":
-                torch.set_num_threads(self.cpu_cores)
-                print(f"[VLM Engine] torch.num_threads = {self.cpu_cores}")
-        else:
-            print("[VLM Engine] Đang chạy ở chế độ Mock.")
+        if use_mock:
+            raise RuntimeError("Mock VLM mode is disabled for production ingestion.")
+        if torch is None:
+            raise RuntimeError("Torch is required for VLM metadata generation.")
+        try:
+            from transformers import BlipForConditionalGeneration, BlipProcessor
+        except Exception as exc:
+            raise RuntimeError("Transformers is required for VLM metadata generation.") from exc
+        print(f"[VLM Engine] Device: {'🟢 GPU CUDA' if self.device == 'cuda' else f'🔵 CPU ({self.cpu_cores} cores, multi-threaded)'}")
+        self.processor = BlipProcessor.from_pretrained(self.model_id)
+        self.model = BlipForConditionalGeneration.from_pretrained(self.model_id).to(self.device)
+        self.model.eval()
+
+        if self.device == "cpu":
+            torch.set_num_threads(self.cpu_cores)
+            print(f"[VLM Engine] torch.num_threads = {self.cpu_cores}")
 
     def _extract_single_frame(self, args):
         """Worker: trích 1 frame từ video (chạy trong ThreadPool)."""
@@ -73,9 +67,6 @@ class VLM_Metadata_Engine:
 
     def generate_captions_batch(self, images):
         """BATCH inference: gom tất cả ảnh, forward 1 lần duy nhất."""
-        if self.use_mock:
-            return ["Người đàn ông mặc áo đỏ đang đi dọc hành lang bệnh viện."] * len(images)
-        
         # Processor xử lý batch ảnh cùng lúc
         inputs = self.processor(images=images, return_tensors="pt", padding=True).to(self.device)
         
@@ -136,4 +127,4 @@ class VLM_Metadata_Engine:
         return all_metadata
 
 if __name__ == "__main__":
-    engine = VLM_Metadata_Engine(use_mock=True)
+    engine = VLM_Metadata_Engine(use_mock=False)

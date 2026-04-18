@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
-import numpy as np
 
 from .config import settings
 from .cuda_runtime import configure_torch_runtime
@@ -93,7 +92,7 @@ class AccuracyFirstTrackerRuntime:
         end_frame = min(max(total_frames - 1, 0), int(center_frame) + half_clip_frames)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+        writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"XVID"), fps, (width, height))
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         for frame_idx in range(start_frame, end_frame + 1):
@@ -124,35 +123,6 @@ class AccuracyFirstTrackerRuntime:
         cap.release()
         writer.release()
         return output_path.exists()
-
-    def _write_demo_clip(self, output_path: Path) -> None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        width, height = 960, 540
-        writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), 15.0, (width, height))
-        for frame_idx in range(150):
-            frame = np.zeros((height, width, 3), dtype=np.uint8)
-            cv2.putText(
-                frame,
-                "Accuracy-first runtime manifest only",
-                (60, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),
-                2,
-            )
-            cv2.putText(
-                frame,
-                f"Frame {frame_idx}",
-                (60, 180),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (40, 220, 40),
-                2,
-            )
-            x = 80 + ((frame_idx * 7) % 700)
-            cv2.rectangle(frame, (x, 220), (x + 110, 420), (0, 255, 0), 3)
-            writer.write(frame)
-        writer.release()
 
     def _resolve_source_video(self, candidate_info: dict, video_database_path: str) -> Path | None:
         candidate = dict(candidate_info or {})
@@ -194,15 +164,13 @@ class AccuracyFirstTrackerRuntime:
         )
         source_video = self._resolve_source_video(candidate, video_database_path)
         video_id = str(candidate.get("video_id") or "candidate").strip() or "candidate"
-        output_path = Path(output_dir) / f"accuracy_first_{Path(video_id).stem}.mp4"
+        output_path = Path(output_dir) / f"accuracy_first_{Path(video_id).stem}.avi"
 
-        if source_video is not None:
-            clip_created = self._extract_clip(source_video, int(candidate.get("frame_idx") or 0), output_path)
-        else:
-            clip_created = False
-
+        if source_video is None:
+            raise FileNotFoundError("Could not resolve source video for tracking output.")
+        clip_created = self._extract_clip(source_video, int(candidate.get("frame_idx") or 0), output_path)
         if not clip_created:
-            self._write_demo_clip(output_path)
+            raise RuntimeError(f"Failed to create tracking clip from source video: {source_video}")
 
         manifest = self.build_manifest(
             candidate,

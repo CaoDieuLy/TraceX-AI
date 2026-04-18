@@ -1,30 +1,26 @@
 import os
 import cv2
-import numpy as np
 import glob
 
 class ReID_Tracker:
-    def __init__(self, use_mock=True):
+    def __init__(self, use_mock=False):
         self.use_mock = use_mock
-        if not use_mock:
-            print("[Tracker] Đang tải mô hình YOLOv4 & Torchreid weights...")
-            try:
-                from deep_sort import DeepSort
-                from torchreid.utils.feature_extractor import FeatureExtractor
-                
-                # Khởi tạo mô hình Torchreid làm extractor
-                self.extractor = FeatureExtractor(
-                    model_name='osnet_x1_0',
-                    model_path='', # Nếu có pre-trained weight down sẵn thì truyền path vào đây, nếu rỗng thì auto-download
-                    device='cpu'
-                )
-                self.deepsort = DeepSort("model_data/mars-small128.pb", max_dist=0.2)
-                print("[Tracker] Tải thành công DeepSORT và Torchreid.")
-            except ImportError as e:
-                print(f"[Tracker] Lỗi import mô hình: {e}")
-                self.use_mock = True
-        else:
-            print("[Tracker] Đang chạy Tracker ở chế độ Mock.")
+        if use_mock:
+            raise RuntimeError("Mock tracker mode is disabled.")
+        print("[Tracker] Đang tải mô hình YOLOv4 & Torchreid weights...")
+        try:
+            from deep_sort import DeepSort
+            from torchreid.utils.feature_extractor import FeatureExtractor
+        except ImportError as e:
+            raise RuntimeError(f"Không thể import tracking dependencies: {e}") from e
+
+        self.extractor = FeatureExtractor(
+            model_name='osnet_x1_0',
+            model_path='',
+            device='cpu'
+        )
+        self.deepsort = DeepSort("model_data/mars-small128.pb", max_dist=0.2)
+        print("[Tracker] Tải thành công DeepSORT và Torchreid.")
 
     def _extract_clip(self, video_path, center_frame, output_path, clip_duration=10):
         """Cắt đoạn video ngắn (10s) quanh frame được chọn."""
@@ -42,7 +38,7 @@ class ReID_Tracker:
         start_frame = max(0, center_frame - half_clip_frames)
         end_frame = min(total_frames - 1, center_frame + half_clip_frames)
         
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -89,19 +85,7 @@ class ReID_Tracker:
                 print(f"[Tracker] ✅ Đã tạo clip 10s tại: {result}")
                 return result
         
-        # Fallback: tạo video giả lập nếu không tìm thấy file
-        print(f"[Tracker] Không tìm thấy video gốc, tạo clip demo...")
-        height, width = 480, 640
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_video_path, fourcc, 15.0, (width, height))
-        for i in range(150):  # 10s @ 15fps
-            img = np.zeros((height, width, 3), dtype=np.uint8)
-            cv2.rectangle(img, (i*4 % 600, 200), (i*4 % 600 + 50, 250), (0, 255, 0), 2)
-            cv2.putText(img, f"ReID Tracking Demo | Frame {i}", (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            out.write(img)
-        out.release()
-        return output_video_path
+        raise FileNotFoundError(f"Không tìm thấy video gốc cho candidate: {source_video}")
 
 if __name__ == "__main__":
     tracker = ReID_Tracker()
