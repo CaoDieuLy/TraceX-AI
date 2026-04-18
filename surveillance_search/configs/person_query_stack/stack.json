@@ -1,0 +1,22 @@
+{
+  "video_base_dataset": {
+    "name": "PersonPath22",
+    "root": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\personpath22"
+  },
+  "attribute_supervision": {
+    "name": "PA-100K",
+    "raw_root": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\pa100k",
+    "prepared_root": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\prepared\\pa100k",
+    "config": "D:\\python ky 9\\A20-App-119\\surveillance_search\\configs\\person_query_stack\\attribute_model.json"
+  },
+  "scene_supervision": {
+    "name": "BDD100K",
+    "raw_root": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\bdd100k",
+    "prepared_root": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\prepared\\bdd100k",
+    "config": "D:\\python ky 9\\A20-App-119\\surveillance_search\\configs\\person_query_stack\\scene_model.json"
+  },
+  "bundle_output": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\artifacts\\full",
+  "visual_assets": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\artifacts\\visual_assets",
+  "models_root": "D:\\python ky 9\\A20-App-119\\surveillance_search\\data\\artifacts\\models",
+  "end_to_end_build_command": "python -m surveillance_search build --dataset-type personpath22 --profile strongest --auto-enrich"
+}

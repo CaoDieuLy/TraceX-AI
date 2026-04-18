@@ -30,8 +30,8 @@ Ghi lại các quyết định kỹ thuật, phân công, và brainstorming củ
 ### Sprint N — DD/MM → DD/MM/YYYY
 
 | Task | Người làm | Deadline | Trạng thái |
-|---|---|---|---|
-| | | | |
+| ---- | --------- | -------- | ---------- |
+|      |           |          |            |
 ```
 
 ### Brainstorming
@@ -50,92 +50,33 @@ Ghi lại các quyết định kỹ thuật, phân công, và brainstorming củ
 
 ---
 
-## Ví dụ
+## Phân công nhóm (mẫu) — đề tài Semantic Video Search (AI20K-243)
 
-### [ADR-1] Dùng TypeScript thay vì Python — 30/03/2026
+**Thành viên:** Bùi Văn Đạt, Dương Văn Hiệp, Cao Diệu Ly.
 
-**Bối cảnh:** Cả nhóm cần chọn 1 ngôn ngữ chính để xây dựng agent. Có 2 thành viên quen Python, 1 thành viên quen TypeScript.
+**Bối cảnh:** phần đã làm (tuần 1–2): chốt bài toán CCTV / truy vấn ngôn ngữ tự nhiên; demo **Streamlit + FastAPI** end-to-end stub; nhận diện sai hướng **LaVA**; thử **Qwen + ViT** (nặng GPU); định hướng **React + API**, **Docker/cloud**, kết quả giai đoạn gần **ảnh + timestamp** (sau có thể clip ngắn); kiến trúc **offline indexing + online search** (query parser → retrieval → ReID → thumbnail/clip).
 
-**Các lựa chọn đã xem xét:**
-- **Python**: Ecosystem ML tốt hơn, syntax đơn giản, thành viên quen hơn.
-- **TypeScript**: Type safety, dễ refactor khi project lớn, nhiều library AI mới ra bản TS trước.
+> Bảng dưới là **mẫu phân công** — nhóm có thể đổi deadline / đổi người sau họp đồng bộ; cập nhật cột **Trạng thái** khi xong.
 
-**Quyết định:** Chọn TypeScript vì project này focus vào agent architecture, không cần ML library nặng. Type safety sẽ giúp bắt lỗi sớm hơn khi codebase phình ra.
+### Sprint 2 — 08/04 → 12/04/2026
 
-**Hệ quả:** 2 thành viên Python cần học TypeScript cơ bản (ước tính 1 tuần). Sẽ không dùng được `langchain` Python trực tiếp.
+| Task                                                                                                                            | Người làm      | Deadline | Trạng thái |
+| ------------------------------------------------------------------------------------------------------------------------------- | -------------- | -------- | ---------- |
+| Mở rộng **FastAPI**: contract `/infer` trả danh sách hit mẫu (`thumbnail_url` / `timestamp` / `text`)                           | Bùi Văn Đạt    | 14/04    | ⏳ Chờ      |
+| Pipeline **offline** PoC: decode / frame sampling → stub detection hoặc model nhẹ → ghi **metadata + index** (file hoặc SQLite) | Dương Văn Hiệp | 19/04    | ⏳ Chờ      |
+| Thu thập / chuẩn hoá **dataset** (hoặc subset CCTV), checklist nhãn tối thiểu để đánh giá retrieval                             | Cao Diệu Ly    | 12/04    | ✅ Xong     |
+| Khảo sát **nhẹ hóa model** (CLIP nhỏ / giảm batch / quantize) so với Qwen+ViT; ghi 1 trang so sánh VRAM                         | Cao Diệu Ly    | 16/04    | ⏳ Chờ      |
+| **React** scaffold: màn truy vấn + gọi API (axios/fetch), CORS test với FastAPI                                                 | Bùi Văn Đạt    | 20/04    | ⏳ Chờ      |
+| Giữ **Streamlit** demo ổn định; đồng bộ env `VLM_API_URL` với BE Docker khi có                                                  | Cao Diệu Ly    | 18/04    | ⏳ Chờ      |
+| Họp sync kiến trúc (offline vs online), cập nhật **WORKLOG** + **JOURNAL** sau sprint                                           | Cả nhóm        | 20/04    | ⏳ Chờ      |
 
----
+### Sprint 1 02/04 → 07/04/2026
 
-### [ADR-2] Lưu conversation history bằng file JSON — 03/04/2026
-
-**Bối cảnh:** Agent cần nhớ context giữa các lần chạy. Cần chọn storage.
-
-**Các lựa chọn đã xem xét:**
-- **In-memory array**: Đơn giản nhất nhưng mất khi restart.
-- **File JSON**: Persistent, không cần setup, dễ inspect bằng tay.
-- **SQLite**: Có thể query, tốt cho production nhưng overkill cho prototype.
-- **Redis**: Fast nhưng cần chạy thêm service.
-
-**Quyết định:** File JSON cho giai đoạn prototype. Thiết kế interface `MemoryStore` để sau này swap sang SQLite không cần sửa logic agent.
-
-**Hệ quả:** Không query được theo thời gian hay user. Chấp nhận được ở giai đoạn này.
+| Task                                                                | Người làm | Deadline | Trạng thái |
+| ------------------------------------------------------------------- | --------- | -------- | ---------- |
+| Chốt đề tài, pain point, phạm vi MVP (tìm kiếm video ngữ nghĩa)     | Cả nhóm   | 06/04    | ✅ Xong     |
+| Research bài toán, data, công cụ AI hỗ trợ (ChatGPT, Perplexity, …) | Cả nhóm   | 07/04    | ✅ Xong     |
 
 ---
 
-### Sprint 1 — 31/03 → 06/04/2026
 
-| Task | Người làm | Deadline | Trạng thái |
-|---|---|---|---|
-| Setup TypeScript project + CI | Văn A | 01/04 | ✅ Xong |
-| Implement agent loop cơ bản | Thị B | 02/04 | ✅ Xong |
-| Tool: `search_web` (Brave API) | Văn C | 03/04 | ✅ Xong |
-| Tool: `read_file`, `write_file` | Thị B | 05/04 | ✅ Xong |
-| Conversation memory (JSON) | Văn A | 06/04 | ✅ Xong |
-| README + setup docs | Văn C | 06/04 | ✅ Xong |
-
----
-
-### Sprint 2 — 07/04 → 13/04/2026
-
-| Task | Người làm | Deadline | Trạng thái |
-|---|---|---|---|
-| Fix infinite loop: thêm `max_iterations` | Thị B | 08/04 | 🔄 Đang làm |
-| Tool: `run_tests` (chạy pytest) | Văn C | 10/04 | ⏳ Chờ |
-| Sliding window memory | Văn A | 09/04 | ⏳ Chờ |
-| Demo prep + slides | Cả nhóm | 13/04 | ⏳ Chờ |
-
----
-
-### Brainstorm: Tính năng cho demo — 05/04/2026
-
-**Câu hỏi:** Demo tuần tới nên show gì để ấn tượng nhất trong 5 phút?
-
-**Các ý tưởng:**
-- **Ý tưởng 1 (Văn A):** Cho agent đọc 1 file Python có bug, tự fix, rồi chạy test để verify. Trực quan, dễ hiểu.
-- **Ý tưởng 2 (Thị B):** Agent tự build 1 tính năng nhỏ từ mô tả bằng tiếng Việt. Show khả năng hiểu ngôn ngữ tự nhiên.
-- **Ý tưởng 3 (Văn C):** Agent review PR, comment vào từng dòng code có vấn đề. Gần với use case thực tế nhất.
-
-**Pros/Cons:**
-| Ý tưởng | Pros | Cons |
-|---|---|---|
-| Fix bug | Dễ làm, chắc chắn chạy được | Ít "wow" hơn |
-| Build từ mô tả | Ấn tượng nhất | Có thể fail nếu prompt phức tạp |
-| Review PR | Thực tế, liên quan trực tiếp đến khóa học | Cần setup GitHub webhook |
-
-**Kết luận:** Chọn ý tưởng 1 (fix bug) cho demo chính vì đảm bảo. Nếu còn thời gian sẽ show thêm ý tưởng 2 như bonus.
-
----
-
-### Bug quan trọng: Tool call loop vô hạn — 04/04/2026
-
-**Triệu chứng:** Agent gọi `search_web` liên tục không dừng khi tool trả về lỗi network.
-
-**Root cause:** Không có stop condition khi tool raise exception. Agent nhận `"error": "timeout"` nhưng interpret là cần thử lại.
-
-**Fix:** Thêm 2 điều kiện dừng:
-1. `max_iterations = 10` — hard stop sau 10 vòng
-2. Nếu tool trả về lỗi 3 lần liên tiếp → dừng và báo user
-
-**Code thay đổi:** `src/agent.ts` lines 45-67
-
-**Học được:** Luôn thiết kế stop condition trước khi implement retry logic.
