@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     video_conversion_output_dir: str = "/workspace/storage/video-conversion"
     video_download_output_dir: str = "/workspace/storage/tracking-outputs"
 
+    # Camera calibration for 3D world projection
+    camera_calibration_path: str = "/workspace/backend/config/camera_calibration.json"
+
     google_drive_enabled: bool = False
     google_drive_credentials_file: str = ""
     google_drive_make_public: bool = True

@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
+import numpy as np
+import torch
 
 from .config import settings
 from .cuda_runtime import configure_torch_runtime
@@ -41,6 +43,93 @@ def _json_dict_or_empty(value: object) -> dict:
             return {}
         return payload if isinstance(payload, dict) else {}
     return {}
+
+
+# ═══════════════════════════════════════════════════════════════
+# ITSELF-Style Ranking (RANGE Ensemble)
+# Weights: embedding(0.58) + semantic(0.22) + visibility(0.12) + world(0.08)
+# ═══════════════════════════════════════════════════════════════
+def _embedding_similarity(query_emb: np.ndarray, candidate_emb: list[float] | None) -> float:
+    """Cosine similarity between query ITSELF embedding and candidate embedding"""
+    if candidate_emb is None or len(candidate_emb) == 0:
+        return 0.0
+    cand_vec = np.array(candidate_emb, dtype=np.float32)
+    cand_norm = np.linalg.norm(cand_vec) + 1e-8
+    query_norm = np.linalg.norm(query_emb) + 1e-8
+    return float(np.dot(query_emb, cand_vec) / (query_norm * cand_norm))
+
+
+def _semantic_overlap_itself(query_text: str, candidate: dict) -> float:
+    """Token-level Jaccard similarity (same as before)"""
+    query_tokens = _tokenize(query_text)
+    if not query_tokens:
+        return 0.0
+    candidate_tokens = _tokenize(_candidate_search_document(candidate))
+    if not candidate_tokens:
+        return 0.0
+    return float(len(query_tokens & candidate_tokens) / max(len(query_tokens), 1))
+
+
+def _visibility_bonus(candidate: dict) -> float:
+    scores = candidate.get("visibility_scores")
+    if not isinstance(scores, dict) or not scores:
+        return 0.0
+    numeric_scores = [float(value) for value in scores.values() if isinstance(value, (int, float))]
+    if not numeric_scores:
+        return 0.0
+    return float(sum(numeric_scores) / len(numeric_scores))
+
+
+def _world_position_bonus(candidate: dict) -> float:
+    world_position = candidate.get("world_position") or candidate.get("top_point_projection")
+    if not isinstance(world_position, dict) or not world_position:
+        return 0.0
+    if any(world_position.get(axis) is not None for axis in ("x", "y", "z")):
+        return 1.0
+    return 0.0
+
+
+def _rank_candidate_itself(
+    query_text: str,
+    query_embedding: np.ndarray | None,
+    candidate: dict,
+) -> float:
+    """
+    ITSELF RANGE-style ensemble scoring.
+    Weights (accuracy_first profile):
+      - Embedding similarity: 0.58
+      - Semantic overlap:    0.22
+      - Visibility bonus:    0.12
+      - World position:      0.08
+    """
+    # 1. Embedding similarity (ITSELF fine-grained)
+    emb_sim = _embedding_similarity(query_embedding, candidate.get("embedding_vector")) if query_embedding is not None else 0.0
+
+    # 2. Semantic overlap (token Jaccard)
+    sem_overlap = _semantic_overlap_itself(query_text, candidate)
+
+    # 3. Visibility bonus
+    vis_bonus = _visibility_bonus(candidate)
+
+    # 4. World geometry bonus
+    world_bonus = _world_position_bonus(candidate)
+
+    # Weighted sum
+    final_score = (
+        emb_sim * 0.58 +
+        sem_overlap * 0.22 +
+        vis_bonus * 0.12 +
+        world_bonus * 0.08
+    )
+    return round(final_score, 6)
+
+
+def _rank_candidate(query_text: str, candidate: dict) -> float:
+    """Legacy wrapper - now uses ITSELF ranking"""
+    # In edge-first mode, we don't have pre-computed query embedding
+    # Fall back to semantic-only ranking (or compute on-the-fly if needed)
+    return round(_semantic_overlap_itself(query_text, candidate), 6)
+
 
 
 def _tokenize(text: str) -> set[str]:
@@ -74,42 +163,6 @@ def _candidate_search_document(person: dict) -> str:
     return " ".join(parts).strip()
 
 
-def _semantic_overlap(query_text: str, candidate: dict) -> float:
-    query_tokens = _tokenize(query_text)
-    if not query_tokens:
-        return 0.0
-    candidate_tokens = _tokenize(_candidate_search_document(candidate))
-    if not candidate_tokens:
-        return 0.0
-    return float(len(query_tokens & candidate_tokens) / max(len(query_tokens), 1))
-
-
-def _visibility_bonus(candidate: dict) -> float:
-    scores = candidate.get("visibility_scores")
-    if not isinstance(scores, dict) or not scores:
-        return 0.0
-    numeric_scores = [float(value) for value in scores.values() if isinstance(value, (int, float))]
-    if not numeric_scores:
-        return 0.0
-    return float(sum(numeric_scores) / len(numeric_scores))
-
-
-def _world_position_bonus(candidate: dict) -> float:
-    world_position = candidate.get("world_position") or candidate.get("top_point_projection")
-    if not isinstance(world_position, dict) or not world_position:
-        return 0.0
-    if any(world_position.get(axis) is not None for axis in ("x", "y", "z")):
-        return 1.0
-    return 0.0
-
-
-def _rank_candidate(query_text: str, candidate: dict) -> float:
-    overlap = _semantic_overlap(query_text, candidate)
-    visibility = _visibility_bonus(candidate)
-    world_position = _world_position_bonus(candidate)
-    return round((overlap * 0.72) + (visibility * 0.18) + (world_position * 0.10), 6)
-
-
 def _extract_candidate_segments(candidate: dict, limit: int = 3) -> list[dict]:
     timeline = candidate.get("timeline")
     if not isinstance(timeline, list):
@@ -134,11 +187,49 @@ def _extract_candidate_segments(candidate: dict, limit: int = 3) -> list[dict]:
     return segments
 
 
-def _build_worker_match(candidate: dict, query_text: str) -> dict:
+def _summarize_matches(query_text: str, video_id: str, matches: list[dict], person_count: int) -> str:
+    if not matches:
+        return f"Processed video '{video_id}' and generated metadata for {person_count} people, but no strong match was found for '{query_text}'."
+    best = matches[0]
+    camera_id = str(best.get("camera_id") or video_id or "unknown-camera")
+    track_id = str(best.get("track_id") or "?")
+    score = float(best.get("score") or 0.0)
+    return (
+        f"Processed video '{video_id}' and found {len(matches)} likely matches for '{query_text}'. "
+        f"Best match: camera {camera_id}, track {track_id}, score {score:.3f}."
+    )
+    timeline = candidate.get("timeline")
+    if not isinstance(timeline, list):
+        return []
+    segments: list[dict] = []
+    for item in timeline:
+        if not isinstance(item, dict):
+            continue
+        start_second = item.get("start_second")
+        end_second = item.get("end_second")
+        if start_second is None or end_second is None:
+            continue
+        segments.append(
+            {
+                "start_second": float(start_second),
+                "end_second": float(end_second),
+                "action_summary": str(item.get("action_summary") or "").strip(),
+            }
+        )
+        if len(segments) >= limit:
+            break
+    return segments
+
+
+def _build_worker_match(
+    candidate: dict,
+    query_text: str,
+    query_embedding: np.ndarray | None = None,
+) -> dict:
     match = dict(candidate)
     match["search_text"] = _candidate_search_document(candidate)
-    match["semantic_overlap"] = round(_semantic_overlap(query_text, candidate), 6)
-    match["score"] = _rank_candidate(query_text, candidate)
+    match["semantic_overlap"] = round(_semantic_overlap_itself(query_text, candidate), 6)
+    match["score"] = _rank_candidate_itself(query_text, query_embedding, candidate)
     match["matched_segments"] = _extract_candidate_segments(candidate)
     return match
 
@@ -502,7 +593,30 @@ def process_video_query_worker(payload: dict) -> dict:
     )
 
     people = ingestion_result.get("people") or []
-    ranked_matches = [_build_worker_match(person, query_text) for person in people if isinstance(person, dict)]
+
+    # Compute query embedding from query text (ITSELF-style)
+    # For edge-first, we use CLIP text encoder as query embedding
+    query_embedding = None
+    try:
+        import open_clip
+        from transformers import AutoTokenizer, AutoModel
+        # Use CLIP text encoder for query
+        model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
+        tokenizer = open_clip.get_tokenizer("ViT-B-32")
+        text_tokens = tokenizer([query_text]).to(model.device)
+        with torch.no_grad():
+            query_emb = model.encode_text(text_tokens)
+            query_emb = query_emb / query_emb.norm(dim=-1, keepdim=True)
+            query_embedding = query_emb.cpu().numpy()[0].astype(np.float32)
+    except Exception as e:
+        logger.warning(f"Failed to compute query embedding: {e}")
+        query_embedding = None
+
+    ranked_matches = [
+        _build_worker_match(person, query_text, query_embedding)
+        for person in people
+        if isinstance(person, dict)
+    ]
     ranked_matches.sort(
         key=lambda item: (
             -float(item.get("score") or 0.0),

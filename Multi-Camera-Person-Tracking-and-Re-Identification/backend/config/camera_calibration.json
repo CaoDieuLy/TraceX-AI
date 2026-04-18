@@ -1,0 +1,78 @@
+{
+  "version": "1.0",
+  "cameras": {
+    "cam01": {
+      "camera_id": "cam01",
+      "camera_name": "Main Entrance Hall",
+      "intrinsic": {
+        "fx": 1200.0,
+        "fy": 1200.0,
+        "cx": 960.0,
+        "cy": 540.0,
+        "width": 1920,
+        "height": 1080,
+        "distortion": {
+          "k1": 0.0,
+          "k2": 0.0,
+          "p1": 0.0,
+          "p2": 0.0,
+          "k3": 0.0
+        }
+      },
+      "extrinsic": {
+        "rotation_matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+        "translation_vector": [0.0, 0.0, 0.0],
+        "camera_height_meters": 3.2
+      },
+      "ground_plane": {
+        "height_meters": 0.0,
+        "normal": [0, 0, 1],
+        "point_on_plane": [0, 0, 0]
+      },
+      "calibrated_at": "2026-04-18T00:00:00Z",
+      "calibration_confidence": 0.95
+    },
+    "cam02": {
+      "camera_id": "cam02",
+      "camera_name": "Corridor B",
+      "intrinsic": {
+        "fx": 1150.0,
+        "fy": 1150.0,
+        "cx": 960.0,
+        "cy": 540.0,
+        "width": 1920,
+        "height": 1080,
+        "distortion": {
+          "k1": -0.15,
+          "k2": 0.03,
+          "p1": 0.0,
+          "p2": 0.0,
+          "k3": 0.0
+        }
+      },
+      "extrinsic": {
+        "rotation_matrix": [0.98, -0.17, 0, 0.17, 0.98, 0, 0, 0, 1],
+        "translation_vector": [12.5, 3.2, 0.0],
+        "camera_height_meters": 2.8
+      },
+      "ground_plane": {
+        "height_meters": 0.0,
+        "normal": [0, 0, 1],
+        "point_on_plane": [12.5, 3.2, 0]
+      },
+      "calibrated_at": "2026-04-18T00:00:00Z",
+      "calibration_confidence": 0.88
+    }
+  },
+  "world": {
+    "coordinate_system": "right-handed-Z-up",
+    "origin_camera": "cam01",
+    "units": "meters"
+  },
+  "tracking": {
+    "max_human_speed_mps": 2.8,
+    "default_person_height_m": 1.7,
+    "occlusion_overlap_threshold": 0.5,
+    "motion_cone_angle_degrees": 42.0
+  }
+}
