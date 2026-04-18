@@ -30,7 +30,6 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
       VIDEO_STORAGE_ROOT: ${VIDEO_STORAGE_ROOT:-/workspace/storage/videos}
       QUEUE_LOCAL_ROOT: ${QUEUE_LOCAL_ROOT:-/workspace/storage/queue}
-      QUEUE_BOOTSTRAP_SOURCE_DIR: ${QUEUE_BOOTSTRAP_SOURCE_DIR:-/workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos}
       QUEUE_MAX_SIZE: ${QUEUE_MAX_SIZE:-32}
       QUEUE_POLL_INTERVAL_SECONDS: ${QUEUE_POLL_INTERVAL_SECONDS:-30}
       GOOGLE_DRIVE_ENABLED: ${GOOGLE_DRIVE_ENABLED:-false}
@@ -62,7 +61,6 @@ services:
       LEGACY_METADATA_DIR: ${LEGACY_METADATA_DIR:-/workspace/storage/queue/local/Queue/Metadata}
       TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL:-http://tracking-service:8000}
       QUEUE_LOCAL_ROOT: ${QUEUE_LOCAL_ROOT:-/workspace/storage/queue}
-      QUEUE_BOOTSTRAP_SOURCE_DIR: ${QUEUE_BOOTSTRAP_SOURCE_DIR:-/workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos}
       QUEUE_MAX_SIZE: ${QUEUE_MAX_SIZE:-32}
       QUEUE_POLL_INTERVAL_SECONDS: ${QUEUE_POLL_INTERVAL_SECONDS:-30}
       GOOGLE_DRIVE_ENABLED: ${GOOGLE_DRIVE_ENABLED:-false}

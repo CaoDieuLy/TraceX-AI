@@ -303,18 +303,28 @@ class QueueSyncService:
         session.commit()
         return evicted_video_ids
 
-    def bootstrap_from_source_dir(self, session: Session, limit: int = 31, reset_remote_queue: bool = True) -> dict:
+    def bootstrap_from_source_dir(
+        self,
+        session: Session,
+        *,
+        source_dir: str | Path,
+        limit: int = 31,
+        reset_remote_queue: bool = True,
+        delete_source_after_import: bool = False,
+    ) -> dict:
         self.ensure_local_layout()
         self.ensure_drive_layout()
         if reset_remote_queue:
             self._clear_queue_state(session, clear_remote=True)
 
-        source_dir = Path(settings.queue_bootstrap_source_dir)
-        if not source_dir.exists():
-            raise FileNotFoundError(f"Missing bootstrap source dir: {source_dir}")
+        source_root = Path(source_dir).expanduser()
+        if not source_root.exists():
+            raise FileNotFoundError(f"Missing bootstrap source dir: {source_root}")
+        if not source_root.is_dir():
+            raise NotADirectoryError(f"Bootstrap source path must be a directory: {source_root}")
 
         source_videos = sorted(
-            path for path in source_dir.glob("Camera_*.mp4") if re.fullmatch(r"Camera_\d{2}", path.stem)
+            path for path in source_root.glob("Camera_*.mp4") if re.fullmatch(r"Camera_\d{2}", path.stem)
         )[:limit]
 
         processed_videos = 0
@@ -336,6 +346,8 @@ class QueueSyncService:
                     source_mode="bootstrap_dataset",
                 )
             )
+            if delete_source_after_import:
+                source_path.unlink(missing_ok=True)
             processed_videos += 1
             people_indexed += int(result.get("person_count") or 0)
 

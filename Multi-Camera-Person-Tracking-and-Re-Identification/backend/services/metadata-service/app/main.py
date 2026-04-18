@@ -216,8 +216,10 @@ def bootstrap_queue(payload: QueueBootstrapRequest, session: Session = Depends(g
     try:
         return QueueSyncService().bootstrap_from_source_dir(
             session,
+            source_dir=payload.source_dir,
             limit=payload.limit,
             reset_remote_queue=payload.reset_remote_queue,
+            delete_source_after_import=payload.delete_source_after_import,
         )
     except Exception as exc:
         session.rollback()

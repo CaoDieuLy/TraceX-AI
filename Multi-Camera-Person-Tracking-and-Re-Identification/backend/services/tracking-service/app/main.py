@@ -9,12 +9,8 @@ from .schemas import (
     VideoIngestionResponse,
 )
 from .service import get_pipeline_config, process_video_ingestion, process_video_query, run_tracking
-from .queue_routes import router as queue_router
 
 app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
-
-# Include queue management routes
-app.include_router(queue_router)
 
 
 @app.get("/health")

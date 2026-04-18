@@ -76,7 +76,13 @@ API moi o metadata-service:
 Chay bootstrap tu folder nguon local:
 
 ```bash
-docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --once
+docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --source-dir /workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos --once
+```
+
+Neu muon xoa source `.mp4` local sau khi da convert va dua len Queue Drive:
+
+```bash
+docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --source-dir /workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos --delete-source --once
 ```
 
 Dong bo `Import_New` lien tuc:

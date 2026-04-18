@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     video_storage_root: str = "/workspace/storage/videos"
     default_storage_backend: str = "local_volume"
     queue_local_root: str = "/workspace/storage/queue"
-    queue_bootstrap_source_dir: str = "/workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos"
     queue_max_size: int = 32
     queue_poll_interval_seconds: int = 30
     google_drive_enabled: bool = False

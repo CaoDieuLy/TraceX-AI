@@ -133,8 +133,10 @@ class QueueVideoListResponse(BaseModel):
 
 
 class QueueBootstrapRequest(BaseModel):
+    source_dir: str = Field(min_length=1, max_length=4096)
     limit: int = Field(default=31, ge=1, le=500)
     reset_remote_queue: bool = True
+    delete_source_after_import: bool = False
 
 
 class QueueBootstrapResponse(BaseModel):
