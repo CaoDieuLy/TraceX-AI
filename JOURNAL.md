@@ -112,4 +112,48 @@ Ghi lại hành trình xây dựng sản phẩm mỗi tuần — những gì đ�
 - Cân nhắc **nhẹ hóa model** (distill, model nhỏ hơn, hoặc tách bước embed/search) để giảm áp lực GPU; tiếp tục chỉnh **frontend React + backend API** cho luồng người dùng thật.
 
 
-  
+---
+
+## Tuần 03 - 19/04/2026
+
+**Thành viên:** Dương Văn Hiệp, Cao Diệu Ly, Bùi Văn Đạt
+
+### Đã làm
+- **Dương Văn Hiệp:** thử nghiệm thêm các đề xuất CPU-based theo góp ý office hour; tiếp tục tối ưu lưu trữ; tìm kiếm và thử các mô hình detection / embedding khác nhau để trích xuất metadata tốt hơn; xây dựng metric đánh giá, tối ưu độ chính xác; unit test và nối các luồng xử lý để chạy được pipeline.
+- **Bùi Văn Đạt:** xây dựng frontend bằng React; nghiên cứu hướng giải quyết mới; tìm nguồn dataset; nghiên cứu cách lấy, lưu dataset và mô phỏng streaming data; thiết kế luồng kết nối backend, frontend và model.
+- **Cao Diệu Ly:** phát triển lại architecture theo user và workflow mới; research và điều chỉnh architecture theo scope mới; triển khai thử nghiệm; research VLM hiệu quả hơn; đánh giá chất lượng tracklet sau tracking; tìm kiếm, setup data và dựng DB; lựa chọn model tracking tối ưu theo IDF1.
+- Nhóm chuyển trọng tâm từ prototype rời rạc sang pipeline rõ hơn: data / DB → model detection, tracking, embedding → backend API → frontend React.
+- Bắt đầu đánh giá hệ thống bằng metric cụ thể hơn thay vì chỉ nhìn output demo; đặc biệt quan tâm metadata, tracklet, IDF1 và khả năng chạy trên tài nguyên hạn chế.
+
+### Chi tiết daily standup
+- **13/04/2026:** Hiệp thử đề xuất CPU-based theo góp ý office hour; Đạt xây dựng FE bằng React; Ly phát triển architecture theo user và workflow mới.
+- **14/04/2026:** Hiệp điều chỉnh theo hướng dẫn mentor về tối ưu lưu trữ; Đạt tìm hướng giải quyết bài toán mới; Ly research và thay đổi architecture theo scope mới.
+- **15/04/2026:** Hiệp tìm mô hình embedding để trích xuất metadata tốt hơn; Đạt nghiên cứu nguồn dataset; Ly triển khai thử nghiệm.
+- **16/04/2026:** Hiệp xây metric đánh giá và tối ưu độ chính xác; Ly research VLM hiệu quả hơn và đánh giá tracklet sau tracking; Đạt nghiên cứu cách lấy / lưu dataset, mô phỏng streaming data.
+- **17/04/2026:** Hiệp thử nghiệm các model detection, embedding khác nhau; Ly đưa ra phương án cải thiện architecture mới; Đạt tiếp tục mô phỏng theo hướng streaming data.
+- **18/04/2026:** Hiệp tiếp tục thử model embedding tốt hơn; Đạt thiết kế luồng BE, FE với model; Ly tìm kiếm, setup data và viết lại architecture.
+- **19/04/2026:** Hiệp unit test và nối các luồng để chạy; Đạt tiếp tục thiết kế luồng FE / BE; Ly tìm và dựng DB, lựa chọn model track tối ưu IDF1.
+
+### Khó nhất tuần này
+- Vừa phải đổi kiến trúc theo scope mới, vừa phải giữ tiến độ triển khai thử nghiệm.
+- Dataset và cách lưu / mô phỏng streaming data vẫn là phần tốn thời gian vì ảnh hưởng trực tiếp tới pipeline backend, frontend và model.
+- Cần cân bằng giữa độ chính xác của detection / embedding / tracking và khả năng chạy trên CPU hoặc tài nguyên GPU hạn chế.
+
+### AI tool đã dùng
+| Tool | Dùng để làm gì | Kết quả |
+|---|---|---|
+| ChatGPT | Hỗ trợ brainstorm architecture, gợi ý hướng model / metric, rà soát pipeline và viết tài liệu | Có thêm hướng điều chỉnh architecture, metric đánh giá và cách diễn đạt journal rõ hơn |
+
+### Học được
+- Pipeline video search cần được thiết kế theo luồng dữ liệu trước: ingest / lưu trữ / tracking / embedding / search / hiển thị, không chỉ chọn model trước.
+- Metric như IDF1, chất lượng tracklet và độ chính xác metadata giúp nhóm đánh giá thực tế hơn so với chỉ xem kết quả demo.
+- Frontend, backend và model cần thống nhất contract sớm để tránh mỗi phần phát triển theo một giả định khác nhau.
+
+### Nếu làm lại, sẽ làm khác
+- Chốt format dataset, metadata và API contract sớm hơn trước khi thử nhiều model.
+- Tách rõ thử nghiệm model, mô phỏng streaming data và phần giao diện để dễ đo tiến độ từng mảng.
+
+### Kế hoạch tuần tới
+- Hoàn thiện pipeline chạy được ổn định hơn từ data / DB đến model, backend và frontend.
+- Tiếp tục so sánh model detection, embedding và tracking theo metric đã chọn.
+- Chuẩn hoá dataset, metadata và API contract để phục vụ demo end-to-end.

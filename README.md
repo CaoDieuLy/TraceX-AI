@@ -1,90 +1,125 @@
-﻿﻿# CCTV Person Search Engine - AI20K-243
+﻿# CCTV Person Search Engine - AI20K-243
 
-**Tagline:** Tìm người trong video giám sát bằng mô tả tự nhiên, nhanh hơn và trực quan hơn.
-
----
-
-## 1. Tổng quan bài toán (Problem Statement)
-
-### Vấn đề
-
-Các hệ thống camera giám sát (CCTV) tạo ra khối lượng video rất lớn mỗi ngày, nhưng khi cần tìm một người hoặc một sự kiện cụ thể, người vận hành vẫn phải xem lại video thủ công trong thời gian dài. Cách làm này chậm, tốn công, khó mở rộng và dễ bỏ sót thời điểm quan trọng.
-
-Ví dụ, khi người dùng cần tìm:
-
-- `Người đàn ông đeo ba lô`
-- `Người mặc áo xanh, quần đen, xuất hiện khoảng 10 giờ sáng`
-- `Người đội mũ đi qua khu vực quầy thu ngân`
-
-thì việc tua lại video theo cách thủ công là rất kém hiệu quả.
-
-### Giải pháp
-
-Hệ thống đề xuất một cách tiếp cận `Semantic Video Search` cho video CCTV. Người dùng nhập truy vấn bằng ngôn ngữ tự nhiên, hệ thống sẽ:
-
-1. phân tích truy vấn
-2. tìm các `candidate tracks` phù hợp nhất
-3. hiển thị frame đại diện và clip preview
-4. cho phép người dùng chọn đúng đối tượng
-5. tiếp tục truy hồi tinh chỉnh để dựng lại timeline xuất hiện
-
-AI được sử dụng vì bài toán này không thể giải quyết tốt bằng rule-based code truyền thống. Mô tả của người dùng thường mơ hồ, đa dạng và có tính ngữ nghĩa, ví dụ màu sắc trang phục, vật mang theo, thời gian xuất hiện hoặc khu vực xuất hiện. Các mô hình như `CLIP/SigLIP`, `ReID`, `YOLO`, `BoxMOT` giúp hệ thống hiểu truy vấn mở và liên kết chúng với nội dung hình ảnh trong video.
-
-### Đối tượng người dùng
-
-- Chủ shop
-- Bảo vệ tòa nhà
-- Quản lý cửa hàng
-- Người vận hành hệ thống camera
+**Tagline:** Tìm người trong hệ thống camera bệnh viện bằng mô tả tự nhiên, dựa trên tracklet, metadata và xác nhận của người vận hành.
 
 ---
 
-## 2. Kiến trúc hệ thống (System Architecture)
+## 1. Tổng quan bài toán
 
-### Sơ đồ tổng quát
+Bệnh viện có nhiều khu vực cần giám sát như sảnh chính, hành lang, khoa khám bệnh, khu chờ, thang máy, bãi xe và lối ra vào. Với quy mô khoảng `50 camera`, lượng video sinh ra mỗi ngày rất lớn. Khi cần tìm một bệnh nhân, người nhà, nhân viên hoặc một đối tượng cụ thể, người vận hành thường phải xem lại nhiều camera thủ công, rất tốn thời gian và dễ bỏ sót.
+
+Ví dụ truy vấn người dùng:
+
+- `Người đàn ông đeo ba lô đi qua hành lang tầng 2`
+- `Người mặc áo xanh, quần đen xuất hiện gần khu cấp cứu`
+- `Người đội mũ đi từ sảnh chính sang khu thang máy`
+
+Hệ thống hướng tới bài toán `tracklet-centric person search`: video được xử lý trước để phát hiện người, tracking thành tracklet, sinh embedding và metadata. Khi người dùng nhập truy vấn, hệ thống tìm các tracklet phù hợp, cho người dùng chọn candidate đúng, rồi dùng candidate đó để truy hồi sâu hơn trên nhiều camera.
+
+---
+
+## 2. Hiện tại đã làm được đến đâu
+
+Pipeline hiện tại đã xây được phần nền cho xử lý video và tạo tracklet/metadata. Phần này tương ứng với nửa trái của pipeline dự tính: `Video -> Detection + Tracking -> Tracklets -> Embedding + Metadata`.
+
+### Đã có
+
+- `YOLO26-X` để detect người trong từng frame.
+- `ByteTrack-style tracker` để nối detection thành tracklet trong từng video.
+- `CLIP-ReID embedding` cho crop người, sau đó lấy embedding trung bình theo tracklet.
+- `BLIP` nhận đầu vào là **tracklet crops** để sinh caption / appearance summary.
+- `ITSELF-Lite features` cho crop đại diện.
+- Metadata output dạng JSON, gồm `video_id`, `camera_id`, `track_id`, `bbox`, `content_frames`, `embedding_vector`, `person_caption`.
+
+### Chưa hoàn thiện
+
+- Chưa có `global_id` duy nhất cho cùng một người qua nhiều video/camera.
+- `track_id` hiện reset theo từng video, nên chỉ có ý nghĩa local.
+- Chưa có search tracklet index hoàn chỉnh từ user query.
+- Chưa có cross-camera re-identification thực sự.
+- Chưa có trajectory stitching để nối các lần xuất hiện thành hành trình cuối cùng.
+- Chưa có final video / evidence timeline hoàn chỉnh.
+
+---
+
+## 3. Pipeline dự tính
 
 ```mermaid
-graph TD
-    User((Người dùng)) -->|Nhập truy vấn| FE[Frontend Web App]
-    FE -->|Gọi API| BE[Backend API]
+flowchart TB
+    subgraph Offline_Indexing[Offline indexing]
+        V[Video]
+        DT[Detection + Tracking]
+        T[Tracklets]
+        EM[Embedding + Metadata]
+        TI[Tracklet Index]
 
-    subgraph Offline_Pipeline [Offline Video Processing]
-        Video[Stored CCTV Videos]
-        Process[Detection, Tracking, Tracklet Builder]
-        Index[Index and Metadata Storage]
-        Video --> Process --> Index
+        V --> DT --> T --> EM --> TI
     end
 
-    subgraph Search_Flow [Search and Investigation]
-        BE --> Coarse[Coarse Retrieval]
-        BE --> Refine[Refined Retrieval]
-        BE --> Assets[Thumbnail and Clip Storage]
+    subgraph Online_Search[Online search]
+        Q[User Query]
+        TE[Text Embedding]
+        SI[Search Tracklet Index]
+        K[Top-k Candidates]
+        S[User Selects Candidate]
+        CCR[Cross-camera Retrieval]
+        TS[Trajectory Stitching]
+        FV[Final Video]
+
+        Q --> TE --> SI --> K --> S --> CCR --> TS --> FV
     end
 
-    Index --> Coarse
-    Index --> Refine
-    Assets --> BE
-    BE --> FE
-    FE --> User
+    TI --> SI
 ```
 
-### Luồng xử lý chính
+### Diễn giải
 
-1. Video CCTV được nhập từ local storage, thẻ nhớ hoặc NVR export, sau đó hệ thống chạy pipeline offline để phát hiện người, tracking và xây dựng tracklet.
-2. Từ các tracklet, hệ thống tạo metadata, thumbnail, clip preview và embedding để lập chỉ mục tìm kiếm.
-3. Người dùng nhập truy vấn tự nhiên trên giao diện web, backend thực hiện coarse retrieval để trả về `top-k candidate tracks`.
-4. Người dùng chọn đúng ứng viên, sau đó hệ thống chạy refined retrieval và dựng lại timeline kết quả.
-
-👉 Chi tiết xem tại: [ARCHITECTURE.md](./ARCHITECTURE.md)
+1. Video từ hệ thống camera bệnh viện được xử lý để detect và track người.
+2. Mỗi tracklet có crop đại diện, embedding, caption và metadata.
+3. Các tracklet được lưu vào tracklet index.
+4. Người dùng nhập query, hệ thống encode query thành text embedding.
+5. Search tracklet index trả về `top-k candidates`.
+6. Người dùng chọn candidate đúng.
+7. Hệ thống dùng candidate đã chọn để truy hồi qua các camera/video khác.
+8. Các kết quả được stitch thành trajectory và xuất final video / evidence timeline.
 
 ---
 
-## 3. Công nghệ sử dụng (Tech Stack)
+## 4. Pipeline hiện tại
+
+```mermaid
+flowchart TD
+    Video[Input video .h265/.hevc]
+    Detect[YOLO26-X person detection]
+    Embed[CLIP-ReID embedding per detection crop]
+    Track[ByteTrack-style association]
+    Candidate[Build candidates from confirmed tracks]
+    Crop[Representative tracklet crops]
+    Caption[BLIP captioning]
+    Feature[ITSELF-Lite feature extraction]
+    Meta[Per-video metadata JSON]
+    Aggregate[Load / aggregate people metadata]
+
+    Video --> Detect --> Embed --> Track --> Candidate
+    Candidate --> Crop
+    Crop --> Caption
+    Crop --> Feature
+    Caption --> Meta
+    Feature --> Meta
+    Candidate --> Meta
+    Meta --> Aggregate
+```
+
+Điểm quan trọng: VLM không nhận toàn bộ video và cũng không nhận frame thô. VLM nhận **ảnh crop người từ tracklet đã confirm**, giúp caption tập trung vào appearance của đối tượng.
+
+---
+
+## 5. Công nghệ sử dụng
 
 ### Frontend
 
-- `Next.js`
 - `React`
+- `Next.js` hoặc scaffold web tương đương
 - `TypeScript`
 - `Tailwind CSS`
 
@@ -94,41 +129,46 @@ graph TD
 - `Pydantic`
 - `Uvicorn`
 
-### AI Engine
+### AI / CV Pipeline
 
-- `CLIP` hoặc `SigLIP` cho coarse retrieval
-- `ReID model` cho identity refinement
-- `YOLO` cho person detection
-- `BoxMOT` cho multi-object tracking
+- `YOLO26-X` cho person detection
+- `ByteTrack-style tracker` cho tracking per-video
+- `CLIP-ReID` cho embedding crop người
+- `BLIP` cho caption / appearance summary từ tracklet crops
+- `ITSELF-Lite` cho feature bổ sung
 
-### Database / Vector DB
+### Storage / Indexing
 
-- `FAISS` cho vector retrieval
-- `MySQL`, `SQLite` hoặc `PostgreSQL` cho metadata
-- local filesystem cho video, thumbnail, clip preview và evidence export
-
----
-
-## 4. Tính năng sản phẩm (Product Features - MVP Scope)
-
-### Tính năng cốt lõi (Core)
-
-- Tìm kiếm người trong video bằng mô tả ngôn ngữ tự nhiên
-- Lọc theo camera, ngày và khoảng thời gian
-- Trả về `top-k candidate tracks` cùng frame đại diện và clip preview
-- Cho phép người dùng chọn đúng ứng viên cần tìm
-- Truy hồi tinh chỉnh từ crop đã chọn để dựng lại timeline xuất hiện
-
-### Tính năng mở rộng (Nice-to-have)
-
-- Hỗ trợ thuộc tính chi tiết hơn như màu áo, màu quần, mũ, túi
-- Hỗ trợ truy vấn trên nhiều camera với timeline mở rộng
-- Hỗ trợ export evidence clip
-- Hỗ trợ lớp phân tích truy vấn bằng LLM như một thành phần tùy chọn
+- Metadata JSON trong giai đoạn hiện tại
+- Tracklet index / vector index cho bước search
+- `FAISS` hoặc vector index tương đương cho retrieval
+- `PostgreSQL` hoặc database tương đương cho metadata khi xử lý quy mô bệnh viện
+- Local filesystem hoặc storage nội bộ cho video, crop, thumbnail, clip preview và evidence export
 
 ---
 
-## 5. Hướng dẫn cài đặt (Local Setup)
+## 6. Tính năng MVP
+
+### MVP hiện tại / gần nhất
+
+- Xử lý video theo lô.
+- Detect người trong video.
+- Tracking thành tracklet trong từng video.
+- Sinh crop đại diện, embedding và metadata cho mỗi tracklet.
+- Sinh caption từ tracklet crops.
+- Lưu metadata để phục vụ bước search.
+
+### MVP cần hoàn thiện tiếp
+
+- Tạo tracklet index có thể search bằng text embedding.
+- Trả về `top-k candidates` cho truy vấn của người dùng.
+- Cho phép người dùng chọn candidate đúng.
+- Dùng candidate đã chọn để cross-camera retrieval.
+- Stitch các tracklet liên quan thành trajectory / final video.
+
+---
+
+## 7. Hướng dẫn cài đặt local
 
 ### Clone repo
 
@@ -156,7 +196,7 @@ cp .env.example .env
 
 ### Chạy thử
 
-Hiện tại repo đang ở giai đoạn MVP và phần AI core / backend sẽ được chạy tùy theo module triển khai thực tế. Với scaffold hiện có, có thể chạy bằng:
+Với scaffold hiện có, có thể chạy:
 
 ```bash
 python -m src.agent
@@ -164,8 +204,8 @@ python -m src.agent
 
 ---
 
-## 6. Thành viên nhóm (Team Members)
+## 8. Thành viên nhóm
 
-- `[Cao Diệu Ly]` - `[Leader, PM, AI Research]`
-- `[Dương Văn Hiệp]` - `[AI Research/ Data, AI Engineer]`
-- `[Bùi Văn Đạt]` - `[BE, FE]`
+- `Cao Diệu Ly` - Leader, PM, AI Research
+- `Dương Văn Hiệp` - AI Research / Data, AI Engineer
+- `Bùi Văn Đạt` - Backend, Frontend
