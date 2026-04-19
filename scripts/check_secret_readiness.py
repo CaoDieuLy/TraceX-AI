@@ -50,7 +50,6 @@ TEXT_SUFFIXES = {
 }
 
 SENSITIVE_FILE_FINDINGS = [
-    ("secrets/google-drive/drive-sa.json", "Service account credential", "OAuth / service account", "high"),
     ("secrets/oauth/oauth2_credentials.json", "OAuth client secret", "OAuth", "high"),
     ("secrets/oauth/oauth2_token.pickle", "OAuth refresh token", "Token", "high"),
     ("oauth2_credentials.json", "Legacy OAuth client secret still exists outside canonical secrets folder", "OAuth", "high"),
@@ -63,8 +62,8 @@ SENSITIVE_FILE_FINDINGS = [
     ),
     (
         "Multi-Camera-Person-Tracking-and-Re-Identification/backend/services/tracking-service/credentials/mcpt-tracker-sa.json",
-        "Legacy service-account file still exists outside canonical secrets folder",
-        "OAuth / service account",
+        "Legacy Google Drive auth file still exists outside canonical secrets folder",
+        "OAuth",
         "high",
     ),
 ]
@@ -76,14 +75,13 @@ LINE_PATTERNS = [
     (re.compile(r"^\s*GOOGLE_DRIVE_(ROOT|VINUNI)_FOLDER_ID\s*=\s*(?!\s*$)", re.IGNORECASE), "Drive folder identifier", "Hardcoded URL / endpoint", "medium"),
     (re.compile(r"/teamspace/studios/this_studio|/workspace/project/Multi-Camera-Person-Tracking-and-Re-Identification"), "Machine-specific absolute path", "Hardcoded config", "medium"),
     (re.compile(r"mcpt_password|change-me-postgres-password|change-me-in-production|change-this-jwt-secret"), "Unsafe default secret placeholder", "Hardcoded config", "medium"),
-    (re.compile(r"GOOGLE_DRIVE_CREDENTIALS_FILE"), "Credential file path reference", "OAuth", "low"),
+    (re.compile(r"google-drive/drive-sa\.json"), "Deprecated service-account path reference", "OAuth", "medium"),
 ]
 
 TRACKED_SECRET_PATTERNS = [
     "secrets/shared.env",
     "oauth2_credentials.json",
     "oauth2_token.pickle",
-    "secrets/google-drive/drive-sa.json",
     "secrets/oauth/oauth2_credentials.json",
     "secrets/oauth/oauth2_token.pickle",
 ]
@@ -224,8 +222,6 @@ def render_markdown(findings: list[Finding]) -> str:
             "  oauth/",
             "    oauth2_credentials.json",
             "    oauth2_token.pickle",
-            "  google-drive/",
-            "    drive-sa.json",
             "  deploy/",
             "  docker/",
             "  gpu/",

@@ -12,24 +12,33 @@ if str(A20_ROOT) not in sys.path:
 loaded_envs: list[Path] = []
 
 
-def _resolve_drive_credentials_path(raw_value: str) -> Path:
-    candidate = Path(raw_value or "/workspace/project/secrets/google-drive/drive-sa.json").expanduser()
+def _resolve_oauth_secret_path(raw_value: str, default_relative_path: str) -> Path:
+    candidate = Path(raw_value or default_relative_path).expanduser()
     if candidate.is_absolute():
         return candidate
-    return Path(os.getenv("MCPT_SECRETS_ROOT", "/workspace/project/secrets")) / candidate
+    return Path(os.getenv("MCPT_SECRETS_ROOT", "/workspace/a20-root/secrets")) / candidate
 
 
-resolved_drive_credentials_path = _resolve_drive_credentials_path(os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", ""))
+resolved_oauth_credentials_path = _resolve_oauth_secret_path(
+    os.getenv("MCPT_OAUTH2_CREDENTIALS_FILE", ""),
+    "oauth/oauth2_credentials.json",
+)
+resolved_oauth_token_path = _resolve_oauth_secret_path(
+    os.getenv("MCPT_OAUTH2_TOKEN_FILE", ""),
+    "oauth/oauth2_token.pickle",
+)
 
 try:
     from shared_secret_runtime import (  # noqa: E402
         load_runtime_env,
-        resolve_google_drive_service_account_path,
+        resolve_oauth2_credentials_path,
+        resolve_oauth2_token_path,
         shared_env_file,
     )
 
-    loaded_envs = load_runtime_env(include_tracking_service_env=True, override=True)
-    resolved_drive_credentials_path = resolve_google_drive_service_account_path()
+    loaded_envs = load_runtime_env(include_tracking_service_env=True, override=False)
+    resolved_oauth_credentials_path = resolve_oauth2_credentials_path()
+    resolved_oauth_token_path = resolve_oauth2_token_path()
     for env_file in loaded_envs:
         print(f"[config] Loaded env from {env_file}")
     if not loaded_envs:
@@ -61,7 +70,8 @@ class Settings(BaseSettings):
     postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
 
     google_drive_enabled: bool = False
-    google_drive_credentials_file: Path = resolved_drive_credentials_path
+    google_drive_oauth_credentials_file: Path = resolved_oauth_credentials_path
+    google_drive_oauth_token_file: Path = resolved_oauth_token_path
     google_drive_make_public: bool = True
     google_drive_root_folder_id: str = ""
     google_drive_vinuni_folder_id: str = ""

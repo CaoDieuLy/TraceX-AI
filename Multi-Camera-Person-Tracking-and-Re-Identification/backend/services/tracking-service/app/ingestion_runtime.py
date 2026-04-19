@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from .config import settings
@@ -21,8 +20,16 @@ def _dict_or_empty(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-DRIVE_SCOPES = ("https://www.googleapis.com/auth/drive",)
 ALREADY_COMPRESSED_SUFFIXES = {".h265", ".hevc"}
+
+_HERE = Path(__file__).resolve()
+for candidate in [Path(os.getenv("A20_ROOT", "")).expanduser() if os.getenv("A20_ROOT", "").strip() else None, Path("/workspace/a20-root"), *_HERE.parents]:
+    if candidate and (candidate / "shared_secret_runtime.py").exists():
+        if str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+        break
+
+from shared_secret_runtime import build_google_drive_oauth_service  # noqa: E402
 
 
 class VideoIngestionRuntime:
@@ -95,15 +102,7 @@ class VideoIngestionRuntime:
             raise RuntimeError("Google Drive support is disabled on tracking-service.")
         if self._drive_service is not None:
             return self._drive_service
-        credentials_path = Path(settings.google_drive_credentials_file).expanduser()
-        if not credentials_path.exists():
-            raise FileNotFoundError(f"Missing Google Drive credentials file: {credentials_path}")
-        credentials = service_account.Credentials.from_service_account_file(
-            str(credentials_path),
-            scopes=list(DRIVE_SCOPES),
-        )
-        print(f"[Drive] Service Account Email: {credentials.service_account_email}")
-        self._drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        self._drive_service = build_google_drive_oauth_service()
         return self._drive_service
 
     @staticmethod

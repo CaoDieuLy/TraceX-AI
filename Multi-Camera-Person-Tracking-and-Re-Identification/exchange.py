@@ -44,6 +44,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend" / "services" / "tracking-service
 from app.execution_plan import build_execution_plan
 from app.hardware_profiles import detect_gpu_inventory, resolve_hardware_profile
 from shared_secret_runtime import (  # noqa: E402
+    build_google_drive_oauth_service,
     ensure_canonical_secret_dirs,
     load_runtime_env,
     resolve_oauth2_credentials_path,
@@ -58,6 +59,7 @@ print("EXCHANGE.PY - FULL PIPELINE UNIT TEST")
 print("=" * 80)
 
 _RUNTIME_PROFILE: dict[str, Any] | None = None
+_DRIVE_SERVICE = None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -93,6 +95,78 @@ def _probe_lightning_health(
             "LightningAI authenticated health probe failed before job submission. "
             f"Remote service may be sleeping, unhealthy, or blocked: {exc}"
         ) from exc
+
+
+def _build_drive_service():
+    global _DRIVE_SERVICE
+    if _DRIVE_SERVICE is not None:
+        return _DRIVE_SERVICE
+
+    _DRIVE_SERVICE = build_google_drive_oauth_service()
+    return _DRIVE_SERVICE
+
+
+def _query_drive_children(parent_id: str, *, name: str | None = None, mime_type: str | None = None) -> list[dict[str, Any]]:
+    drive_service = _build_drive_service()
+    query_parts = [f"'{parent_id}' in parents", "trashed = false"]
+    if name:
+        escaped_name = name.replace("'", "\\'")
+        query_parts.append(f"name = '{escaped_name}'")
+    if mime_type:
+        query_parts.append(f"mimeType = '{mime_type}'")
+    query = " and ".join(query_parts)
+    response = drive_service.files().list(
+        q=query,
+        spaces="drive",
+        fields="files(id, name, mimeType, webViewLink, webContentLink, createdTime)",
+        pageSize=200,
+    ).execute()
+    return list(response.get("files") or [])
+
+
+def _ensure_drive_folder(parent_id: str, name: str) -> str:
+    folder_mime = "application/vnd.google-apps.folder"
+    existing = _query_drive_children(parent_id, name=name, mime_type=folder_mime)
+    if existing:
+        return str(existing[0]["id"])
+    drive_service = _build_drive_service()
+    created = drive_service.files().create(
+        body={"name": name, "mimeType": folder_mime, "parents": [parent_id]},
+        fields="id",
+    ).execute()
+    return str(created["id"])
+
+
+def resolve_drive_layout() -> dict[str, str]:
+    from app.config import Settings
+
+    load_runtime_env()
+    settings = Settings()
+    vinuni_folder_id = (
+        os.getenv("GOOGLE_DRIVE_VINUNI_FOLDER_ID")
+        or settings.google_drive_vinuni_folder_id
+        or ""
+    ).strip()
+    root_folder_id = (
+        os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID")
+        or settings.google_drive_root_folder_id
+        or ""
+    ).strip()
+    if not vinuni_folder_id and not root_folder_id:
+        raise ValueError("GOOGLE_DRIVE_VINUNI_FOLDER_ID or GOOGLE_DRIVE_ROOT_FOLDER_ID required")
+
+    vinuni_id = vinuni_folder_id or _ensure_drive_folder(root_folder_id, settings.google_drive_vinuni_folder_name)
+    queue_id = _ensure_drive_folder(vinuni_id, settings.google_drive_queue_folder_name)
+    import_id = _ensure_drive_folder(vinuni_id, settings.google_drive_import_folder_name)
+    queue_h265_id = _ensure_drive_folder(queue_id, settings.google_drive_h265_folder_name)
+    queue_metadata_id = _ensure_drive_folder(queue_id, settings.google_drive_metadata_folder_name)
+    return {
+        "vinuni_id": vinuni_id,
+        "queue_id": queue_id,
+        "import_id": import_id,
+        "queue_h265_id": queue_h265_id,
+        "queue_metadata_id": queue_metadata_id,
+    }
 
 
 def detect_runtime_profile() -> dict[str, Any]:
@@ -258,6 +332,12 @@ def convert_mp4_to_h265(
             "-c:v", "hevc_nvenc",
             "-preset", runtime_profile["ffmpeg_preset"],
             "-cq", str(crf),
+            "-bf", "0",
+            "-g", "25",
+            "-forced-idr", "1",
+            "-aud", "1",
+            "-repeat-headers", "1",
+            "-pix_fmt", "yuv420p",
             "-an",
             str(output_path),
         ]
@@ -268,6 +348,8 @@ def convert_mp4_to_h265(
             "-c:v", "libx265",
             "-crf", str(crf),
             "-preset", preset,
+            "-x265-params", "repeat-headers=1:aud=1:no-open-gop=1:keyint=25:min-keyint=25",
+            "-pix_fmt", "yuv420p",
             "-an",
             str(output_path)
         ]
@@ -293,7 +375,6 @@ def upload_to_drive_folder(
 ) -> dict[str, str]:
     """
     Upload file to Google Drive folder using OAuth2 user credentials.
-    Supports My Drive (not Shared Drives).
 
     Returns:
         {"file_id": ..., "view_link": ..., "download_link": ...}
@@ -302,45 +383,15 @@ def upload_to_drive_folder(
     print(f"  File: {local_path.name}")
     print(f"  Parent folder ID: {parent_folder_id}")
 
-    import pickle
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
     from googleapiclient.errors import HttpError
 
-    # Load OAuth2 token from A20-App-119 folder
     token_path = resolve_oauth2_token_path()
-    creds_path = resolve_oauth2_credentials_path()
-    
+    credentials_path = resolve_oauth2_credentials_path()
     print(f"  Token path: {token_path}")
-    print(f"  Creds path: {creds_path}")
-    
-    if not token_path.exists():
-        raise FileNotFoundError(
-            f"OAuth2 token not found: {token_path}\n"
-            f"Please run upload_oauth2.py first to authenticate."
-        )
-    
-    # Load credentials
-    with open(token_path, "rb") as f:
-        creds = pickle.load(f)
-    
-    # Check if token needs refresh
-    if creds.expired:
-        print(f"  Token expired, refreshing...")
-        import json
-        with open(creds_path, "r") as f:
-            creds_data = json.load(f)
-        creds.refresh(
-            google.auth.transport.requests.Request()
-        )
-        # Save refreshed token
-        with open(token_path, "wb") as f:
-            pickle.dump(creds, f)
-        print(f"  ✅ Token refreshed and saved")
-    
-    # Build drive service
-    drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    print(f"  Creds path: {credentials_path}")
+
+    drive_service = _build_drive_service()
     
     # Check parent folder info
     try:
@@ -353,7 +404,6 @@ def upload_to_drive_folder(
     except Exception as e:
         print(f"  ⚠️  Could not get parent folder info: {e}")
 
-    # Upload with OAuth2 (My Drive only)
     media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=False)
     file_metadata = {"name": local_path.name, "parents": [parent_folder_id]}
 
@@ -812,21 +862,11 @@ def run_full_pipeline(
 
         # ── STEP 2: Upload .h265 to Drive ───────────────────────
         if upload_to_drive:
-            import os
-            from app.config import Settings
-
-            load_runtime_env()
-            settings = Settings()
-
-            video_folder_id = os.getenv("GOOGLE_DRIVE_VINUNI_FOLDER_ID") or os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID") or settings.google_drive_vinuni_folder_id or settings.google_drive_root_folder_id
-            if not video_folder_id:
-                # Print env for debug
-                print(f"DEBUG ENV:")
-                print(f"  VINUNI_FOLDER_ID: {os.getenv('GOOGLE_DRIVE_VINUNI_FOLDER_ID')}")
-                print(f"  ROOT_FOLDER_ID: {os.getenv('GOOGLE_DRIVE_ROOT_FOLDER_ID')}")
-                raise ValueError("GOOGLE_DRIVE_VINUNI_FOLDER_ID or GOOGLE_DRIVE_ROOT_FOLDER_ID required")
-
-            print(f"  Using folder ID: {video_folder_id}")
+            drive_layout = resolve_drive_layout()
+            video_folder_id = drive_layout["queue_h265_id"]
+            metadata_folder_id = drive_layout["queue_metadata_id"]
+            print(f"  Using Queue/.h265 folder ID: {video_folder_id}")
+            print(f"  Using Queue/Metadata folder ID: {metadata_folder_id}")
 
             # Upload .h265 to VinUni/Queue/.h265
             drive_video = upload_to_drive_folder(
@@ -849,8 +889,6 @@ def run_full_pipeline(
 
         # ── STEP 4: Upload metadata to Drive ────────────────────
         if upload_to_drive:
-            # Use metadata folder (nếu có) hoặc cùng folder với video
-            metadata_folder_id = os.getenv("GOOGLE_DRIVE_METADATA_FOLDER_ID") or video_folder_id
             print(f"  Uploading metadata to folder ID: {metadata_folder_id}")
             drive_metadata = upload_to_drive_folder(
                 metadata_path,
@@ -945,6 +983,7 @@ def main():
     parser.add_argument("--mp4-file", type=Path, help="Backward-compatible alias for --video-file")
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help=f"Directory containing input videos (default: {DEFAULT_INPUT_DIR})")
     parser.add_argument("--batch", action="store_true", help="Process all matching videos in --input-dir")
+    parser.add_argument("--mp4-only", action="store_true", help="Batch mode: process only .mp4 files from --input-dir")
     parser.add_argument("--max-workers", type=int, help="Override max parallel workers for batch mode")
     parser.add_argument("--camera-id", type=str, help="Camera ID (default: auto from filename)")
     parser.add_argument("--no-drive", action="store_true", help="Skip Google Drive upload")
@@ -965,11 +1004,14 @@ def main():
         if not args.input_dir.exists():
             print(f"❌ Directory not found: {args.input_dir}")
             sys.exit(1)
-        h265_videos = sorted(
-            [path for ext in (".h265", ".hevc") for path in args.input_dir.glob(f"*{ext}")]
-        )
-        mp4_videos = sorted(args.input_dir.glob("*.mp4"))
-        videos = h265_videos or mp4_videos
+        if args.mp4_only:
+            videos = sorted(args.input_dir.glob("*.mp4"))
+        else:
+            h265_videos = sorted(
+                [path for ext in (".h265", ".hevc") for path in args.input_dir.glob(f"*{ext}")]
+            )
+            mp4_videos = sorted(args.input_dir.glob("*.mp4"))
+            videos = h265_videos or mp4_videos
         if not videos:
             print(f"❌ No supported videos in {args.input_dir}")
             print(f"   Supported: {', '.join(SUPPORTED_VIDEO_EXTENSIONS)}")

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 
 import httpx
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileDownload, MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -26,6 +26,15 @@ VIDEO_EXTENSIONS = {".hevc", ".h265"}
 DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 DRIVE_SCOPES = ("https://www.googleapis.com/auth/drive",)
 BOOTSTRAP_CAMERA_PATTERN = re.compile(r"Camera_\d{2}")
+
+_HERE = Path(__file__).resolve()
+for candidate in [Path(os.getenv("A20_ROOT", "")).expanduser() if os.getenv("A20_ROOT", "").strip() else None, Path("/workspace/a20-root"), *_HERE.parents]:
+    if candidate and (candidate / "shared_secret_runtime.py").exists():
+        if str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+        break
+
+from shared_secret_runtime import build_google_drive_oauth_service  # noqa: E402
 
 
 class QueueSyncService:
@@ -67,17 +76,7 @@ class QueueSyncService:
         if self._drive_service is not None:
             return self._drive_service
 
-        credentials_path = Path(settings.google_drive_credentials_file).expanduser()
-        if not credentials_path.exists():
-            raise FileNotFoundError(
-                f"Missing Google Drive credentials file: {credentials_path}. "
-                "Set GOOGLE_DRIVE_CREDENTIALS_FILE to a valid service-account JSON."
-            )
-        credentials = service_account.Credentials.from_service_account_file(
-            str(credentials_path),
-            scopes=list(DRIVE_SCOPES),
-        )
-        self._drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        self._drive_service = build_google_drive_oauth_service()
         return self._drive_service
 
     def _query_single(self, query: str, fields: str = "files(id, name)") -> list[dict]:
@@ -189,7 +188,7 @@ class QueueSyncService:
         request = service.files().get_media(fileId=file_id)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         with target_path.open("wb") as handle:
-            downloader = MediaFileDownload(handle, request)
+            downloader = MediaIoBaseDownload(handle, request)
             done = False
             while not done:
                 _status, done = downloader.next_chunk()
@@ -226,8 +225,11 @@ class QueueSyncService:
             },
         }
         endpoint = f"{settings.tracking_service_url.rstrip('/')}/api/v1/ingestion/process"
-        with httpx.Client(timeout=1800.0) as client:
-            response = client.post(endpoint, json=payload)
+        headers: dict[str, str] = {}
+        if settings.lightning_api_token:
+            headers[settings.lightning_api_auth_header] = f"{settings.lightning_api_auth_prefix}{settings.lightning_api_token}"
+        with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
+            response = client.post(endpoint, json=payload, headers=headers or None)
             response.raise_for_status()
             return response.json()
 

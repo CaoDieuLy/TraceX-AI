@@ -90,7 +90,7 @@ docker compose up -d queue-worker
 
 Luu y:
 
-- `GOOGLE_DRIVE_CREDENTIALS_FILE` phai tro dung file service account trong `../secrets/google-drive/drive-sa.json` va folder Drive phai share quyen cho service account.
+- Google Drive hien dung OAuth2 user token trong `../secrets/oauth/oauth2_credentials.json` va `../secrets/oauth/oauth2_token.pickle`.
 - Metadata se duoc sinh boi processor thuc te khi `tracking-service`/LightningAI duoc cau hinh day du.
 
 ## CI/CD VPS
@@ -147,7 +147,8 @@ cp infra/vps/.env.vps.example .env
 Copy file service-account Google Drive vao:
 
 ```bash
-/opt/mcpt/app/secrets/drive-sa.json
+/opt/mcpt/secrets/oauth/oauth2_credentials.json
+/opt/mcpt/secrets/oauth/oauth2_token.pickle
 ```
 
 Sua `.env` production:

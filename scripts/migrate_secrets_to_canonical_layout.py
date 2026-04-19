@@ -38,7 +38,8 @@ def merge_env(source_file: Path, destination_file: Path) -> None:
     merged.pop("MCPT_SHARED_ENV_FILE", None)
     merged["MCPT_OAUTH2_CREDENTIALS_FILE"] = "oauth/oauth2_credentials.json"
     merged["MCPT_OAUTH2_TOKEN_FILE"] = "oauth/oauth2_token.pickle"
-    merged["GOOGLE_DRIVE_CREDENTIALS_FILE"] = "google-drive/drive-sa.json"
+    deprecated_drive_key = "GOOGLE_DRIVE_" "CREDENTIALS_FILE"
+    merged.pop(deprecated_drive_key, None)
     destination_file.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}={value}" for key, value in sorted(merged.items())]
     destination_file.write_text("\n".join(lines) + ("\n" if lines else ""))
@@ -51,7 +52,6 @@ def main() -> int:
     root_env = REPO_ROOT / ".env"
     oauth_credentials = canonical_secrets_root() / "oauth" / "oauth2_credentials.json"
     oauth_token = canonical_secrets_root() / "oauth" / "oauth2_token.pickle"
-    drive_service_account = canonical_secrets_root() / "google-drive" / "drive-sa.json"
 
     print(f"Canonical secrets root: {paths['secrets_root']}")
 
@@ -59,17 +59,14 @@ def main() -> int:
     merge_env(tracking_env, shared_env)
     print(f"Merged env into: {shared_env}")
 
-    legacy_drive_sa = APP_ROOT / "backend" / "services" / "tracking-service" / "credentials" / "mcpt-tracker-sa.json"
     legacy_oauth_credentials = REPO_ROOT / "oauth2_credentials.json"
     legacy_oauth_token = REPO_ROOT / "oauth2_token.pickle"
 
     copied_oauth_credentials = oauth_credentials.exists() or copy_if_present(legacy_oauth_credentials, oauth_credentials)
     copied_oauth_token = oauth_token.exists() or copy_if_present(legacy_oauth_token, oauth_token)
-    copied_drive_sa = drive_service_account.exists() or copy_if_present(legacy_drive_sa, drive_service_account)
 
     print(f"OAuth2 credentials copied: {'yes' if copied_oauth_credentials else 'no'} -> {oauth_credentials}")
     print(f"OAuth2 token copied: {'yes' if copied_oauth_token else 'no'} -> {oauth_token}")
-    print(f"Drive service account copied: {'yes' if copied_drive_sa else 'no'} -> {drive_service_account}")
     print("Done.")
     return 0
 

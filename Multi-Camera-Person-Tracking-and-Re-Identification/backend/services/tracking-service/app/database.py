@@ -4,12 +4,13 @@ SQLAlchemy database setup for tracking-service.
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from urllib.parse import quote_plus
 
 from .config import settings
 
 # Build database URL
 DATABASE_URL = (
-    f"postgresql://{settings.postgres_user}:{settings.postgres_password}"
+    f"postgresql://{settings.postgres_user}:{quote_plus(settings.postgres_password)}"
     f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_database}"
 )
 

@@ -10,7 +10,6 @@
 
 | Risk | Type | File | Line | Detail |
 | --- | --- | --- | ---: | --- |
-| high | OAuth / service account | `secrets/google-drive/drive-sa.json` | 1 | Service account credential |
 | high | OAuth | `secrets/oauth/oauth2_credentials.json` | 1 | OAuth client secret |
 | high | Token | `secrets/oauth/oauth2_token.pickle` | 1 | OAuth refresh token |
 | high | API key | `secrets/shared.env` | 8 | API token |
@@ -38,7 +37,6 @@ secrets/
     oauth2_credentials.json
     oauth2_token.pickle
   google-drive/
-    drive-sa.json
   deploy/
   docker/
   gpu/

@@ -13,8 +13,6 @@ secrets/
   oauth/
     oauth2_credentials.json
     oauth2_token.pickle
-  google-drive/
-    drive-sa.json
   deploy/
   docker/
   gpu/

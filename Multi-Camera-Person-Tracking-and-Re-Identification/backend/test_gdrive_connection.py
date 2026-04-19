@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Detailed validation: verify canonical Google Drive config, credentials, and API reachability.
+Detailed validation: verify canonical Google Drive OAuth2 config, files, and API reachability.
 Usage: python test_gdrive_connection.py
 """
 
@@ -11,7 +11,13 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root.parent.parent))
 sys.path.insert(0, str(project_root / "services" / "tracking-service"))
 
-from shared_secret_runtime import load_runtime_env, shared_env_file  # noqa: E402
+from shared_secret_runtime import (  # noqa: E402
+    build_google_drive_oauth_service,
+    load_runtime_env,
+    resolve_oauth2_credentials_path,
+    resolve_oauth2_token_path,
+    shared_env_file,
+)
 
 loaded = load_runtime_env(include_tracking_service_env=True)
 
@@ -29,25 +35,33 @@ try:
     from app.config import settings
 
     print(f"   GOOGLE_DRIVE_ENABLED: {settings.google_drive_enabled}")
-    print(f"   CREDENTIALS_FILE: {settings.google_drive_credentials_file}")
+    print(f"   OAUTH2_CREDENTIALS_FILE: {resolve_oauth2_credentials_path()}")
+    print(f"   OAUTH2_TOKEN_FILE: {resolve_oauth2_token_path()}")
     print(f"   MAKE_PUBLIC: {settings.google_drive_make_public}")
 except Exception as exc:
     print(f"   ❌ Config error: {exc}")
     sys.exit(1)
 
-print("\n[2/5] Checking credentials file...")
-cred_path = Path(settings.google_drive_credentials_file).expanduser()
+print("\n[2/5] Checking OAuth files...")
+cred_path = resolve_oauth2_credentials_path().expanduser()
+token_path = resolve_oauth2_token_path().expanduser()
 if cred_path.exists():
-    print(f"   ✅ File exists: {cred_path}")
+    print(f"   ✅ Credentials file exists: {cred_path}")
     print(f"   File size: {cred_path.stat().st_size} bytes")
 else:
-    print(f"   ❌ File NOT found: {cred_path}")
-    print("   → Restore or update GOOGLE_DRIVE_CREDENTIALS_FILE in secrets/shared.env")
+    print(f"   ❌ Credentials file NOT found: {cred_path}")
+    print("   → Restore secrets/oauth/oauth2_credentials.json")
+    sys.exit(1)
+if token_path.exists():
+    print(f"   ✅ Token file exists: {token_path}")
+    print(f"   File size: {token_path.stat().st_size} bytes")
+else:
+    print(f"   ❌ Token file NOT found: {token_path}")
+    print("   → Restore secrets/oauth/oauth2_token.pickle")
     sys.exit(1)
 
 print("\n[3/5] Checking Google API libraries...")
 try:
-    from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
     print("   ✅ google-auth, google-api-python-client installed")
@@ -57,11 +71,7 @@ except ImportError as exc:
 
 print("\n[4/5] Building Drive service...")
 try:
-    credentials = service_account.Credentials.from_service_account_file(
-        str(cred_path),
-        scopes=["https://www.googleapis.com/auth/drive"],
-    )
-    drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+    drive_service = build_google_drive_oauth_service()
     print("   ✅ Drive service created")
 except Exception as exc:
     print(f"   ❌ Failed to build service: {exc}")

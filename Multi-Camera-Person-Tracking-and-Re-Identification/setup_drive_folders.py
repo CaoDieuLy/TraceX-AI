@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup Google Drive folder structure for tracking-service.
+Setup Google Drive folder structure using OAuth2 user credentials.
 Creates: VinUni/Queue/.h265, VinUni/Queue/Metadata, VinUni/Import_New, etc.
 """
 
@@ -12,21 +12,13 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "backend" / "services" / "tracking-service"))
 
 from app.config import settings
+from shared_secret_runtime import build_google_drive_oauth_service
 
 print("=" * 70)
 print("GOOGLE DRIVE FOLDER SETUP")
 print("=" * 70)
 
-# Build drive service trực tiếp
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-
-credentials_path = Path(settings.google_drive_credentials_file).expanduser()
-credentials = service_account.Credentials.from_service_account_file(
-    str(credentials_path),
-    scopes=["https://www.googleapis.com/auth/drive"]
-)
-drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
+drive = build_google_drive_oauth_service()
 print("✅ Drive service connected")
 
 # Config
@@ -117,17 +109,11 @@ for folder_name, folder_id, desc in created:
         print(f"     └── {settings.google_drive_h265_folder_name}/")
         print(f"         ID: (created above)")
 
-# Check Service Account permissions
+# OAuth note
 print("\n" + "=" * 70)
-print("SERVICE ACCOUNT INFO:")
+print("OAUTH INFO:")
 print("=" * 70)
-print(f"  Email: drive-uploader@ambient-fuze-493617-t9.iam.gserviceaccount.com")
 print(f"  Root folder: {root_folder_id}")
-print("\n🔑 PERMISSION CHECK:")
-print("  If you get 'storageQuotaExceeded', do:")
-print("  1. Go to Google Drive")
-print(f"  2. Open folder '{root_meta['name']}'")
-print("  3. Share with: drive-uploader@ambient-fuze-493617-t9.iam.gserviceaccount.com")
-print("  4. Permission: 'Editor' (or 'Content manager' if Shared Drive)")
+print("\n🔑 Auth mode: OAuth2 user token from secrets/oauth/")
 
 print("\n✅ Setup complete!")

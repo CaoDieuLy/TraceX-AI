@@ -4,6 +4,8 @@ services:
     container_name: mcpt-postgres
     env_file:
       - ../secrets/shared.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DATABASE}
     ports:
       - "${POSTGRES_BIND_HOST:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -24,6 +26,11 @@ services:
     env_file:
       - ../secrets/shared.env
     environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      POSTGRES_HOST: postgres
+      PYTHONPATH: /workspace/a20-root
+      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
       UVICORN_WORKERS: ${METADATA_UVICORN_WORKERS:-4}
     depends_on:
       postgres:
@@ -31,20 +38,27 @@ services:
     volumes:
       - storage_data:/workspace/storage
       - ./data:/workspace/data:ro
-      - ./:/workspace/project:ro
-      - ../secrets:/workspace/project/secrets:ro
+      - ../:/workspace/a20-root:ro
     ports:
       - "${METADATA_SERVICE_BIND_HOST:-0.0.0.0}:${METADATA_SERVICE_PORT:-8001}:8000"
 
   queue-worker:
+    build:
+      context: .
+      dockerfile: ./backend/services/metadata-service/Dockerfile
     image: mcpt-metadata-service:latest
     container_name: mcpt-queue-worker
     command: ["python", "-m", "app.queue_worker"]
     env_file:
       - ../secrets/shared.env
     environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      POSTGRES_HOST: postgres
+      PYTHONPATH: /workspace/a20-root
       QUEUE_PARALLEL_JOBS: ${QUEUE_PARALLEL_JOBS:-4}
       QUEUE_DOWNLOAD_WORKERS: ${QUEUE_DOWNLOAD_WORKERS:-4}
+      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,8 +67,7 @@ services:
     volumes:
       - storage_data:/workspace/storage
       - ./data:/workspace/data:ro
-      - ./:/workspace/project:ro
-      - ../secrets:/workspace/project/secrets:ro
+      - ../:/workspace/a20-root:ro
 
   tracking-service:
     profiles:
@@ -70,6 +83,11 @@ services:
     env_file:
       - ../secrets/shared.env
     environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      POSTGRES_HOST: postgres
+      PROJECT_ROOT: /workspace/project
+      PYTHONPATH: /workspace/a20-root
       LEGACY_ROOT: /workspace/backend/legacy-engine
       UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
       LIGHTNING_TIMEOUT_SECONDS: ${LIGHTNING_TIMEOUT_SECONDS:-180}
@@ -79,7 +97,8 @@ services:
     volumes:
       - storage_data:/workspace/storage
       - ./data:/workspace/data:ro
-      - ../secrets:/workspace/project/secrets:ro
+      - ./:/workspace/project:ro
+      - ../:/workspace/a20-root:ro
     ports:
       - "${TRACKING_SERVICE_BIND_HOST:-0.0.0.0}:${TRACKING_SERVICE_PORT:-8002}:8000"
 
@@ -92,9 +111,15 @@ services:
     env_file:
       - ../secrets/shared.env
     environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      PYTHONPATH: /workspace/a20-root
+      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
       UVICORN_WORKERS: ${API_GATEWAY_UVICORN_WORKERS:-4}
     depends_on:
       - metadata-service
+    volumes:
+      - ../:/workspace/a20-root:ro
     ports:
       - "${API_GATEWAY_BIND_HOST:-0.0.0.0}:${API_GATEWAY_PORT:-8000}:8000"
 

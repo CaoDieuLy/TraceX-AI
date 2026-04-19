@@ -19,7 +19,6 @@ Canonical layout from now on
 - secrets/api/
 - secrets/oauth/oauth2_credentials.json
 - secrets/oauth/oauth2_token.pickle
-- secrets/google-drive/drive-sa.json
 - secrets/deploy/
 - secrets/docker/
 - secrets/gpu/
@@ -97,7 +96,6 @@ Important paths to keep alive
 - secrets/shared.env
 - secrets/oauth/oauth2_credentials.json
 - secrets/oauth/oauth2_token.pickle
-- secrets/google-drive/drive-sa.json
 
 Git control improvements already applied
 ----------------------------------------

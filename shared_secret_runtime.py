@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 from pathlib import Path
 from typing import Iterable
 
@@ -59,15 +60,6 @@ def oauth2_token_candidates() -> list[Path]:
     return candidates
 
 
-def google_drive_service_account_candidates() -> list[Path]:
-    configured = os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", "").strip()
-    candidates = []
-    if configured:
-        candidates.append(_resolve_secret_path(configured, "google-drive/drive-sa.json"))
-    candidates.append(canonical_secrets_root() / "google-drive" / "drive-sa.json")
-    return candidates
-
-
 def _first_existing(candidates: Iterable[Path]) -> Path | None:
     for candidate in candidates:
         if candidate.exists():
@@ -81,10 +73,6 @@ def resolve_oauth2_credentials_path() -> Path:
 
 def resolve_oauth2_token_path() -> Path:
     return _first_existing(oauth2_token_candidates()) or oauth2_token_candidates()[0]
-
-
-def resolve_google_drive_service_account_path() -> Path:
-    return _first_existing(google_drive_service_account_candidates()) or google_drive_service_account_candidates()[0]
 
 
 def ensure_canonical_secret_dirs() -> dict[str, Path]:
@@ -167,11 +155,34 @@ def load_runtime_env(*, include_tracking_service_env: bool = True, override: boo
     shared_env = shared_env_file()
     oauth2_credentials = resolve_oauth2_credentials_path()
     oauth2_token = resolve_oauth2_token_path()
-    service_account_path = resolve_google_drive_service_account_path()
 
     os.environ["MCPT_SECRETS_ROOT"] = str(secrets_root)
     os.environ["MCPT_SHARED_ENV_FILE"] = str(shared_env)
     os.environ["MCPT_OAUTH2_CREDENTIALS_FILE"] = str(oauth2_credentials)
     os.environ["MCPT_OAUTH2_TOKEN_FILE"] = str(oauth2_token)
-    os.environ["GOOGLE_DRIVE_CREDENTIALS_FILE"] = str(service_account_path)
     return loaded
+
+
+def build_google_drive_oauth_credentials():
+    import google.auth.transport.requests
+
+    token_path = resolve_oauth2_token_path()
+    if not token_path.exists():
+        raise FileNotFoundError(
+            f"OAuth2 token not found: {token_path}. "
+            "Authenticate first so Google Drive runtime can reuse the stored token."
+        )
+    with token_path.open("rb") as handle:
+        credentials = pickle.load(handle)
+    if getattr(credentials, "expired", False):
+        credentials.refresh(google.auth.transport.requests.Request())
+        with token_path.open("wb") as handle:
+            pickle.dump(credentials, handle)
+    return credentials
+
+
+def build_google_drive_oauth_service():
+    from googleapiclient.discovery import build
+
+    credentials = build_google_drive_oauth_credentials()
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
