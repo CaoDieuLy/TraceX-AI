@@ -7,18 +7,24 @@ import sys
 import os
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
 # Setup path - import trực tiếp từ tracking-service
 sys.path.insert(0, str(Path(__file__).parent / "services" / "tracking-service"))
+
+from shared_secret_runtime import load_runtime_env, shared_env_file  # noqa: E402
 
 print("=" * 70)
 print("GOOGLE DRIVE CONNECTION TEST")
 print("=" * 70)
 
-# Load .env từ tracking-service folder
-from dotenv import load_dotenv
-env_path = Path(__file__).parent / "services" / "tracking-service" / ".env"
-print(f"[1] Loading .env from: {env_path}")
-load_dotenv(env_path, override=True)
+loaded = load_runtime_env(include_tracking_service_env=True)
+print(f"[1] Loaded env files:")
+for env_path in loaded:
+    print(f"    - {env_path}")
+if not loaded:
+    print(f"    - none found (expected shared env at {shared_env_file()})")
 
 # Now import settings
 from app.config import settings

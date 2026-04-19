@@ -33,12 +33,25 @@ from urllib.parse import quote_plus
 
 # Add project to path
 PROJECT_ROOT = Path(__file__).parent
+A20_ROOT = PROJECT_ROOT.parent
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "videos"
 SUPPORTED_VIDEO_EXTENSIONS = (".h265", ".hevc", ".mp4")
+A20_ROOT_STR = str(A20_ROOT)
+if A20_ROOT_STR not in sys.path:
+    sys.path.insert(0, A20_ROOT_STR)
 sys.path.insert(0, str(PROJECT_ROOT / "backend" / "services" / "tracking-service"))
 
 from app.execution_plan import build_execution_plan
 from app.hardware_profiles import detect_gpu_inventory, resolve_hardware_profile
+from shared_secret_runtime import (  # noqa: E402
+    ensure_canonical_secret_dirs,
+    load_runtime_env,
+    resolve_oauth2_credentials_path,
+    resolve_oauth2_token_path,
+)
+
+load_runtime_env()
+ensure_canonical_secret_dirs()
 
 print("=" * 80)
 print("EXCHANGE.PY - FULL PIPELINE UNIT TEST")
@@ -296,9 +309,8 @@ def upload_to_drive_folder(
     from googleapiclient.errors import HttpError
 
     # Load OAuth2 token from A20-App-119 folder
-    project_root = Path("/teamspace/studios/this_studio/A20-App-119")
-    token_path = project_root / "oauth2_token.pickle"
-    creds_path = project_root / "oauth2_credentials.json"
+    token_path = resolve_oauth2_token_path()
+    creds_path = resolve_oauth2_credentials_path()
     
     print(f"  Token path: {token_path}")
     print(f"  Creds path: {creds_path}")
@@ -518,8 +530,6 @@ def save_to_postgresql(
     import os
     import socket
     import subprocess
-    from dotenv import load_dotenv
-
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
     from sqlalchemy.orm import sessionmaker
@@ -527,9 +537,7 @@ def save_to_postgresql(
 
     from app.models import Base, QueueVideoAsset
 
-    # Load .env
-    env_path = PROJECT_ROOT / "backend" / "services" / "tracking-service" / ".env"
-    load_dotenv(env_path, override=True)
+    load_runtime_env()
 
     def _build_db_url() -> str:
         direct_url = os.getenv("DATABASE_URL", "").strip()
@@ -643,10 +651,7 @@ def call_lightning_ai_gpu(
     print(f"  Video ID: {video_id}")
 
     import os
-    from dotenv import load_dotenv
-
-    env_path = PROJECT_ROOT / "backend" / "services" / "tracking-service" / ".env"
-    load_dotenv(env_path, override=True)
+    load_runtime_env()
 
     api_base_url = api_base_url or os.getenv("LIGHTNING_API_BASE_URL")
     api_token = api_token or os.getenv("LIGHTNING_API_TOKEN")
@@ -808,12 +813,9 @@ def run_full_pipeline(
         # ── STEP 2: Upload .h265 to Drive ───────────────────────
         if upload_to_drive:
             import os
-            from dotenv import load_dotenv
             from app.config import Settings
 
-            # Reload settings with env override
-            env_path = PROJECT_ROOT / "backend" / "services" / "tracking-service" / ".env"
-            load_dotenv(env_path, override=True)
+            load_runtime_env()
             settings = Settings()
 
             video_folder_id = os.getenv("GOOGLE_DRIVE_VINUNI_FOLDER_ID") or os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID") or settings.google_drive_vinuni_folder_id or settings.google_drive_root_folder_id

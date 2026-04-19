@@ -10,6 +10,19 @@ import sys
 import time
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from shared_secret_runtime import load_runtime_env  # noqa: E402
+
+load_runtime_env()
+
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
+POSTGRES_DB = os.getenv("POSTGRES_DATABASE", os.getenv("POSTGRES_DB", "video_tracking"))
+POSTGRES_USER = os.getenv("POSTGRES_USER", "mcpt_user")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "change-me-postgres-password")
+
 print("=" * 70)
 print("POSTGRESQL QUICK START")
 print("=" * 70)
@@ -18,16 +31,17 @@ print("=" * 70)
 try:
     import psycopg2
     conn = psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="postgres",
-        user="postgres"
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        database=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
     )
     conn.close()
-    print("✅ PostgreSQL is already running on localhost:5432")
+    print(f"✅ PostgreSQL is already running on {POSTGRES_HOST}:{POSTGRES_PORT}")
     sys.exit(0)
 except Exception:
-    print("⚠️  PostgreSQL not running on localhost:5432")
+    print(f"⚠️  PostgreSQL not running on {POSTGRES_HOST}:{POSTGRES_PORT}")
 
 # Try Docker
 print("\n[1] Checking Docker...")
@@ -103,10 +117,10 @@ else:
 cmd = [
     "docker", "run", "-d",
     "--name", "postgres-mcpt",
-    "-e", "POSTGRES_USER=mcpt_user",
-    "-e", "POSTGRES_PASSWORD=Mcpt@2026!Secure",
-    "-e", "POSTGRES_DB=video_tracking",
-    "-p", "5432:5432",
+    "-e", f"POSTGRES_USER={POSTGRES_USER}",
+    "-e", f"POSTGRES_PASSWORD={POSTGRES_PASSWORD}",
+    "-e", f"POSTGRES_DB={POSTGRES_DB}",
+    "-p", f"{POSTGRES_PORT}:5432",
     *volume_args,
     "postgres:16-alpine",
 ]
@@ -121,11 +135,11 @@ for i in range(30):
     try:
         import psycopg2
         conn = psycopg2.connect(
-            host="localhost",
-            port=5432,
-            database="video_tracking",
-            user="mcpt_user",
-            password="Mcpt@2026!Secure"
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            database=POSTGRES_DB,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
         )
         conn.close()
         print("    ✅ PostgreSQL is ready!")
@@ -151,10 +165,10 @@ else:
             recreate_cmd = [
                 "docker", "run", "-d",
                 "--name", "postgres-mcpt",
-                "-e", "POSTGRES_USER=mcpt_user",
-                "-e", "POSTGRES_PASSWORD=Mcpt@2026!Secure",
-                "-e", "POSTGRES_DB=video_tracking",
-                "-p", "5432:5432",
+                "-e", f"POSTGRES_USER={POSTGRES_USER}",
+                "-e", f"POSTGRES_PASSWORD={POSTGRES_PASSWORD}",
+                "-e", f"POSTGRES_DB={POSTGRES_DB}",
+                "-p", f"{POSTGRES_PORT}:5432",
                 "-v", f"{named_volume}:/var/lib/postgresql/data",
                 "postgres:16-alpine",
             ]
@@ -163,11 +177,11 @@ else:
             for i in range(30):
                 try:
                     conn = psycopg2.connect(
-                        host="localhost",
-                        port=5432,
-                        database="video_tracking",
-                        user="mcpt_user",
-                        password="Mcpt@2026!Secure"
+                        host=POSTGRES_HOST,
+                        port=POSTGRES_PORT,
+                        database=POSTGRES_DB,
+                        user=POSTGRES_USER,
+                        password=POSTGRES_PASSWORD,
                     )
                     conn.close()
                     print("    ✅ PostgreSQL is ready with Docker named volume!")
@@ -186,9 +200,9 @@ print("\n" + "=" * 70)
 print("✅ POSTGRESQL IS RUNNING")
 print("=" * 70)
 print("\nConnection details:")
-print("  Host: localhost")
-print("  Port: 5432")
-print("  Database: video_tracking")
-print("  User: mcpt_user")
-print("  Password: Mcpt@2026!Secure")
+print(f"  Host: {POSTGRES_HOST}")
+print(f"  Port: {POSTGRES_PORT}")
+print(f"  Database: {POSTGRES_DB}")
+print(f"  User: {POSTGRES_USER}")
+print(f"  Password: {POSTGRES_PASSWORD}")
 print("\nYou can now run exchange.py!")

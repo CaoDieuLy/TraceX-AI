@@ -14,8 +14,29 @@ build/
 venv/
 env/
 .env
+.env.*
+**/.env
+**/.env.*
 .env.local
 .env.*.local
+!**/.env.example
+!**/.env.*.example
+!**/.env.vps.example
+
+# Secrets / credentials
+oauth2_credentials.json
+oauth2_token.pickle
+**/credentials/
+**/*service-account*.json
+**/*drive-sa*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+secret_backups/
+*.tar.gz.enc.manifest.txt
+*.tar.gz
+*.tgz
 
 # Frontend
 frontend/node_modules/

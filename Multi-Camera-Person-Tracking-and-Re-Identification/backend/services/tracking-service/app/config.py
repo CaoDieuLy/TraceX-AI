@@ -1,16 +1,24 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from dotenv import load_dotenv
 import os
+import sys
 
-# Load .env from tracking-service root (2 levels up from this file)
 _here = Path(__file__).parent
-_env_file = _here.parent / ".env"
-if _env_file.exists():
-    load_dotenv(_env_file, override=True)
-    print(f"[config] Loaded .env from {_env_file}")
-else:
-    print(f"[config] WARNING: .env not found at {_env_file}")
+REPO_ROOT = _here.parent.parent.parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from shared_secret_runtime import (  # noqa: E402
+    load_runtime_env,
+    resolve_google_drive_service_account_path,
+    shared_env_file,
+    tracking_service_env_file,
+)
+
+loaded_envs = load_runtime_env(include_tracking_service_env=True, override=True)
+for env_file in loaded_envs:
+    print(f"[config] Loaded env from {env_file}")
+if not loaded_envs:
+    print(f"[config] WARNING: no env file found; checked {tracking_service_env_file()} and {shared_env_file()}")
 
 # Compute PROJECT_ROOT from env or file location
 PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", _here.parent.parent.parent.parent))
@@ -33,10 +41,10 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_database: str = "video_tracking"
     postgres_user: str = "mcpt_user"
-    postgres_password: str = "Mcpt@2026!Secure"
+    postgres_password: str = "change-me-postgres-password"
 
     google_drive_enabled: bool = False
-    google_drive_credentials_file: Path = Path("")
+    google_drive_credentials_file: Path = resolve_google_drive_service_account_path()
     google_drive_make_public: bool = True
     google_drive_root_folder_id: str = ""
     google_drive_vinuni_folder_id: str = ""
@@ -75,7 +83,6 @@ class Settings(BaseSettings):
     # Compute .env path relative to this config file
     _here = Path(__file__).parent
     model_config = SettingsConfigDict(
-        env_file=str(_here / ".env"),
         extra="ignore"
     )
 

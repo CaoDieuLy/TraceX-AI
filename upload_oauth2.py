@@ -26,16 +26,29 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from shared_secret_runtime import (  # noqa: E402
+    ensure_canonical_secret_dirs,
+    load_runtime_env,
+    resolve_oauth2_credentials_path,
+    resolve_oauth2_token_path,
+)
+
+load_runtime_env(include_tracking_service_env=False)
+ensure_canonical_secret_dirs()
+
 # ========== CONFIGURATION ==========
-# Folder ID VinUni (1gxKBTQ9BlqUmeashklclv429FDjr6Xbp)
-FOLDER_ID = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
+# Folder ID comes from the shared secret env so it stays portable across machines.
+FOLDER_ID = os.getenv("GOOGLE_DRIVE_VINUNI_FOLDER_ID") or os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
 
 # OAuth2 credentials file (bạn cần tải từ Google Cloud Console)
 # Download: https://console.cloud.google.com/apis/credentials
-OAUTH2_CREDENTIALS = "oauth2_credentials.json"
+OAUTH2_CREDENTIALS = str(resolve_oauth2_credentials_path())
 
 # Token file (auto-generated sau khi login lần đầu)
-TOKEN_FILE = "oauth2_token.pickle"
+TOKEN_FILE = str(resolve_oauth2_token_path())
 
 # Scopes - yêu cầu quyền Drive
 SCOPES = ["https://www.googleapis.com/auth/drive"]

@@ -8,12 +8,14 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT.parent))
 sys.path.insert(0, str(PROJECT_ROOT / "backend" / "services" / "tracking-service"))
 
 from app.config import settings
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from shared_secret_runtime import shared_env_file
 
 print("=" * 80)
 print("SHARED DRIVE SETUP FOR TRACKING SERVICE")
@@ -127,18 +129,18 @@ for folder_name, desc in folders:
 
     folder_ids[folder_name] = folder_id
 
-# Step 4: Update .env with Shared Drive ID
-print(f"\n[4] Updating .env with Shared Drive ID...")
-env_file = PROJECT_ROOT / "backend" / "services" / "tracking-service" / ".env"
+# Step 4: Update canonical shared env
+print(f"\n[4] Updating canonical shared env...")
+env_file = shared_env_file()
 if env_file.exists():
     env_content = env_file.read_text()
     if "GOOGLE_DRIVE_ROOT_FOLDER_ID" not in env_content:
         env_content += f"\nGOOGLE_DRIVE_ROOT_FOLDER_ID={shared_drive_id}\n"
         env_content += f"GOOGLE_DRIVE_VINUNI_FOLDER_ID={shared_drive_id}\n"
         env_file.write_text(env_content)
-        print(f"✅ Updated .env with Shared Drive ID: {shared_drive_id}")
+        print(f"✅ Updated shared env with Shared Drive ID: {shared_drive_id}")
     else:
-        print(f"✅ .env already contains GOOGLE_DRIVE_ROOT_FOLDER_ID")
+        print(f"✅ Shared env already contains GOOGLE_DRIVE_ROOT_FOLDER_ID")
         # Update to Shared Drive ID
         lines = env_content.splitlines()
         new_lines = []
@@ -150,7 +152,14 @@ if env_file.exists():
             else:
                 new_lines.append(line)
         env_file.write_text("\n".join(new_lines) + "\n")
-        print(f"✅ Updated .env with Shared Drive ID: {shared_drive_id}")
+        print(f"✅ Updated shared env with Shared Drive ID: {shared_drive_id}")
+else:
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text(
+        f"GOOGLE_DRIVE_ROOT_FOLDER_ID={shared_drive_id}\n"
+        f"GOOGLE_DRIVE_VINUNI_FOLDER_ID={shared_drive_id}\n"
+    )
+    print(f"✅ Created shared env and stored Shared Drive ID: {shared_drive_id}")
 
 # Summary
 print("\n" + "=" * 80)

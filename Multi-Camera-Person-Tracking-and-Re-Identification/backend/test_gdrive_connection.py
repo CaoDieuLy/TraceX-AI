@@ -9,11 +9,21 @@ from pathlib import Path
 
 # Add project to path
 project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root.parent.parent))
 sys.path.insert(0, str(project_root / "backend" / "services" / "tracking-service"))
+
+from shared_secret_runtime import load_runtime_env, shared_env_file  # noqa: E402
+
+loaded = load_runtime_env(include_tracking_service_env=True)
 
 print("=" * 70)
 print("GOOGLE DRIVE CONNECTION TEST")
 print("=" * 70)
+print("Loaded env files:")
+for env_file in loaded:
+    print(f"  - {env_file}")
+if not loaded:
+    print(f"  - none found (expected shared env at {shared_env_file()})")
 
 # Test 1: Check config
 print("\n[1/5] Checking configuration...")
@@ -34,7 +44,7 @@ if cred_path.exists():
     print(f"   File size: {cred_path.stat().st_size} bytes")
 else:
     print(f"   ❌ File NOT found: {cred_path}")
-    print(f"   → Create file or update GOOGLE_DRIVE_CREDENTIALS_FILE in .env")
+    print(f"   → Create file or update GOOGLE_DRIVE_CREDENTIALS_FILE in the shared env")
 
 # Test 3: Import Google libraries
 print("\n[3/5] Checking Google API libraries...")

@@ -1,0 +1,111 @@
+SECRET SAVING / RESTORE RUNBOOK
+================================
+
+Why this file exists
+--------------------
+This repo currently uses secrets in several different places:
+- root OAuth files
+- nested service .env files
+- service credentials directories
+- Lightning / PostgreSQL / Google Drive runtime settings
+
+If you change machine or clone to a new environment without these files, the app will not run correctly.
+
+Canonical layout from now on
+----------------------------
+- secrets/shared.env
+- secrets/oauth/oauth2_credentials.json
+- secrets/oauth/oauth2_token.pickle
+- secrets/google-drive/drive-sa.json
+
+Current high-risk findings from the repo scan
+---------------------------------------------
+1. These files were found as live secret-bearing files before canonicalization:
+   - oauth2_credentials.json
+   - oauth2_token.pickle
+   - Multi-Camera-Person-Tracking-and-Re-Identification/backend/services/tracking-service/.env
+   - Multi-Camera-Person-Tracking-and-Re-Identification/backend/services/tracking-service/credentials/*
+
+2. These files were found tracked by git before cleanup:
+   - oauth2_credentials.json
+   - oauth2_token.pickle
+
+3. Secret-like values also exist in example files and should be reviewed/rotated if they were ever real:
+   - .env.example
+   - Multi-Camera-Person-Tracking-and-Re-Identification/.env.example
+   - Multi-Camera-Person-Tracking-and-Re-Identification/backend/services/tracking-service/.env.example
+   - Multi-Camera-Person-Tracking-and-Re-Identification/infra/vps/.env.vps.example
+
+Recommended policy
+------------------
+- Do not commit raw secrets in plaintext.
+- If you need portability across machines, commit only an encrypted bundle.
+- Keep the bundle passphrase outside git: password manager, 1Password, Bitwarden, etc.
+
+Safe backup flow
+----------------
+0. One-time migration into the canonical layout:
+
+   python scripts/migrate_secrets_to_canonical_layout.py
+
+1. Export encrypted bundle:
+
+   SECRET_BUNDLE_PASSPHRASE='your-strong-passphrase' \
+   bash scripts/export_secrets_bundle.sh
+
+2. This creates:
+   - secret_backups/secrets_bundle_<timestamp>.tar.gz.enc
+   - secret_backups/secrets_bundle_<timestamp>.manifest.txt
+
+3. You may commit the .enc file if needed.
+   Do not commit the raw files themselves.
+
+Restore flow on a new machine
+-----------------------------
+1. Clone repo.
+2. Pull or copy the encrypted bundle.
+3. Restore secrets:
+
+   SECRET_BUNDLE_PASSPHRASE='your-strong-passphrase' \
+   bash scripts/import_secrets_bundle.sh secret_backups/secrets_bundle_<timestamp>.tar.gz.enc
+
+4. Then install dependencies and run services as normal.
+
+Important paths to keep alive
+-----------------------------
+- secrets/shared.env
+- secrets/oauth/oauth2_credentials.json
+- secrets/oauth/oauth2_token.pickle
+- secrets/google-drive/drive-sa.json
+
+Git control improvements already applied
+----------------------------------------
+- recursive .env ignore
+- OAuth credentials ignore
+- credentials directory ignore
+- common key / pem / p12 / pfx ignore
+- secret_backups plaintext outputs ignore
+
+Manual cleanup you should keep
+------------------------------
+If a secret file was ever committed before, add it to .gitignore and remove it from the index:
+
+   git rm --cached oauth2_credentials.json oauth2_token.pickle
+
+Then commit the cleanup.
+
+What to rotate first if you suspect leakage
+-------------------------------------------
+- LIGHTNING_API_TOKEN
+- POSTGRES_PASSWORD
+- JWT_SECRET_KEY
+- Google Drive service-account credentials
+- OAuth refresh token / oauth2_token.pickle
+
+Last note
+---------
+If you want fully reproducible onboarding, the best long-term setup is:
+- keep examples in repo
+- keep real secrets in encrypted bundle
+- keep passphrase in password manager
+- never rely on memory or scattered local .env files again
