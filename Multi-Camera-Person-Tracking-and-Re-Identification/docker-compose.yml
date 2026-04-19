@@ -1,0 +1,143 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mcpt-postgres
+    env_file:
+      - ../secrets/shared.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DATABASE}
+    ports:
+      - "${POSTGRES_BIND_HOST:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  metadata-service:
+    build:
+      context: .
+      dockerfile: ./backend/services/metadata-service/Dockerfile
+    image: mcpt-metadata-service:latest
+    container_name: mcpt-metadata-service
+    env_file:
+      - ../secrets/shared.env
+    environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      POSTGRES_HOST: postgres
+      PYTHONPATH: /workspace/a20-root
+      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
+      UVICORN_WORKERS: ${METADATA_UVICORN_WORKERS:-4}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - storage_data:/workspace/storage
+      - ./data:/workspace/data:ro
+      - ../:/workspace/a20-root:ro
+    ports:
+      - "${METADATA_SERVICE_BIND_HOST:-0.0.0.0}:${METADATA_SERVICE_PORT:-8001}:8000"
+
+  queue-worker:
+    build:
+      context: .
+      dockerfile: ./backend/services/metadata-service/Dockerfile
+    image: mcpt-metadata-service:latest
+    container_name: mcpt-queue-worker
+    command: ["python", "-m", "app.queue_worker"]
+    env_file:
+      - ../secrets/shared.env
+    environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      POSTGRES_HOST: postgres
+      PYTHONPATH: /workspace/a20-root
+      QUEUE_PARALLEL_JOBS: ${QUEUE_PARALLEL_JOBS:-4}
+      QUEUE_DOWNLOAD_WORKERS: ${QUEUE_DOWNLOAD_WORKERS:-4}
+      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      metadata-service:
+        condition: service_started
+    volumes:
+      - storage_data:/workspace/storage
+      - ./data:/workspace/data:ro
+      - ../:/workspace/a20-root:ro
+
+  tracking-service:
+    profiles:
+      - local-gpu
+    build:
+      context: .
+      dockerfile: ./backend/services/tracking-service/Dockerfile
+    image: mcpt-tracking-service:latest
+    container_name: mcpt-tracking-service
+    # Tracking service is OPTIONAL in production; enable with COMPOSE_PROFILES=local-gpu
+    # Default compose up will NOT start this service to avoid missing GPU dependencies
+    # To enable: COMPOSE_PROFILES=local-gpu docker compose up --build tracking-service
+    env_file:
+      - ../secrets/shared.env
+    environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      POSTGRES_HOST: postgres
+      PROJECT_ROOT: /workspace/project
+      PYTHONPATH: /workspace/a20-root
+      LEGACY_ROOT: /workspace/backend/legacy-engine
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+      LIGHTNING_TIMEOUT_SECONDS: ${LIGHTNING_TIMEOUT_SECONDS:-180}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+    volumes:
+      - storage_data:/workspace/storage
+      - ./data:/workspace/data:ro
+      - ./:/workspace/project:ro
+      - ../:/workspace/a20-root:ro
+    ports:
+      - "${TRACKING_SERVICE_BIND_HOST:-0.0.0.0}:${TRACKING_SERVICE_PORT:-8002}:8000"
+
+  api-gateway:
+    build:
+      context: ./backend/services/api-gateway
+      dockerfile: Dockerfile
+    image: mcpt-api-gateway:latest
+    container_name: mcpt-api-gateway
+    env_file:
+      - ../secrets/shared.env
+    environment:
+      A20_ROOT: /workspace/a20-root
+      MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
+      PYTHONPATH: /workspace/a20-root
+      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
+      UVICORN_WORKERS: ${API_GATEWAY_UVICORN_WORKERS:-4}
+    depends_on:
+      - metadata-service
+    volumes:
+      - ../:/workspace/a20-root:ro
+    ports:
+      - "${API_GATEWAY_BIND_HOST:-0.0.0.0}:${API_GATEWAY_PORT:-8000}:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: mcpt-frontend:latest
+    container_name: mcpt-frontend
+    env_file:
+      - ../secrets/shared.env
+    environment:
+      NEXT_PUBLIC_API_GATEWAY_URL: ${NEXT_PUBLIC_API_GATEWAY_URL:-http://localhost:8000}
+    depends_on:
+      - api-gateway
+    ports:
+      - "${FRONTEND_BIND_HOST:-0.0.0.0}:${FRONTEND_PORT:-3000}:3000"
+
+volumes:
+  postgres_data:
+  storage_data:
