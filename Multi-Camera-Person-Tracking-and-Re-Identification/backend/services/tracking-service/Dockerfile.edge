@@ -1,0 +1,61 @@
+# backend/services/tracking-service/Dockerfile.edge
+FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+
+# System dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10-venv \
+    python3-pip \
+    git \
+    wget \
+    curl \
+    ca-certificates \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_VISIBLE_DEVICES=0
+
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
+
+# Copy requirements for layer caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download YOLO26 model to speed up startup
+RUN python3 -c "from ultralytics import YOLO; YOLO('yolo26x.pt')" 2>/dev/null || true
+
+# Pre-download CLIP model
+RUN python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')" 2>/dev/null || true
+
+# Copy application source
+COPY . /workspace
+WORKDIR /workspace
+
+# Create directories
+RUN mkdir -p /workspace/data/videos/compressed \
+             /workspace/data/videos/uploads \
+             /workspace/data/metadata \
+             /workspace/storage/tracking-ingestion \
+             /workspace/storage/video-conversion \
+             /workspace/storage/tracking-outputs
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Use one worker process per replica by default; scale replicas or UVICORN_WORKERS explicitly for multi-GPU hosts.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-1} --log-level info"]

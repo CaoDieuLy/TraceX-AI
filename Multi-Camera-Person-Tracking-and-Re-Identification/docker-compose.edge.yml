@@ -1,0 +1,75 @@
+version: "3.8"
+
+services:
+  tracking-service:
+    build:
+      context: .
+      dockerfile: backend/services/tracking-service/Dockerfile.edge
+    runtime: nvidia
+    container_name: mcpt-tracking-l4
+    environment:
+      # NVIDIA
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+
+      # Pipeline config
+      - PIPELINE_PROFILE=accuracy_first
+      - GPU_HARDWARE_PROFILE=l4
+      - GPU_COUNT=1
+
+      # Detection settings
+      - DETECTION_FPS=4.0
+      - MIN_PERSON_AREA=4500
+
+      # Model paths
+      - LEGACY_ROOT=/workspace/backend/legacy-engine
+      - CAMERA_CALIBRATION_PATH=/workspace/backend/config/camera_calibration.json
+
+      # Storage
+      - INGESTION_WORK_ROOT=/workspace/storage/tracking-ingestion
+      - VIDEO_CONVERSION_OUTPUT_DIR=/workspace/storage/video-conversion
+      - VIDEO_DOWNLOAD_OUTPUT_DIR=/workspace/storage/tracking-outputs
+
+      # Database
+      - CHROMA_DB_PATH=/workspace/storage/chromadb
+
+      # Logging
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      # Data
+      - ./data:/workspace/data
+      - ./storage:/workspace/storage
+
+      # Config
+      - ./backend/config:/workspace/backend/config
+
+      # Model cache (persist across restarts)
+      - model_cache:/root/.cache/torch
+      - model_cache:/root/.cache/huggingface
+      - model_cache:/root/.cache/ultralytics
+
+    ports:
+      - "8000:8000"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    restart: unless-stopped
+
+volumes:
+  model_cache:
+    driver: local
