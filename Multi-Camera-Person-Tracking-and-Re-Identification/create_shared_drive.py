@@ -5,6 +5,7 @@ Run this once to set up proper Drive infrastructure.
 """
 
 import sys
+import json
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
@@ -31,7 +32,12 @@ drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
 print("✅ Drive service connected")
 
 # Service Account email
-sa_email = "drive-uploader@ambient-fuze-493617-t9.iam.gserviceaccount.com"
+sa_email = "unknown-service-account"
+try:
+    payload = json.loads(credentials_path.read_text(encoding="utf-8"))
+    sa_email = str(payload.get("client_email") or sa_email)
+except Exception:
+    pass
 print(f"\nService Account: {sa_email}")
 
 # Step 1: Find or create Shared Drive

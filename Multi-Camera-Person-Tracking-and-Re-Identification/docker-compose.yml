@@ -2,17 +2,15 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: mcpt-postgres
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-mcpt}
-      POSTGRES_USER: ${POSTGRES_USER:-mcpt_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mcpt_password}
+    env_file:
+      - ../secrets/shared.env
     ports:
       - "${POSTGRES_BIND_HOST:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcpt_user} -d ${POSTGRES_DB:-mcpt}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -23,28 +21,10 @@ services:
       dockerfile: ./backend/services/metadata-service/Dockerfile
     image: mcpt-metadata-service:latest
     container_name: mcpt-metadata-service
+    env_file:
+      - ../secrets/shared.env
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD:-mcpt_password}@postgres:5432/${POSTGRES_DB:-mcpt}
-      LEGACY_METADATA_DIR: ${LEGACY_METADATA_DIR:-/workspace/storage/queue/local/Queue/Metadata}
-      TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL:-http://tracking-service:8000}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
-      VIDEO_STORAGE_ROOT: ${VIDEO_STORAGE_ROOT:-/workspace/storage/videos}
-      QUEUE_LOCAL_ROOT: ${QUEUE_LOCAL_ROOT:-/workspace/storage/queue}
-      QUEUE_MAX_SIZE: ${QUEUE_MAX_SIZE:-32}
-      QUEUE_POLL_INTERVAL_SECONDS: ${QUEUE_POLL_INTERVAL_SECONDS:-30}
-      QUEUE_PARALLEL_JOBS: ${QUEUE_PARALLEL_JOBS:-4}
-      QUEUE_DOWNLOAD_WORKERS: ${QUEUE_DOWNLOAD_WORKERS:-4}
       UVICORN_WORKERS: ${METADATA_UVICORN_WORKERS:-4}
-      GOOGLE_DRIVE_ENABLED: ${GOOGLE_DRIVE_ENABLED:-false}
-      GOOGLE_DRIVE_CREDENTIALS_FILE: ${GOOGLE_DRIVE_CREDENTIALS_FILE:-/workspace/project/Multi-Camera-Person-Tracking-and-Re-Identification/secrets/drive-sa.json}
-      GOOGLE_DRIVE_ROOT_FOLDER_ID: ${GOOGLE_DRIVE_ROOT_FOLDER_ID:-}
-      GOOGLE_DRIVE_VINUNI_FOLDER_ID: ${GOOGLE_DRIVE_VINUNI_FOLDER_ID:-}
-      GOOGLE_DRIVE_VINUNI_FOLDER_NAME: ${GOOGLE_DRIVE_VINUNI_FOLDER_NAME:-VinUni}
-      GOOGLE_DRIVE_QUEUE_FOLDER_NAME: ${GOOGLE_DRIVE_QUEUE_FOLDER_NAME:-Queue}
-      GOOGLE_DRIVE_IMPORT_FOLDER_NAME: ${GOOGLE_DRIVE_IMPORT_FOLDER_NAME:-Import_New}
-      GOOGLE_DRIVE_H265_FOLDER_NAME: ${GOOGLE_DRIVE_H265_FOLDER_NAME:-.h265}
-      GOOGLE_DRIVE_METADATA_FOLDER_NAME: ${GOOGLE_DRIVE_METADATA_FOLDER_NAME:-Metadata}
-      GOOGLE_DRIVE_MAKE_PUBLIC: ${GOOGLE_DRIVE_MAKE_PUBLIC:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,6 +32,7 @@ services:
       - storage_data:/workspace/storage
       - ./data:/workspace/data:ro
       - ./:/workspace/project:ro
+      - ../secrets:/workspace/project/secrets:ro
     ports:
       - "${METADATA_SERVICE_BIND_HOST:-0.0.0.0}:${METADATA_SERVICE_PORT:-8001}:8000"
 
@@ -59,25 +40,11 @@ services:
     image: mcpt-metadata-service:latest
     container_name: mcpt-queue-worker
     command: ["python", "-m", "app.queue_worker"]
+    env_file:
+      - ../secrets/shared.env
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD:-mcpt_password}@postgres:5432/${POSTGRES_DB:-mcpt}
-      LEGACY_METADATA_DIR: ${LEGACY_METADATA_DIR:-/workspace/storage/queue/local/Queue/Metadata}
-      TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL:-http://tracking-service:8000}
-      QUEUE_LOCAL_ROOT: ${QUEUE_LOCAL_ROOT:-/workspace/storage/queue}
-      QUEUE_MAX_SIZE: ${QUEUE_MAX_SIZE:-32}
-      QUEUE_POLL_INTERVAL_SECONDS: ${QUEUE_POLL_INTERVAL_SECONDS:-30}
       QUEUE_PARALLEL_JOBS: ${QUEUE_PARALLEL_JOBS:-4}
       QUEUE_DOWNLOAD_WORKERS: ${QUEUE_DOWNLOAD_WORKERS:-4}
-      GOOGLE_DRIVE_ENABLED: ${GOOGLE_DRIVE_ENABLED:-false}
-      GOOGLE_DRIVE_CREDENTIALS_FILE: ${GOOGLE_DRIVE_CREDENTIALS_FILE:-/workspace/project/Multi-Camera-Person-Tracking-and-Re-Identification/secrets/drive-sa.json}
-      GOOGLE_DRIVE_ROOT_FOLDER_ID: ${GOOGLE_DRIVE_ROOT_FOLDER_ID:-}
-      GOOGLE_DRIVE_VINUNI_FOLDER_ID: ${GOOGLE_DRIVE_VINUNI_FOLDER_ID:-}
-      GOOGLE_DRIVE_VINUNI_FOLDER_NAME: ${GOOGLE_DRIVE_VINUNI_FOLDER_NAME:-VinUni}
-      GOOGLE_DRIVE_QUEUE_FOLDER_NAME: ${GOOGLE_DRIVE_QUEUE_FOLDER_NAME:-Queue}
-      GOOGLE_DRIVE_IMPORT_FOLDER_NAME: ${GOOGLE_DRIVE_IMPORT_FOLDER_NAME:-Import_New}
-      GOOGLE_DRIVE_H265_FOLDER_NAME: ${GOOGLE_DRIVE_H265_FOLDER_NAME:-.h265}
-      GOOGLE_DRIVE_METADATA_FOLDER_NAME: ${GOOGLE_DRIVE_METADATA_FOLDER_NAME:-Metadata}
-      GOOGLE_DRIVE_MAKE_PUBLIC: ${GOOGLE_DRIVE_MAKE_PUBLIC:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,6 +54,7 @@ services:
       - storage_data:/workspace/storage
       - ./data:/workspace/data:ro
       - ./:/workspace/project:ro
+      - ../secrets:/workspace/project/secrets:ro
 
   tracking-service:
     profiles:
@@ -99,22 +67,11 @@ services:
     # Tracking service is OPTIONAL in production; enable with COMPOSE_PROFILES=local-gpu
     # Default compose up will NOT start this service to avoid missing GPU dependencies
     # To enable: COMPOSE_PROFILES=local-gpu docker compose up --build tracking-service
+    env_file:
+      - ../secrets/shared.env
     environment:
       LEGACY_ROOT: /workspace/backend/legacy-engine
-      INGESTION_WORK_ROOT: ${INGESTION_WORK_ROOT:-/workspace/storage/tracking-ingestion}
-      TRACKING_USE_MOCK: ${TRACKING_USE_MOCK:-false}
-      TRACKING_RUNTIME_MODE: ${TRACKING_RUNTIME_MODE:-production_ready}
-      PIPELINE_PROFILE: ${PIPELINE_PROFILE:-accuracy_first}
-      GPU_HARDWARE_PROFILE: ${GPU_HARDWARE_PROFILE:-auto}
-      GPU_COUNT: ${GPU_COUNT:-1}
-      HOST_CPU_COUNT: ${HOST_CPU_COUNT:-16}
-      HOST_RAM_GB: ${HOST_RAM_GB:-64}
       UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
-      LIGHTNING_API_BASE_URL: ${LIGHTNING_API_BASE_URL:-}
-      LIGHTNING_API_ENDPOINT: ${LIGHTNING_API_ENDPOINT:-/predict}
-      LIGHTNING_API_TOKEN: ${LIGHTNING_API_TOKEN:-}
-      LIGHTNING_API_AUTH_HEADER: ${LIGHTNING_API_AUTH_HEADER:-Authorization}
-      LIGHTNING_API_AUTH_PREFIX: ${LIGHTNING_API_AUTH_PREFIX:-Bearer }
       LIGHTNING_TIMEOUT_SECONDS: ${LIGHTNING_TIMEOUT_SECONDS:-180}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
@@ -122,6 +79,7 @@ services:
     volumes:
       - storage_data:/workspace/storage
       - ./data:/workspace/data:ro
+      - ../secrets:/workspace/project/secrets:ro
     ports:
       - "${TRACKING_SERVICE_BIND_HOST:-0.0.0.0}:${TRACKING_SERVICE_PORT:-8002}:8000"
 
@@ -131,10 +89,9 @@ services:
       dockerfile: Dockerfile
     image: mcpt-api-gateway:latest
     container_name: mcpt-api-gateway
+    env_file:
+      - ../secrets/shared.env
     environment:
-      METADATA_SERVICE_URL: ${METADATA_SERVICE_URL:-http://metadata-service:8000}
-      TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL:-http://tracking-service:8000}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://frontend:3000}
       UVICORN_WORKERS: ${API_GATEWAY_UVICORN_WORKERS:-4}
     depends_on:
       - metadata-service
@@ -147,6 +104,8 @@ services:
       dockerfile: Dockerfile
     image: mcpt-frontend:latest
     container_name: mcpt-frontend
+    env_file:
+      - ../secrets/shared.env
     environment:
       NEXT_PUBLIC_API_GATEWAY_URL: ${NEXT_PUBLIC_API_GATEWAY_URL:-http://localhost:8000}
     depends_on:

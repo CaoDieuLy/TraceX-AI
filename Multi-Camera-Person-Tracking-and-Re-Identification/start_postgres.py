@@ -21,7 +21,11 @@ POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_DB = os.getenv("POSTGRES_DATABASE", os.getenv("POSTGRES_DB", "video_tracking"))
 POSTGRES_USER = os.getenv("POSTGRES_USER", "mcpt_user")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "change-me-postgres-password")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
+
+if not POSTGRES_PASSWORD:
+    print("❌ POSTGRES_PASSWORD is missing. Configure it in secrets/shared.env before starting PostgreSQL.")
+    sys.exit(1)
 
 print("=" * 70)
 print("POSTGRESQL QUICK START")

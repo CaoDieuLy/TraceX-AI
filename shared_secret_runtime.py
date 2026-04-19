@@ -21,7 +21,10 @@ def canonical_secrets_root() -> Path:
 def shared_env_file() -> Path:
     configured = os.getenv("MCPT_SHARED_ENV_FILE", "").strip()
     if configured:
-        return Path(configured).expanduser()
+        path = Path(configured).expanduser()
+        if path.is_absolute():
+            return path
+        return canonical_secrets_root() / path
     return canonical_secrets_root() / "shared.env"
 
 
@@ -29,17 +32,21 @@ def tracking_service_env_file() -> Path:
     return APP_ROOT / "backend" / "services" / "tracking-service" / ".env"
 
 
+def _resolve_secret_path(configured: str, default_relative_path: str) -> Path:
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        return canonical_secrets_root() / candidate
+    return canonical_secrets_root() / default_relative_path
+
+
 def oauth2_credentials_candidates() -> list[Path]:
     configured = os.getenv("MCPT_OAUTH2_CREDENTIALS_FILE", "").strip()
     candidates = []
     if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.extend(
-        [
-            canonical_secrets_root() / "oauth" / "oauth2_credentials.json",
-            REPO_ROOT / "oauth2_credentials.json",
-        ]
-    )
+        candidates.append(_resolve_secret_path(configured, "oauth/oauth2_credentials.json"))
+    candidates.append(canonical_secrets_root() / "oauth" / "oauth2_credentials.json")
     return candidates
 
 
@@ -47,13 +54,8 @@ def oauth2_token_candidates() -> list[Path]:
     configured = os.getenv("MCPT_OAUTH2_TOKEN_FILE", "").strip()
     candidates = []
     if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.extend(
-        [
-            canonical_secrets_root() / "oauth" / "oauth2_token.pickle",
-            REPO_ROOT / "oauth2_token.pickle",
-        ]
-    )
+        candidates.append(_resolve_secret_path(configured, "oauth/oauth2_token.pickle"))
+    candidates.append(canonical_secrets_root() / "oauth" / "oauth2_token.pickle")
     return candidates
 
 
@@ -61,13 +63,8 @@ def google_drive_service_account_candidates() -> list[Path]:
     configured = os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", "").strip()
     candidates = []
     if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.extend(
-        [
-            canonical_secrets_root() / "google-drive" / "drive-sa.json",
-            APP_ROOT / "backend" / "services" / "tracking-service" / "credentials" / "mcpt-tracker-sa.json",
-        ]
-    )
+        candidates.append(_resolve_secret_path(configured, "google-drive/drive-sa.json"))
+    candidates.append(canonical_secrets_root() / "google-drive" / "drive-sa.json")
     return candidates
 
 
@@ -92,17 +89,63 @@ def resolve_google_drive_service_account_path() -> Path:
 
 def ensure_canonical_secret_dirs() -> dict[str, Path]:
     secrets_root = canonical_secrets_root()
+    env_dir = secrets_root / "env"
+    db_dir = secrets_root / "db"
+    api_dir = secrets_root / "api"
+    deploy_dir = secrets_root / "deploy"
+    docker_dir = secrets_root / "docker"
+    gpu_dir = secrets_root / "gpu"
     oauth_dir = secrets_root / "oauth"
     drive_dir = secrets_root / "google-drive"
     secrets_root.mkdir(parents=True, exist_ok=True)
+    env_dir.mkdir(parents=True, exist_ok=True)
+    db_dir.mkdir(parents=True, exist_ok=True)
+    api_dir.mkdir(parents=True, exist_ok=True)
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    docker_dir.mkdir(parents=True, exist_ok=True)
+    gpu_dir.mkdir(parents=True, exist_ok=True)
     oauth_dir.mkdir(parents=True, exist_ok=True)
     drive_dir.mkdir(parents=True, exist_ok=True)
     return {
         "secrets_root": secrets_root,
+        "env_dir": env_dir,
+        "db_dir": db_dir,
+        "api_dir": api_dir,
+        "deploy_dir": deploy_dir,
+        "docker_dir": docker_dir,
+        "gpu_dir": gpu_dir,
         "oauth_dir": oauth_dir,
         "drive_dir": drive_dir,
         "shared_env": shared_env_file(),
     }
+
+
+def modular_env_files() -> list[Path]:
+    env_dir = canonical_secrets_root() / "env"
+    ordered_paths = [
+        shared_env_file(),
+        "env/shared.env",
+        "db/postgres.env",
+        "api/providers.env",
+        "oauth/oauth.env",
+        "google-drive/google-drive.env",
+        "deploy/runtime.env",
+        "docker/compose.env",
+        "gpu/runtime.env",
+    ]
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for item in ordered_paths:
+        path = item if isinstance(item, Path) else canonical_secrets_root() / item
+        if path not in seen:
+            files.append(path)
+            seen.add(path)
+    if env_dir.exists():
+        for path in sorted(env_dir.glob("*.env")):
+            if path not in seen:
+                files.append(path)
+                seen.add(path)
+    return files
 
 
 def load_runtime_env(*, include_tracking_service_env: bool = True, override: bool = True) -> list[Path]:
@@ -113,22 +156,22 @@ def load_runtime_env(*, include_tracking_service_env: bool = True, override: boo
     if root_env.exists():
         candidate_files.append(root_env)
 
-    if include_tracking_service_env:
-        candidate_files.append(tracking_service_env_file())
-
-    candidate_files.append(shared_env_file())
+    candidate_files.extend(modular_env_files())
 
     for env_file in candidate_files:
         if env_file.exists():
             load_dotenv(env_file, override=override)
             loaded.append(env_file)
 
+    secrets_root = canonical_secrets_root()
+    shared_env = shared_env_file()
+    oauth2_credentials = resolve_oauth2_credentials_path()
+    oauth2_token = resolve_oauth2_token_path()
     service_account_path = resolve_google_drive_service_account_path()
-    if service_account_path.exists():
-        os.environ.setdefault("GOOGLE_DRIVE_CREDENTIALS_FILE", str(service_account_path))
 
-    os.environ.setdefault("MCPT_SECRETS_ROOT", str(canonical_secrets_root()))
-    os.environ.setdefault("MCPT_SHARED_ENV_FILE", str(shared_env_file()))
-    os.environ.setdefault("MCPT_OAUTH2_CREDENTIALS_FILE", str(resolve_oauth2_credentials_path()))
-    os.environ.setdefault("MCPT_OAUTH2_TOKEN_FILE", str(resolve_oauth2_token_path()))
+    os.environ["MCPT_SECRETS_ROOT"] = str(secrets_root)
+    os.environ["MCPT_SHARED_ENV_FILE"] = str(shared_env)
+    os.environ["MCPT_OAUTH2_CREDENTIALS_FILE"] = str(oauth2_credentials)
+    os.environ["MCPT_OAUTH2_TOKEN_FILE"] = str(oauth2_token)
+    os.environ["GOOGLE_DRIVE_CREDENTIALS_FILE"] = str(service_account_path)
     return loaded

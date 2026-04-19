@@ -30,30 +30,16 @@ fi
 
 manifest_tmp="${TMP_DIR}/manifest.txt"
 
-find "${REPO_ROOT}" \
-  \( -path "${REPO_ROOT}/.git" -o \
-     -path "${REPO_ROOT}/secret_backups" -o \
-     -path "${REPO_ROOT}/scripts/__pycache__" -o \
-     -path "${REPO_ROOT}/Multi-Camera-Person-Tracking-and-Re-Identification/postgres_data" -o \
-     -path '*/__pycache__' -o \
-     -path '*/node_modules' \) -prune -o \
-  \( -type f \( \
-       -name '.env' -o \
-       -name '.env.*' -o \
-       -name 'oauth2_credentials.json' -o \
-       -name 'oauth2_token.pickle' -o \
-       -name '*.pickle' -o \
-       -name '*.pem' -o \
-       -name '*.key' -o \
-       -name '*.p12' -o \
-       -name '*.pfx' -o \
-       -name '*service-account*.json' -o \
-       -name '*drive-sa*.json' -o \
-       -path '*/credentials/*' \
-     \) \
-     ! -name '*.example' \
-     ! -name '.env.example' \
-     ! -name '.env.vps.example' \) -print \
+SECRETS_ROOT="${REPO_ROOT}/secrets"
+
+if [[ ! -d "${SECRETS_ROOT}" ]]; then
+  echo "Secrets folder not found: ${SECRETS_ROOT}" >&2
+  exit 1
+fi
+
+find "${SECRETS_ROOT}" -type f \
+  ! -name '*.example' \
+  ! -name '*.md' \
   | sed "s#^${REPO_ROOT}/##" \
   | sort -u > "${manifest_tmp}"
 
@@ -81,4 +67,4 @@ echo "  ${ENCRYPTED_PATH}"
 echo "Manifest created:"
 echo "  ${MANIFEST_PATH}"
 echo
-echo "You may commit only the .enc file if you keep the passphrase outside git."
+echo "Bundle contains only the canonical secrets folder."

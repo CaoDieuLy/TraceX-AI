@@ -8,6 +8,11 @@
 !**/.env.vps.example
 
 # Secrets / credentials
+secrets/**
+!secrets/
+!secrets/**/
+!secrets/README.md
+!secrets/**/*.example
 oauth2_credentials.json
 oauth2_token.pickle
 **/credentials/

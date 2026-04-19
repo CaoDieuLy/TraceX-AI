@@ -5,20 +5,37 @@ import sys
 
 _here = Path(__file__).parent
 REPO_ROOT = _here.parent.parent.parent.parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+A20_ROOT = REPO_ROOT
+if str(A20_ROOT) not in sys.path:
+    sys.path.insert(0, str(A20_ROOT))
 
-from shared_secret_runtime import (  # noqa: E402
-    load_runtime_env,
-    resolve_google_drive_service_account_path,
-    shared_env_file,
-    tracking_service_env_file,
-)
+loaded_envs: list[Path] = []
 
-loaded_envs = load_runtime_env(include_tracking_service_env=True, override=True)
-for env_file in loaded_envs:
-    print(f"[config] Loaded env from {env_file}")
-if not loaded_envs:
-    print(f"[config] WARNING: no env file found; checked {tracking_service_env_file()} and {shared_env_file()}")
+
+def _resolve_drive_credentials_path(raw_value: str) -> Path:
+    candidate = Path(raw_value or "/workspace/project/secrets/google-drive/drive-sa.json").expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return Path(os.getenv("MCPT_SECRETS_ROOT", "/workspace/project/secrets")) / candidate
+
+
+resolved_drive_credentials_path = _resolve_drive_credentials_path(os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", ""))
+
+try:
+    from shared_secret_runtime import (  # noqa: E402
+        load_runtime_env,
+        resolve_google_drive_service_account_path,
+        shared_env_file,
+    )
+
+    loaded_envs = load_runtime_env(include_tracking_service_env=True, override=True)
+    resolved_drive_credentials_path = resolve_google_drive_service_account_path()
+    for env_file in loaded_envs:
+        print(f"[config] Loaded env from {env_file}")
+    if not loaded_envs:
+        print(f"[config] WARNING: no env file found; expected shared env at {shared_env_file()}")
+except ImportError:
+    pass
 
 # Compute PROJECT_ROOT from env or file location
 PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", _here.parent.parent.parent.parent))
@@ -41,10 +58,10 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_database: str = "video_tracking"
     postgres_user: str = "mcpt_user"
-    postgres_password: str = "change-me-postgres-password"
+    postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
 
     google_drive_enabled: bool = False
-    google_drive_credentials_file: Path = resolve_google_drive_service_account_path()
+    google_drive_credentials_file: Path = resolved_drive_credentials_path
     google_drive_make_public: bool = True
     google_drive_root_folder_id: str = ""
     google_drive_vinuni_folder_id: str = ""
@@ -81,7 +98,6 @@ class Settings(BaseSettings):
     enable_corrective_cascade: bool = True
 
     # Compute .env path relative to this config file
-    _here = Path(__file__).parent
     model_config = SettingsConfigDict(
         extra="ignore"
     )

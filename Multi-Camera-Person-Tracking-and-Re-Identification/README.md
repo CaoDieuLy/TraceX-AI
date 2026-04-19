@@ -16,7 +16,6 @@ Website quan ly video tich hop AI duoc tach theo kien truc microservice:
 - PostgreSQL chi luu metadata va duong dan `storage_path`
 - Tao text query theo video
 - API gateway goi AI service, AI service goi LightningAI endpoint
-- Mock mode de local dev van chay du khi chua co GPU endpoint that
 - Docker compose cho Next.js, FastAPI, PostgreSQL
 - GitHub Actions scaffold cho CI/CD deploy VPS
 
@@ -36,7 +35,7 @@ API Gateway (FastAPI)
 ## Chay local
 
 ```bash
-docker compose up --build
+docker compose --env-file ../secrets/shared.env up --build
 ```
 
 Mac dinh:
@@ -53,9 +52,7 @@ Xem [`.env.example`](./.env.example).
 
 Canh bao:
 
-- `TRACKING_USE_MOCK=true` se tra ket qua AI gia lap
 - Muon goi LightningAI that, set:
-  - `TRACKING_USE_MOCK=false`
   - `LIGHTNING_API_BASE_URL`
   - `LIGHTNING_API_ENDPOINT`
   - `LIGHTNING_API_TOKEN`
@@ -93,8 +90,8 @@ docker compose up -d queue-worker
 
 Luu y:
 
-- `GOOGLE_DRIVE_CREDENTIALS_FILE` phai tro dung file service account va folder Drive phai share quyen cho service account.
-- Neu `TRACKING_USE_MOCK=false` va trong `tracking-service` co model/GPU day du, metadata se duoc sinh boi processor thuc te trong service nay.
+- `GOOGLE_DRIVE_CREDENTIALS_FILE` phai tro dung file service account trong `../secrets/google-drive/drive-sa.json` va folder Drive phai share quyen cho service account.
+- Metadata se duoc sinh boi processor thuc te khi `tracking-service`/LightningAI duoc cau hinh day du.
 
 ## CI/CD VPS
 
