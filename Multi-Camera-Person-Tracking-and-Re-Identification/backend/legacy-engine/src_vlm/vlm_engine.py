@@ -33,6 +33,10 @@ class VLM_Metadata_Engine:
             torch.set_num_threads(self.cpu_cores)
             print(f"[VLM Engine] torch.num_threads = {self.cpu_cores}")
 
+    def _vlm_batch_size(self) -> int:
+        default_size = 12 if self.device == "cuda" else max(2, min(self.cpu_cores // 2, 8))
+        return max(1, int(os.getenv("MCPT_VLM_BATCH_SIZE", default_size)))
+
     def _extract_single_frame(self, args):
         """Worker: trích 1 frame từ video (chạy trong ThreadPool)."""
         video_path, frame_pos = args
@@ -67,13 +71,21 @@ class VLM_Metadata_Engine:
 
     def generate_captions_batch(self, images):
         """BATCH inference: gom tất cả ảnh, forward 1 lần duy nhất."""
-        # Processor xử lý batch ảnh cùng lúc
-        inputs = self.processor(images=images, return_tensors="pt", padding=True).to(self.device)
-        
-        with torch.no_grad():
-            out = self.model.generate(**inputs, max_new_tokens=70)
-        
-        captions = self.processor.batch_decode(out, skip_special_tokens=True)
+        if not images:
+            return []
+
+        captions = []
+        batch_size = self._vlm_batch_size()
+        for start in range(0, len(images), batch_size):
+            batch = images[start : start + batch_size]
+            inputs = self.processor(images=batch, return_tensors="pt", padding=True).to(self.device)
+            with torch.no_grad():
+                if self.device == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        out = self.model.generate(**inputs, max_new_tokens=70)
+                else:
+                    out = self.model.generate(**inputs, max_new_tokens=70)
+            captions.extend(self.processor.batch_decode(out, skip_special_tokens=True))
         return captions
 
     def generate_caption(self, image):
@@ -109,6 +121,7 @@ class VLM_Metadata_Engine:
 
     def process_videos_batch(self, video_paths, max_parallel_videos=2):
         """Batch xử lý nhiều video — song song trích frame, batch VLM."""
+        max_parallel_videos = max_parallel_videos or int(os.getenv("MCPT_PARALLEL_VIDEO_JOBS", "2"))
         mode = "GPU" if self.device == "cuda" else f"CPU-{self.cpu_cores}T"
         print(f"[VLM Engine] [{mode}] Batch: {len(video_paths)} videos, parallel={max_parallel_videos}")
         

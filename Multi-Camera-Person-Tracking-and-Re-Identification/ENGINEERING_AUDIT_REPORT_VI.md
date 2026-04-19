@@ -469,7 +469,7 @@ video_payload = {
     "compressed_path": str,            # H.265 copy
     "metadata_path": str,              # JSON file path
     "codec": "h265",
-    "container": "mp4",
+    "container": "h265",
     "recorded_start": str,             # ISO timestamp
     "recorded_end": str,
     "fps": float,

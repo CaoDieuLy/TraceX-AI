@@ -241,10 +241,22 @@ class CLIPReIDExtractor:
 
     @torch.no_grad()
     def extract(self, crop: Image.Image) -> np.ndarray:
-        img_tensor = self.preprocess(crop).unsqueeze(0).to(self.device)
-        features = self.model.encode_image(img_tensor)
-        features = features / features.norm(dim=-1, keepdim=True)
-        return features.cpu().numpy()[0].astype(np.float32)
+        batch = self.extract_batch([crop])
+        return batch[0] if len(batch) else np.zeros(512, dtype=np.float32)
+
+    @torch.no_grad()
+    def extract_batch(self, crops: list[Image.Image]) -> np.ndarray:
+        if not crops:
+            return np.zeros((0, 512), dtype=np.float32)
+        batch_size = _env_int("MCPT_REID_BATCH_SIZE", 128 if self.device == "cuda" else 16)
+        features_out: list[np.ndarray] = []
+        for start in range(0, len(crops), batch_size):
+            batch = crops[start : start + batch_size]
+            img_tensor = torch.stack([self.preprocess(crop) for crop in batch]).to(self.device)
+            features = self.model.encode_image(img_tensor)
+            features = features / features.norm(dim=-1, keepdim=True)
+            features_out.append(features.detach().cpu().numpy().astype(np.float32))
+        return np.concatenate(features_out, axis=0) if features_out else np.zeros((0, 512), dtype=np.float32)
 
 
 @lru_cache(maxsize=1)
@@ -275,18 +287,22 @@ class ITSELFSearchEngineLite:
 
     @torch.no_grad()
     def extract_features(self, crop: Image.Image) -> np.ndarray:
-        img_tensor = self.preprocess(crop).unsqueeze(0).to(self.clip_model.device)
-        # Get attention from last transformer layer
-        vision_outputs = self.clip_model.visual(img_tensor, return_attention=True)
-        attn = vision_outputs.attentions[-1] if hasattr(vision_outputs, "attentions") else None
+        batch = self.extract_features_batch([crop])
+        return batch[0] if len(batch) else np.zeros(512, dtype=np.float32)
 
-        if attn is None:
-            # Fallback: global CLIP embedding
-            return self.clip_model.encode_image(img_tensor).cpu().numpy()[0]
-
-        salient_tokens = self.grab.extract(attn, img_tensor)
-        diverse_emb = self.mars.select(salient_tokens, k=10)
-        return diverse_emb.cpu().numpy().astype(np.float32)
+    @torch.no_grad()
+    def extract_features_batch(self, crops: list[Image.Image]) -> np.ndarray:
+        if not crops:
+            return np.zeros((0, 512), dtype=np.float32)
+        batch_size = _env_int("MCPT_EMBEDDING_BATCH_SIZE", 128 if self.device == "cuda" else 16)
+        features_out: list[np.ndarray] = []
+        for start in range(0, len(crops), batch_size):
+            batch = crops[start : start + batch_size]
+            img_tensor = torch.stack([self.preprocess(crop) for crop in batch]).to(self.clip_model.device)
+            features = self.clip_model.encode_image(img_tensor)
+            features = features / features.norm(dim=-1, keepdim=True)
+            features_out.append(features.detach().cpu().numpy().astype(np.float32))
+        return np.concatenate(features_out, axis=0) if features_out else np.zeros((0, 512), dtype=np.float32)
 
     def rerank(
         self,
@@ -544,8 +560,26 @@ def _read_frame(video_path: Path, frame_idx: int) -> np.ndarray | None:
     return frame if ok else None
 
 
-def _read_crop_image(video_path: Path, frame_idx: int, bbox: list[int]) -> Image.Image | None:
-    frame = _read_frame(video_path, frame_idx)
+def _read_frame_map(video_path: Path, frame_indices: list[int]) -> dict[int, np.ndarray]:
+    unique_indices = sorted({max(0, int(index)) for index in frame_indices})
+    if not unique_indices:
+        return {}
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return {}
+    frames: dict[int, np.ndarray] = {}
+    try:
+        for frame_idx in unique_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                frames[frame_idx] = frame.copy()
+    finally:
+        cap.release()
+    return frames
+
+
+def _crop_pil_from_frame(frame: np.ndarray | None, bbox: list[int]) -> Image.Image | None:
     if frame is None:
         return None
     height, width = frame.shape[:2]
@@ -559,6 +593,18 @@ def _read_crop_image(video_path: Path, frame_idx: int, bbox: list[int]) -> Image
         return None
     crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
     return Image.fromarray(crop)
+
+
+def _read_crop_image(video_path: Path, frame_idx: int, bbox: list[int]) -> Image.Image | None:
+    frame = _read_frame(video_path, frame_idx)
+    return _crop_pil_from_frame(frame, bbox)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, default)))
+    except Exception:
+        return max(minimum, int(default))
 
 
 def _sample_stride(source_fps: float, detection_fps: float) -> int:
@@ -653,16 +699,25 @@ def _build_detected_people(
             continue
 
         # ── STEP 2: CLIP-ReID Extraction ─────────────────────────
-        reid_embs = []
-        for bbox in detections:
-            x, y, w, h = bbox
-            crop = frame[y:y+h, x:x+w]
-            crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            emb = reid_extractor.extract(crop_pil)
-            reid_embs.append(emb)
+        reid_embs: list[np.ndarray] = [np.zeros(512, dtype=np.float32) for _ in detections]
+        reid_crops: list[Image.Image] = []
+        valid_reid_indices: list[int] = []
+        for det_index, bbox in enumerate(detections):
+            crop_pil = _crop_pil_from_frame(frame, bbox)
+            if crop_pil is not None:
+                reid_crops.append(crop_pil)
+                valid_reid_indices.append(det_index)
+        if reid_crops:
+            batch_embeddings = reid_extractor.extract_batch(reid_crops)
+            for det_index, embedding in zip(valid_reid_indices, batch_embeddings):
+                reid_embs[det_index] = embedding
 
         # ── STEP 3: ByteTrack Association ─────────────────────────
         assignments = tracker.associate(detections, det_confs, frame_idx, fps)
+        for det_index, track_id in assignments.items():
+            track = tracker.active_tracks.get(track_id)
+            if track is not None:
+                track.setdefault("embeddings", []).append(reid_embs[det_index])
 
         frame_idx += 1
 
@@ -691,12 +746,7 @@ def _build_detected_people(
             })
 
         # Calculate average embedding from track (temporal smoothing)
-        track_embs = []
-        for f_idx, bbox in zip(frames, track["bboxes"]):
-            crop = _read_crop_image(compressed_path, f_idx, bbox)
-            if crop is not None:
-                emb = reid_extractor.extract(crop)
-                track_embs.append(emb)
+        track_embs = [np.asarray(embedding, dtype=np.float32) for embedding in track.get("embeddings", []) if embedding is not None]
 
         avg_embedding = np.mean(track_embs, axis=0) if track_embs else np.zeros(512, dtype=np.float32)
         avg_embedding = avg_embedding / (np.linalg.norm(avg_embedding) + 1e-8)
@@ -733,29 +783,29 @@ def _build_detected_people(
         candidates.append(candidate)
 
     # ── STEP 5: VLM Captioning (BLIP) ───────────────────────────
-    _apply_person_captions(candidates, compressed_path, vlm_engine)
+    representative_frames = _read_frame_map(compressed_path, [int(candidate["frame_idx"]) for candidate in candidates])
+    representative_crops: dict[str, Image.Image] = {}
+    for candidate in candidates:
+        crop = _crop_pil_from_frame(representative_frames.get(int(candidate["frame_idx"])), candidate["representative_bbox"])
+        if crop is not None:
+            representative_crops[candidate["candidate_id"]] = crop
+
+    _apply_person_captions(candidates, compressed_path, vlm_engine, crop_map=representative_crops)
 
     # ── STEP 6: ITSELF-lite Fine-Grained Features ────────────────
+    itself_jobs = [(candidate, representative_crops.get(candidate["candidate_id"])) for candidate in candidates]
+    valid_itself_jobs = [(candidate, crop) for candidate, crop in itself_jobs if crop is not None]
+    itself_features_batch = np.zeros((0, 512), dtype=np.float32)
+    if valid_itself_jobs:
+        try:
+            itself_features_batch = itself_engine.extract_features_batch([crop for _, crop in valid_itself_jobs])
+        except Exception:
+            itself_features_batch = np.zeros((0, 512), dtype=np.float32)
+    for candidate, features in zip([candidate for candidate, _ in valid_itself_jobs], itself_features_batch):
+        candidate["itself_features"] = features.tolist()
+        candidate["embedding_vector"] = features.tolist()
     for candidate in candidates:
-        rep_frame_idx = candidate["frame_idx"]
-        rep_bbox = candidate["representative_bbox"]
-        frame = _read_frame(compressed_path, rep_frame_idx)
-        if frame is not None:
-            x, y, w, h = rep_bbox
-            crop = frame[y:y+h, x:x+w]
-            if crop.size == 0:
-                candidate["itself_features"] = None
-                continue
-            crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            try:
-                itself_features = itself_engine.extract_features(crop_pil)
-                candidate["itself_features"] = itself_features.tolist()
-                # Override embedding with ITSELF (more fine-grained)
-                candidate["embedding_vector"] = itself_features.tolist()
-            except Exception:
-                candidate["itself_features"] = None
-        else:
-            candidate["itself_features"] = None
+        candidate.setdefault("itself_features", None)
 
     # ── STEP 7: Finalize search_text ─────────────────────────────
     for candidate in candidates:
@@ -793,7 +843,7 @@ def _build_video_payload(
         "compressed_path": str(compressed_path),
         "metadata_path": str(metadata_path),
         "codec": "h265",
-        "container": compressed_path.suffix.lstrip(".") or "mp4",
+        "container": compressed_path.suffix.lstrip(".") or "h265",
         "recorded_start": _iso(recorded_start),
         "recorded_end": _iso(recorded_end),
         "fps": float(probe.get("fps") or 0.0),
@@ -805,7 +855,12 @@ def _build_video_payload(
     }
 
 
-def _apply_person_captions(candidates: list[dict], video_path: Path, vlm_engine) -> None:
+def _apply_person_captions(
+    candidates: list[dict],
+    video_path: Path,
+    vlm_engine,
+    crop_map: dict[str, Image.Image] | None = None,
+) -> None:
     if vlm_engine is None or not candidates:
         for candidate in candidates:
             candidate["person_caption"] = _default_caption(candidate["camera_id"], candidate["track_id"])
@@ -815,24 +870,30 @@ def _apply_person_captions(candidates: list[dict], video_path: Path, vlm_engine)
         return
 
     jobs: list[tuple[dict, Image.Image]] = []
-    max_workers = max(2, min((os.cpu_count() or 4) // 2, 8))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            (
-                candidate,
-                executor.submit(
-                    _read_crop_image,
-                    video_path,
-                    int(candidate["frame_idx"]),
-                    [int(value) for value in candidate["bbox"]],
-                ),
-            )
-            for candidate in candidates
-        ]
-        for candidate, future in futures:
-            crop_image = future.result()
+    if crop_map:
+        for candidate in candidates:
+            crop_image = crop_map.get(candidate["candidate_id"])
             if crop_image is not None:
                 jobs.append((candidate, crop_image))
+    else:
+        max_workers = _env_int("MCPT_METADATA_WORKERS", max(2, min((os.cpu_count() or 4) // 2, 8)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                (
+                    candidate,
+                    executor.submit(
+                        _read_crop_image,
+                        video_path,
+                        int(candidate["frame_idx"]),
+                        [int(value) for value in candidate["bbox"]],
+                    ),
+                )
+                for candidate in candidates
+            ]
+            for candidate, future in futures:
+                crop_image = future.result()
+                if crop_image is not None:
+                    jobs.append((candidate, crop_image))
 
     if not jobs:
         for candidate in candidates:

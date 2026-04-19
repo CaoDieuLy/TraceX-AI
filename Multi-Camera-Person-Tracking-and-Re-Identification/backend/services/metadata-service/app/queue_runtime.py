@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,10 @@ class QueueSyncService:
         self.local_download_dir = self.local_root / "tmp" / "downloads"
         self._drive_service = None
         self._drive_layout: dict[str, str] | None = None
+
+    @staticmethod
+    def _parallel_jobs(count: int, default: int) -> int:
+        return max(1, min(count, int(default)))
 
     def ensure_local_layout(self) -> None:
         self.local_queue_video_dir.mkdir(parents=True, exist_ok=True)
@@ -226,6 +231,48 @@ class QueueSyncService:
             response.raise_for_status()
             return response.json()
 
+    def _process_local_source_item(self, source_path: Path, source_mode: str) -> dict:
+        recorded_start = None
+        camera_id = source_path.stem
+        output_basename = f"{source_path.stem}{source_path.suffix}"
+        result = self._request_tracking_processing(
+            source_path=source_path,
+            camera_id=camera_id,
+            recorded_start=recorded_start,
+            output_basename=output_basename,
+            source_mode=source_mode,
+        )
+        return {
+            "result": result,
+            "source_filename": source_path.name,
+            "source_mode": source_mode,
+            "source_path": source_path,
+        }
+
+    def _process_import_drive_item(self, import_file: dict) -> dict:
+        original_name = str(import_file.get("name") or "imported_video.h265")
+        source_file_id = str(import_file["id"])
+        local_source_path = self.local_download_dir / original_name
+        self._download_drive_file(source_file_id, local_source_path)
+        recorded_start = datetime.now(timezone.utc).replace(microsecond=0)
+        camera_id = self._slug(Path(original_name).stem)
+        original_suffix = Path(original_name).suffix.lower()
+        output_basename = f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}{original_suffix}"
+        result = self._request_tracking_processing(
+            source_path=local_source_path,
+            camera_id=camera_id,
+            recorded_start=recorded_start,
+            output_basename=output_basename,
+            source_mode="google_drive_import",
+        )
+        return {
+            "result": result,
+            "source_filename": original_name,
+            "source_mode": "google_drive_import",
+            "source_file_id": source_file_id,
+            "local_source_path": local_source_path,
+        }
+
     def list_import_files(self) -> list[dict]:
         layout = self.ensure_drive_layout()
         query = f"'{layout['import_id']}' in parents and trashed = false and mimeType != '{DRIVE_FOLDER_MIME_TYPE}'"
@@ -333,24 +380,24 @@ class QueueSyncService:
         processed_videos = 0
         people_indexed = 0
         evicted_video_ids: list[str] = []
-        for source_path in source_videos:
-            result = self._request_tracking_processing(
-                source_path=source_path,
-                camera_id=source_path.stem,
-                recorded_start=None,
-                output_basename=f"{source_path.stem}{source_path.suffix}",
-                source_mode="bootstrap_dataset",
-            )
+        parallel_jobs = self._parallel_jobs(len(source_videos), settings.queue_parallel_jobs)
+        results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
+            for item in executor.map(lambda path: self._process_local_source_item(path, "bootstrap_dataset"), source_videos):
+                results.append(item)
+
+        for item in results:
+            result = item["result"]
             evicted_video_ids.extend(
                 self._append_processed_result(
                     session,
                     result,
-                    source_filename=source_path.name,
-                    source_mode="bootstrap_dataset",
+                    source_filename=item["source_filename"],
+                    source_mode=item["source_mode"],
                 )
             )
             if delete_source_after_import:
-                source_path.unlink(missing_ok=True)
+                Path(item["source_path"]).unlink(missing_ok=True)
             processed_videos += 1
             people_indexed += int(result.get("person_count") or 0)
 
@@ -368,35 +415,26 @@ class QueueSyncService:
         processed_videos = 0
         imported_source_files: list[str] = []
         evicted_video_ids: list[str] = []
+        import_files = self.list_import_files()
+        parallel_jobs = self._parallel_jobs(len(import_files), settings.queue_parallel_jobs)
+        results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
+            for item in executor.map(self._process_import_drive_item, import_files):
+                results.append(item)
 
-        for import_file in self.list_import_files():
-            original_name = str(import_file.get("name") or "imported_video.h265")
-            source_file_id = str(import_file["id"])
-            local_source_path = self.local_download_dir / original_name
-            self._download_drive_file(source_file_id, local_source_path)
-
-            recorded_start = datetime.now(timezone.utc).replace(microsecond=0)
-            camera_id = self._slug(Path(original_name).stem)
-            original_suffix = Path(original_name).suffix.lower()
-            output_basename = f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}{original_suffix}"
-            result = self._request_tracking_processing(
-                source_path=local_source_path,
-                camera_id=camera_id,
-                recorded_start=recorded_start,
-                output_basename=output_basename,
-                source_mode="google_drive_import",
-            )
+        for item in results:
+            result = item["result"]
             evicted_video_ids.extend(
                 self._append_processed_result(
                     session,
                     result,
-                    source_filename=original_name,
-                    source_mode="google_drive_import",
+                    source_filename=item["source_filename"],
+                    source_mode=item["source_mode"],
                 )
             )
-            self._delete_drive_file(source_file_id)
-            local_source_path.unlink(missing_ok=True)
-            imported_source_files.append(original_name)
+            self._delete_drive_file(item["source_file_id"])
+            Path(item["local_source_path"]).unlink(missing_ok=True)
+            imported_source_files.append(item["source_filename"])
             processed_videos += 1
 
         return {

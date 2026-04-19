@@ -124,9 +124,9 @@ def ingest_videos_parallel(input_dir, output_dir, max_workers=None):
         if hw["mode"] == "CPU":
             max_workers = min(max_workers, hw["max_workers"])
     
-    # Tìm đệ quy toàn bộ video
-    videos = glob.glob(os.path.join(input_dir, "**/*.mp4"), recursive=True) + \
-             glob.glob(os.path.join(input_dir, "**/*.avi"), recursive=True)
+    # Luồng production chỉ ingest video da duoc ma hoa san bang H.265/HEVC.
+    videos = glob.glob(os.path.join(input_dir, "**/*.h265"), recursive=True) + \
+             glob.glob(os.path.join(input_dir, "**/*.hevc"), recursive=True)
     if not videos:
         print("[Ingestion] Không tìm thấy video mới nào.")
         return []

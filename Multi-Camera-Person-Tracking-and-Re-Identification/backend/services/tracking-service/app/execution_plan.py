@@ -4,18 +4,31 @@ from .hardware_profiles import resolve_hardware_profile
 
 
 def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_count: int, host_cpu_count: int, host_ram_gb: int) -> dict:
+    physical_gpu_count = max(int(gpu_count), 0)
     service_processes = int(hardware_profile.get("service_processes", 1))
+    if physical_gpu_count > 1:
+        service_processes = max(service_processes, physical_gpu_count)
     gpu_streams = int(hardware_profile.get("gpu_streams", 2))
-    decode_workers = min(int(hardware_profile.get("cpu_decode_workers", 4)), max(host_cpu_count - 4, 1))
-    crop_workers = min(int(hardware_profile.get("cpu_crop_workers", 4)), max(host_cpu_count - 6, 1))
-    metadata_workers = min(int(hardware_profile.get("metadata_workers", 2)), max(host_cpu_count - 8, 1))
+    scale = max(physical_gpu_count, 1)
+    available_cpu = max(host_cpu_count - 2, 1)
+    decode_workers = min(int(hardware_profile.get("cpu_decode_workers", 4)) * scale, available_cpu)
+    crop_workers = min(int(hardware_profile.get("cpu_crop_workers", 4)) * scale, available_cpu)
+    metadata_workers = min(int(hardware_profile.get("metadata_workers", 2)) * scale, max(available_cpu // 2, 1))
+    prefetch_queue_size = int(hardware_profile.get("prefetch_queue_size", 32))
+    if host_ram_gb < 48:
+        prefetch_queue_size = max(prefetch_queue_size // 2, 16)
+    parallel_video_jobs = min(
+        int(hardware_profile.get("exchange_max_workers", 1)) * scale,
+        max(host_cpu_count, 1),
+    )
 
     return {
         "hardware": {
             "gpu_profile": hardware_profile.get("gpu_model"),
-            "gpu_count": gpu_count,
+            "gpu_count": physical_gpu_count,
             "host_cpu_count": host_cpu_count,
             "host_ram_gb": host_ram_gb,
+            "resolved_profile_name": hardware_profile.get("resolved_profile_name"),
         },
         "process_model": {
             "api_processes": 1,
@@ -27,7 +40,8 @@ def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_
             "cpu_decode_workers": decode_workers,
             "cpu_crop_workers": crop_workers,
             "metadata_workers": metadata_workers,
-            "prefetch_queue_size": int(hardware_profile.get("prefetch_queue_size", 32)),
+            "prefetch_queue_size": prefetch_queue_size,
+            "parallel_video_jobs": parallel_video_jobs,
         },
         "batching": {
             "detector_batch_size": int(hardware_profile.get("detector_batch_size", 8)),
@@ -55,7 +69,7 @@ def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_
             "Double-buffer CPU decode and GPU inference.",
             "Batch crops before ReID and VLM inference instead of per-frame calls.",
             "Keep vector search post-processing on CPU to preserve GPU time for detector/ReID/VLM.",
-            "Use one GPU process unless you scale to multiple physical GPUs.",
+            "Use one GPU process per physical GPU unless you have measured a better replication strategy.",
             f"Primary profile selected: {pipeline_profile['profile']}.",
         ],
         "notes": hardware_profile.get("execution_notes", []),
@@ -71,7 +85,13 @@ def resolve_execution_plan(
     host_cpu_count: int,
     host_ram_gb: int,
 ) -> tuple[dict, dict]:
-    hardware_profile = resolve_hardware_profile(gpu_profile_name, gpu_profile_overrides)
+    hardware_profile = resolve_hardware_profile(
+        gpu_profile_name,
+        gpu_profile_overrides,
+        gpu_count=gpu_count,
+        host_cpu_count=host_cpu_count,
+        host_ram_gb=host_ram_gb,
+    )
     plan = build_execution_plan(
         pipeline_profile=pipeline_profile,
         hardware_profile=hardware_profile,

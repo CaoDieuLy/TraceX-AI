@@ -79,7 +79,7 @@ Chay bootstrap tu folder nguon local:
 docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --source-dir /workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos --once
 ```
 
-Neu muon xoa source `.mp4` local sau khi da convert va dua len Queue Drive:
+Neu muon xoa source `.h265`/`.hevc` local sau khi da dua len Queue Drive:
 
 ```bash
 docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --source-dir /workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos --delete-source --once

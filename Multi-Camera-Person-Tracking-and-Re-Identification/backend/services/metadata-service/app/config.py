@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     queue_local_root: str = "/workspace/storage/queue"
     queue_max_size: int = 32
     queue_poll_interval_seconds: int = 30
+    queue_parallel_jobs: int = 4
+    queue_download_workers: int = 4
     google_drive_enabled: bool = False
     google_drive_credentials_file: str = ""
     google_drive_root_folder_id: str = ""

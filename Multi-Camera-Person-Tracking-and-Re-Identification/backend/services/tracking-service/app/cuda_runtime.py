@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 
@@ -18,10 +19,15 @@ def configure_torch_runtime(
             "cuda_available": False,
         }
 
-    cpu_threads = max(1, min(int(host_cpu_count), 8))
+    cpu_threads = max(1, min(int(host_cpu_count), 64))
+    os.environ.setdefault("OMP_NUM_THREADS", str(cpu_threads))
+    os.environ.setdefault("MKL_NUM_THREADS", str(cpu_threads))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(cpu_threads))
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", str(cpu_threads))
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     try:
         torch.set_num_threads(cpu_threads)
-        torch.set_num_interop_threads(max(1, min(cpu_threads // 2, 4)))
+        torch.set_num_interop_threads(max(1, min(cpu_threads // 2, 32)))
     except Exception:
         pass
 

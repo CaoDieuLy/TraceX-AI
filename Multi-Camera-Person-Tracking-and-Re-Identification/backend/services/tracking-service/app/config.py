@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     tracking_runtime_mode: str = "production_ready"
     pipeline_profile: str = "accuracy_first"
     tracking_hyperparameter_overrides_json: str = ""
-    gpu_hardware_profile: str = "l4"
+    gpu_hardware_profile: str = "auto"
     gpu_hardware_overrides_json: str = ""
     gpu_count: int = 1
     host_cpu_count: int = 16

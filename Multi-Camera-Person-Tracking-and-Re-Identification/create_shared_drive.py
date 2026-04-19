@@ -165,5 +165,6 @@ for folder_name, folder_id in folder_ids.items():
 
 print("\n✅ You can now run exchange.py WITHOUT --no-drive!")
 print("\nTest command:")
+print("  Note: exchange.py is a test-only exception and still accepts .mp4 input.")
 print(f"  python exchange.py --mp4-file videos/Camera_01.mp4 --camera-id CAM_01")
 print("\nNote: First upload may take time as models download to cache.")

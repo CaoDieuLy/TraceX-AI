@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,36 @@ class VideoIngestionRuntime:
         self._vlm_engine = None
         self._drive_service = None
 
+    @staticmethod
+    def _apply_execution_environment(execution_plan: dict) -> None:
+        parallelism = execution_plan.get("parallelism", {})
+        batching = execution_plan.get("batching", {})
+        memory = execution_plan.get("memory", {})
+        hardware = execution_plan.get("hardware", {})
+        host_cpu_count = max(1, int(hardware.get("host_cpu_count") or settings.host_cpu_count))
+        gpu_streams = max(1, int(parallelism.get("gpu_streams") or 1))
+
+        os.environ["OMP_NUM_THREADS"] = str(host_cpu_count)
+        os.environ["MKL_NUM_THREADS"] = str(host_cpu_count)
+        os.environ["OPENBLAS_NUM_THREADS"] = str(host_cpu_count)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(host_cpu_count)
+        os.environ["TOKENIZERS_PARALLELISM"] = "true"
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = str(gpu_streams)
+        os.environ["MCPT_GPU_STREAMS"] = str(gpu_streams)
+        os.environ["MCPT_CPU_DECODE_WORKERS"] = str(parallelism.get("cpu_decode_workers") or host_cpu_count)
+        os.environ["MCPT_CPU_CROP_WORKERS"] = str(parallelism.get("cpu_crop_workers") or host_cpu_count)
+        os.environ["MCPT_METADATA_WORKERS"] = str(parallelism.get("metadata_workers") or max(host_cpu_count // 2, 1))
+        os.environ["MCPT_PREFETCH_QUEUE_SIZE"] = str(parallelism.get("prefetch_queue_size") or 32)
+        os.environ["MCPT_PARALLEL_VIDEO_JOBS"] = str(parallelism.get("parallel_video_jobs") or 1)
+        os.environ["MCPT_DETECTOR_BATCH_SIZE"] = str(batching.get("detector_batch_size") or 8)
+        os.environ["MCPT_REID_BATCH_SIZE"] = str(batching.get("reid_batch_size") or 64)
+        os.environ["MCPT_VLM_BATCH_SIZE"] = str(batching.get("vlm_batch_size") or 8)
+        os.environ["MCPT_EMBEDDING_BATCH_SIZE"] = str(batching.get("embedding_batch_size") or 64)
+        if memory.get("allow_tf32", True):
+            os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "1")
+        if memory.get("pin_memory", True):
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     def _resolve_profile(self, metadata: dict | None = None) -> tuple[dict, dict, dict]:
         metadata = _dict_or_empty(metadata)
         profile_name = str(metadata.get("pipeline_profile") or settings.pipeline_profile).strip() or settings.pipeline_profile
@@ -71,6 +102,7 @@ class VideoIngestionRuntime:
             str(credentials_path),
             scopes=list(DRIVE_SCOPES),
         )
+        print(f"[Drive] Service Account Email: {credentials.service_account_email}")
         self._drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
         return self._drive_service
 
@@ -186,11 +218,12 @@ class VideoIngestionRuntime:
         metadata: dict | None = None,
     ) -> dict:
         metadata = _dict_or_empty(metadata)
-        profile, hardware_profile, _execution_plan = self._resolve_profile(metadata)
+        profile, hardware_profile, execution_plan = self._resolve_profile(metadata)
+        self._apply_execution_environment(execution_plan)
         acceleration_state = configure_torch_runtime(
             allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
             cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-            host_cpu_count=settings.host_cpu_count,
+            host_cpu_count=int(execution_plan.get("hardware", {}).get("host_cpu_count") or settings.host_cpu_count),
         )
 
         resolved_source = self._resolve_source(
@@ -253,6 +286,7 @@ class VideoIngestionRuntime:
             "processing_backend": "tracking_service_local",
             "pipeline_profile": profile["profile"],
             "gpu_hardware_profile": hardware_profile,
+            "execution_plan": execution_plan,
             "acceleration_state": acceleration_state,
             "source_path": str(resolved_source),
             "compressed_path": str(compressed_path),

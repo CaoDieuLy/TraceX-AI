@@ -122,12 +122,12 @@ with bootstrap_col:
 with add_col:
     st.subheader("Add đúng 1 video mới")
     st.caption(
-        "Chỉ ingest video vừa upload, convert sang H.265, detect người, sinh metadata per-person, "
+        "Chỉ ingest video H.265/HEVC vừa upload, detect người, sinh metadata per-person, "
         "update queue tối đa 32 video, rồi rebuild lại VectorDB từ metadata sẵn có."
     )
     uploaded_video = st.file_uploader(
         "Video mới",
-        type=["mp4", "avi", "mov", "mkv", "hevc", "h265"],
+        type=["hevc", "h265"],
         key="single_video_upload",
     )
     camera_id = st.text_input("Camera ID", value="Camera_32")

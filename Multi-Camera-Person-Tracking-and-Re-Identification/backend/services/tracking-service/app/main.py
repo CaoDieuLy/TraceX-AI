@@ -16,6 +16,18 @@ from .service import get_pipeline_config, process_video_ingestion, process_video
 app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
 
 
+@app.get("/")
+def root() -> dict:
+    config = get_pipeline_config()
+    return {
+        "status": "ok",
+        "service": "tracking-service",
+        "provider": config.get("provider"),
+        "mode": config.get("mode"),
+        "pipeline_profile": config.get("pipeline_profile"),
+    }
+
+
 @app.get("/health")
 def healthcheck() -> dict:
     return {"status": "ok", "service": "tracking-service"}
