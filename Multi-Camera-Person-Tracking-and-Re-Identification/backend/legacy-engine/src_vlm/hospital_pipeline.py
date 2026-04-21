@@ -5,6 +5,7 @@ import math
 import os
 import re
 import shutil
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -103,6 +104,29 @@ def _detect_people_yolo26(frame: np.ndarray, conf_threshold: float = 0.32) -> tu
                 detections.append([int(x), int(y), int(w), int(h)])
                 confidences.append(conf)
     return detections, confidences
+
+
+def _detect_people_yolo26_batch(
+    frames: list[np.ndarray],
+    conf_threshold: float = 0.32,
+) -> list[tuple[list[list[int]], list[float]]]:
+    if not frames:
+        return []
+    model = _load_yolo26()
+    results = model(frames, verbose=False, conf=conf_threshold, classes=[0])
+    batch_outputs: list[tuple[list[list[int]], list[float]]] = []
+    for result in results:
+        detections: list[list[int]] = []
+        confidences: list[float] = []
+        boxes = result.boxes
+        if boxes is not None:
+            for box in boxes:
+                x, y, w, h = box.xywh[0].cpu().numpy()
+                conf = float(box.conf[0].cpu().numpy())
+                detections.append([int(x), int(y), int(w), int(h)])
+                confidences.append(conf)
+        batch_outputs.append((detections, confidences))
+    return batch_outputs
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -263,8 +287,15 @@ class CLIPReIDExtractor:
         features_out: list[np.ndarray] = []
         for start in range(0, len(crops), batch_size):
             batch = crops[start : start + batch_size]
-            img_tensor = torch.stack([self.preprocess(crop) for crop in batch]).to(self.device)
-            features = self.model.encode_image(img_tensor)
+            img_tensor = torch.stack([self.preprocess(crop) for crop in batch])
+            if self.device == "cuda":
+                img_tensor = img_tensor.pin_memory()
+                img_tensor = img_tensor.to(self.device, non_blocking=True)
+            else:
+                img_tensor = img_tensor.to(self.device)
+            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if self.device == "cuda" else nullcontext()
+            with autocast_ctx:
+                features = self.model.encode_image(img_tensor)
             features = features / features.norm(dim=-1, keepdim=True)
             features_out.append(features.detach().cpu().numpy().astype(np.float32))
         return np.concatenate(features_out, axis=0) if features_out else np.zeros((0, 512), dtype=np.float32)
@@ -309,8 +340,15 @@ class ITSELFSearchEngineLite:
         features_out: list[np.ndarray] = []
         for start in range(0, len(crops), batch_size):
             batch = crops[start : start + batch_size]
-            img_tensor = torch.stack([self.preprocess(crop) for crop in batch]).to(self.clip_model.device)
-            features = self.clip_model.encode_image(img_tensor)
+            img_tensor = torch.stack([self.preprocess(crop) for crop in batch])
+            if self.device == "cuda":
+                img_tensor = img_tensor.pin_memory()
+                img_tensor = img_tensor.to(self.clip_model.device, non_blocking=True)
+            else:
+                img_tensor = img_tensor.to(self.clip_model.device)
+            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if self.device == "cuda" else nullcontext()
+            with autocast_ctx:
+                features = self.clip_model.encode_image(img_tensor)
             features = features / features.norm(dim=-1, keepdim=True)
             features_out.append(features.detach().cpu().numpy().astype(np.float32))
         return np.concatenate(features_out, axis=0) if features_out else np.zeros((0, 512), dtype=np.float32)
@@ -678,57 +716,79 @@ def _build_detected_people(
         min_frames_to_confirm=4,
     )
     stride = _sample_stride(fps, DEFAULT_DETECTION_FPS)
+    detector_batch_size = _env_int("MCPT_DETECTOR_BATCH_SIZE", 8)
     frame_idx = 0
+    sampled_frames: list[tuple[int, np.ndarray]] = []
+
+    def flush_sampled_frames() -> None:
+        if not sampled_frames:
+            return
+
+        batch_indices = [sampled_frame_idx for sampled_frame_idx, _frame in sampled_frames]
+        batch_frames = [frame for _sampled_frame_idx, frame in sampled_frames]
+        batch_detections = _detect_people_yolo26_batch(batch_frames, conf_threshold=0.32)
+        batch_entries: list[dict[str, object]] = []
+        reid_crops: list[Image.Image] = []
+        reid_positions: list[tuple[int, int]] = []
+
+        for batch_pos, ((sampled_frame_idx, frame), detection_result) in enumerate(zip(sampled_frames, batch_detections)):
+            detections, det_confs = detection_result
+            filtered_det: list[list[int]] = []
+            filtered_confs: list[float] = []
+            for bbox, conf in zip(detections, det_confs):
+                if _bbox_area(bbox) >= DEFAULT_MIN_PERSON_AREA:
+                    filtered_det.append(bbox)
+                    filtered_confs.append(conf)
+
+            reid_embs: list[np.ndarray] = [np.zeros(512, dtype=np.float32) for _ in filtered_det]
+            for det_index, bbox in enumerate(filtered_det):
+                crop_pil = _crop_pil_from_frame(frame, bbox)
+                if crop_pil is None:
+                    continue
+                reid_positions.append((batch_pos, det_index))
+                reid_crops.append(crop_pil)
+
+            batch_entries.append(
+                {
+                    "frame_idx": sampled_frame_idx,
+                    "detections": filtered_det,
+                    "det_confs": filtered_confs,
+                    "reid_embs": reid_embs,
+                }
+            )
+
+        if reid_crops:
+            batch_embeddings = reid_extractor.extract_batch(reid_crops)
+            for (batch_pos, det_index), embedding in zip(reid_positions, batch_embeddings):
+                batch_entries[batch_pos]["reid_embs"][det_index] = embedding  # type: ignore[index]
+
+        for batch_index, entry in zip(batch_indices, batch_entries):
+            detections = entry["detections"]  # type: ignore[assignment]
+            det_confs = entry["det_confs"]  # type: ignore[assignment]
+            if not detections:
+                continue
+            reid_embs = entry["reid_embs"]  # type: ignore[assignment]
+            assignments = tracker.associate(detections, det_confs, batch_index, fps)
+            for det_index, track_id in assignments.items():
+                track = tracker.active_tracks.get(track_id)
+                if track is not None:
+                    track.setdefault("embeddings", []).append(reid_embs[det_index])
+
+        sampled_frames.clear()
 
     while True:
         ok, frame = cap.read()
         if not ok:
             break
 
-        if frame_idx % stride != 0:
-            frame_idx += 1
-            continue
-
-        # ── STEP 1: YOLO26-X Detection ───────────────────────────
-        detections, det_confs = _detect_people_yolo26(frame, conf_threshold=0.32)
-
-        # Filter by minimum person area
-        filtered_det = []
-        filtered_confs = []
-        for bbox, conf in zip(detections, det_confs):
-            if _bbox_area(bbox) >= DEFAULT_MIN_PERSON_AREA:
-                filtered_det.append(bbox)
-                filtered_confs.append(conf)
-
-        detections = filtered_det
-        det_confs = filtered_confs
-
-        if not detections:
-            frame_idx += 1
-            continue
-
-        # ── STEP 2: CLIP-ReID Extraction ─────────────────────────
-        reid_embs: list[np.ndarray] = [np.zeros(512, dtype=np.float32) for _ in detections]
-        reid_crops: list[Image.Image] = []
-        valid_reid_indices: list[int] = []
-        for det_index, bbox in enumerate(detections):
-            crop_pil = _crop_pil_from_frame(frame, bbox)
-            if crop_pil is not None:
-                reid_crops.append(crop_pil)
-                valid_reid_indices.append(det_index)
-        if reid_crops:
-            batch_embeddings = reid_extractor.extract_batch(reid_crops)
-            for det_index, embedding in zip(valid_reid_indices, batch_embeddings):
-                reid_embs[det_index] = embedding
-
-        # ── STEP 3: ByteTrack Association ─────────────────────────
-        assignments = tracker.associate(detections, det_confs, frame_idx, fps)
-        for det_index, track_id in assignments.items():
-            track = tracker.active_tracks.get(track_id)
-            if track is not None:
-                track.setdefault("embeddings", []).append(reid_embs[det_index])
+        if frame_idx % stride == 0:
+            sampled_frames.append((frame_idx, frame.copy()))
+            if len(sampled_frames) >= detector_batch_size:
+                flush_sampled_frames()
 
         frame_idx += 1
+
+    flush_sampled_frames()
 
     cap.release()
 

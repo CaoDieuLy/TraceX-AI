@@ -22,6 +22,7 @@ import argparse
 import json
 import multiprocessing
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -542,6 +543,7 @@ def generate_metadata(
     camera_id: str | None = None,
     recorded_start: datetime | None = None,
     work_dir: Path | None = None,
+    drive_video_file_id: str | None = None,
 ) -> tuple[Path, dict, list]:
     """
     Generate metadata using existing VLM + tracking pipeline.
@@ -549,28 +551,30 @@ def generate_metadata(
     Returns:
         (metadata_path, video_payload, people_list)
     """
-    print(f"\n[STEP 3] Generating metadata (VLM + tracking)")
+    print(f"\n[STEP 3] Generating metadata (tracking-service ingestion)")
     print(f"  Video: {h265_path}")
-
-    from app.ingestion_runtime import VideoIngestionRuntime
-    import shutil
 
     perf = configure_host_performance()
     runtime_profile = perf["runtime_profile"]
     resolved_hardware_profile = runtime_profile["hardware_profile"]
 
-    # Use temp directory to avoid permission issues
-    work_dir = work_dir or Path(tempfile.mkdtemp(prefix="mcpt_exchange_"))
+    # Persist bootstrap artifacts locally so DB can be rebuilt from disk later.
+    queue_root = PROJECT_ROOT / "storage" / "queue" / "local" / "Queue"
+    source_dir = PROJECT_ROOT / "storage" / "queue" / "local" / "ExchangeSource"
+    video_dir = queue_root / ".h265"
+    metadata_dir = queue_root / "Metadata"
+    work_dir = work_dir or (PROJECT_ROOT / "storage" / "exchange-work" / h265_path.stem)
     work_dir.mkdir(parents=True, exist_ok=True)
-
-    video_dir = work_dir / "videos"
-    metadata_dir = work_dir / "metadata"
+    source_dir.mkdir(parents=True, exist_ok=True)
     video_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy .h265 to video_dir
-    local_video_copy = video_dir / h265_path.name
-    shutil.copy2(h265_path, local_video_copy)
+    local_source_copy = source_dir / h265_path.name
+    local_queue_video_copy = video_dir / h265_path.name
+    if h265_path.resolve() != local_source_copy.resolve():
+        shutil.copy2(h265_path, local_source_copy)
+    if h265_path.resolve() != local_queue_video_copy.resolve():
+        shutil.copy2(h265_path, local_queue_video_copy)
 
     print(
         "  Performance profile:"
@@ -583,13 +587,6 @@ def generate_metadata(
         f" metadata_slots={_metadata_pipeline_slots(runtime_profile)}"
     )
 
-    runtime = VideoIngestionRuntime()
-    runtime.work_root = work_dir
-    runtime.default_video_dir = video_dir
-    runtime.default_metadata_dir = metadata_dir
-    runtime.default_source_dir = work_dir / "sources"
-    runtime.default_source_dir.mkdir(parents=True, exist_ok=True)
-
     metadata_runtime = {
         "pipeline_profile": "accuracy_first",
         "gpu_hardware_profile": str(
@@ -600,27 +597,139 @@ def generate_metadata(
         "gpu_count": int(runtime_profile.get("gpu_count") or 0),
         "host_cpu_count": perf["cpu_threads"],
         "host_ram_gb": perf["host_ram_gb"],
+        "source_mode": "exchange_remote_metadata_generation",
     }
 
+    def _tracking_base_url() -> str:
+        load_runtime_env(override=False)
+        api_base_url = (
+            os.getenv("TRACKING_SERVICE_URL")
+            or os.getenv("LIGHTNING_API_BASE_URL")
+            or ""
+        ).strip()
+        local_tracking_url = os.getenv("TRACKING_SERVICE_LOCAL_URL", "http://127.0.0.1:8000").strip()
+        prefer_local = os.getenv("TRACKING_SERVICE_PREFER_LOCAL", "true").strip().lower() not in {"0", "false", "no"}
+        if prefer_local and local_tracking_url:
+            try:
+                parsed_host = local_tracking_url.split("://", 1)[-1].split("/", 1)[0]
+                host, _, raw_port = parsed_host.partition(":")
+                port = int(raw_port or 80)
+                with socket.create_connection((host, port), timeout=1.5):
+                    return local_tracking_url.rstrip("/")
+            except Exception:
+                pass
+        if not api_base_url:
+            raise ValueError("TRACKING_SERVICE_URL or LIGHTNING_API_BASE_URL is required for remote metadata generation")
+        return api_base_url.rstrip("/")
+
+    def _tracking_headers(include_json: bool = False) -> dict[str, str]:
+        load_runtime_env(override=False)
+        token = os.getenv("LIGHTNING_API_TOKEN", "").strip()
+        if not token:
+            raise ValueError("LIGHTNING_API_TOKEN is required for remote metadata generation")
+        header_name = os.getenv("LIGHTNING_API_AUTH_HEADER", "Authorization").strip() or "Authorization"
+        prefix = os.getenv("LIGHTNING_API_AUTH_PREFIX", "Bearer ")
+        if prefix and not prefix.endswith(" "):
+            prefix = f"{prefix} "
+        headers = {header_name: f"{prefix}{token}".strip()}
+        if include_json:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    def _write_local_metadata_file(target_path: Path, payload_video: dict[str, Any], payload_people: list[dict[str, Any]]) -> None:
+        payload = {
+            "schema_version": "hospital_person_metadata_v3",
+            "video": payload_video,
+            "people": payload_people,
+        }
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    import requests
+
+    endpoint_root = _tracking_base_url()
+    connect_timeout = _env_int("LIGHTNING_CONNECT_TIMEOUT_SECONDS", 30)
+    read_timeout = _env_int("LIGHTNING_READ_TIMEOUT_SECONDS", 1800)
+    preflight_enabled = os.getenv("LIGHTNING_PREFLIGHT_HEALTHCHECK", "true").strip().lower() not in {"0", "false", "no"}
+
+    print(f"  Metadata backend: remote tracking-service")
+    print(f"  Endpoint root: {endpoint_root}")
     print("  Waiting for metadata pipeline slot...")
     with _metadata_pipeline_semaphore(runtime_profile):
-        print("  Running pipeline...")
+        if preflight_enabled:
+            _probe_lightning_health(
+                api_base_url=endpoint_root,
+                api_token=os.getenv("LIGHTNING_API_TOKEN", ""),
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+            )
+
         if recorded_start is None:
             recorded_start = datetime.now(timezone.utc)
 
-        result = runtime.process_video(
-            source_path=str(local_video_copy),
-            camera_id=camera_id,
-            recorded_start=recorded_start,
-            output_video_dir=str(video_dir),
-            output_metadata_dir=str(metadata_dir),
-            upload_outputs_to_drive=False,
-            metadata=metadata_runtime,
-        )
+        if drive_video_file_id:
+            endpoint = f"{endpoint_root}/api/v1/ingestion/process"
+            request_payload = {
+                "source_drive_file_id": drive_video_file_id,
+                "source_filename": h265_path.name,
+                "camera_id": camera_id,
+                "recorded_start": recorded_start.isoformat(),
+                "output_basename": h265_path.name,
+                "upload_outputs_to_drive": False,
+                "metadata": metadata_runtime,
+            }
+            print(f"  POST {endpoint} using Drive file id {drive_video_file_id}")
+            response = requests.post(
+                endpoint,
+                json=request_payload,
+                headers=_tracking_headers(include_json=True),
+                timeout=(connect_timeout, read_timeout),
+            )
+        else:
+            endpoint = f"{endpoint_root}/api/v1/ingestion/upload"
+            request_payload = {
+                "source_filename": h265_path.name,
+                "camera_id": camera_id or h265_path.stem,
+                "recorded_start": recorded_start.isoformat(),
+                "output_basename": h265_path.name,
+                "metadata": json.dumps(metadata_runtime),
+            }
+            print(f"  POST {endpoint} using multipart upload")
+            with local_source_copy.open("rb") as handle:
+                response = requests.post(
+                    endpoint,
+                    data=request_payload,
+                    files={"file": (h265_path.name, handle, "video/h265")},
+                    headers=_tracking_headers(include_json=False),
+                    timeout=(connect_timeout, read_timeout),
+                )
 
-    metadata_path = Path(result["metadata_path"])
-    video_payload = result["video"]
-    people = result["people"]
+        response.raise_for_status()
+        result = response.json()
+
+    remote_video_payload = result.get("video") or {}
+    remote_people = result.get("people") or []
+    remote_metadata_name = Path(str(result.get("metadata_path") or "")).name or f"{h265_path.stem}.json"
+    metadata_path = metadata_dir / remote_metadata_name
+    video_payload = dict(remote_video_payload)
+    people = [dict(person) for person in remote_people if isinstance(person, dict)]
+
+    video_payload["compressed_path"] = str(local_queue_video_copy)
+    video_payload["metadata_path"] = str(metadata_path)
+    video_payload["processing_backend"] = "tracking_service_remote"
+    video_payload["source_filename"] = video_payload.get("source_filename") or h265_path.name
+    if camera_id and not video_payload.get("camera_id"):
+        video_payload["camera_id"] = camera_id
+
+    for person in people:
+        person["metadata_path"] = str(metadata_path)
+        person.setdefault("processing_backend", "tracking_service_remote")
+        if video_payload.get("video_id") and not person.get("video_id"):
+            person["video_id"] = video_payload["video_id"]
+        if video_payload.get("camera_id") and not person.get("camera_id"):
+            person["camera_id"] = video_payload["camera_id"]
+
+    _write_local_metadata_file(metadata_path, video_payload, people)
 
     print(f"  ✅ Metadata generated!")
     print(f"     Metadata file: {metadata_path}")
@@ -655,7 +764,7 @@ def save_to_postgresql(
     import os
     import socket
     import subprocess
-    from sqlalchemy import create_engine, select
+    from sqlalchemy import create_engine, func, select, text
     from sqlalchemy.engine import make_url
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.exc import OperationalError
@@ -731,6 +840,9 @@ def save_to_postgresql(
                 select(QueueVideoAsset).where(QueueVideoAsset.source_filename == source_filename)
             ).scalar_one_or_none()
 
+        current_queue_size = int(db.execute(select(func.count()).select_from(QueueVideoAsset)).scalar() or 0)
+        next_queue_position = current_queue_size + 1
+
         if existing is None:
             queue_asset = QueueVideoAsset(
                 video_id=queue_video_id,
@@ -738,10 +850,10 @@ def save_to_postgresql(
                 title=video_payload.get("title", f"Video {queue_video_id}"),
                 source_filename=source_filename,
                 source_mode="exchange_import",
-                queue_position=0,
-                storage_backend="google_drive",
-                available_link_video=video_view_link,
-                available_link_metadata=metadata_view_link,
+                queue_position=next_queue_position,
+                storage_backend="google_drive" if video_view_link else "local_bootstrap",
+                available_link_video=video_view_link or f"/api/v1/queue/videos/{queue_video_id}/file",
+                available_link_metadata=metadata_view_link or f"/api/v1/queue/videos/{queue_video_id}/metadata",
                 drive_video_file_id=drive_video_file_id,
                 drive_metadata_file_id=drive_metadata_file_id,
                 local_video_path=str(video_payload.get("compressed_path", "")),
@@ -756,9 +868,9 @@ def save_to_postgresql(
             queue_asset.title = video_payload.get("title", f"Video {queue_video_id}")
             queue_asset.source_filename = source_filename
             queue_asset.source_mode = "exchange_import"
-            queue_asset.storage_backend = "google_drive"
-            queue_asset.available_link_video = video_view_link
-            queue_asset.available_link_metadata = metadata_view_link
+            queue_asset.storage_backend = "google_drive" if video_view_link else "local_bootstrap"
+            queue_asset.available_link_video = video_view_link or f"/api/v1/queue/videos/{queue_video_id}/file"
+            queue_asset.available_link_metadata = metadata_view_link or f"/api/v1/queue/videos/{queue_video_id}/metadata"
             queue_asset.drive_video_file_id = drive_video_file_id
             queue_asset.drive_metadata_file_id = drive_metadata_file_id
             queue_asset.local_video_path = str(video_payload.get("compressed_path", ""))
@@ -768,9 +880,94 @@ def save_to_postgresql(
         db.commit()
         db.refresh(queue_asset)
 
+        imported_people = 0
+        updated_people = 0
+        metadata_path = str(video_payload.get("metadata_path", "") or "")
+
+        def _candidate_search_document(person: dict[str, Any]) -> str:
+            parts: list[str] = []
+            for key in ("search_text", "appearance_summary", "person_caption", "caption"):
+                text_value = str(person.get(key) or "").strip()
+                if text_value:
+                    parts.append(text_value)
+            attributes = person.get("semantic_attributes")
+            if isinstance(attributes, list):
+                cleaned = [str(item).strip() for item in attributes if str(item).strip()]
+                if cleaned:
+                    parts.append("attributes: " + ", ".join(cleaned))
+            timeline = person.get("timeline")
+            if isinstance(timeline, list):
+                actions = [
+                    str(item.get("action_summary") or "").strip()
+                    for item in timeline
+                    if isinstance(item, dict) and str(item.get("action_summary") or "").strip()
+                ]
+                if actions:
+                    parts.append("timeline: " + " ".join(actions))
+            return " ".join(parts).strip()
+
+        for person in people:
+            if not isinstance(person, dict):
+                continue
+            candidate_id = str(person.get("candidate_id") or "").strip()
+            if not candidate_id:
+                continue
+            person_params = {
+                "candidate_id": candidate_id,
+                "camera_id": person.get("camera_id"),
+                "video_id": person.get("video_id") or queue_video_id,
+                "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
+                "human_key": person.get("human_key"),
+                "frame_idx": int(person.get("frame_idx") or 0),
+                "search_text": _candidate_search_document(person),
+                "metadata_path": metadata_path,
+                "raw_metadata": json.dumps(person),
+            }
+            existing_candidate = db.execute(
+                text("SELECT id FROM person_candidates WHERE candidate_id = :candidate_id"),
+                {"candidate_id": candidate_id},
+            ).first()
+            if existing_candidate:
+                db.execute(
+                    text(
+                        """
+                        UPDATE person_candidates
+                        SET camera_id = :camera_id,
+                            video_id = :video_id,
+                            track_id = :track_id,
+                            human_key = :human_key,
+                            frame_idx = :frame_idx,
+                            search_text = :search_text,
+                            metadata_path = :metadata_path,
+                            raw_metadata = CAST(:raw_metadata AS jsonb),
+                            updated_at = NOW()
+                        WHERE candidate_id = :candidate_id
+                        """
+                    ),
+                    person_params,
+                )
+                updated_people += 1
+            else:
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO person_candidates
+                            (candidate_id, camera_id, video_id, track_id, human_key, frame_idx, search_text, metadata_path, raw_metadata)
+                        VALUES
+                            (:candidate_id, :camera_id, :video_id, :track_id, :human_key, :frame_idx, :search_text, :metadata_path, CAST(:raw_metadata AS jsonb))
+                        """
+                    ),
+                    person_params,
+                )
+                imported_people += 1
+
+        db.commit()
+
         print(f"  ✅ Saved to PostgreSQL!")
         print(f"     QueueAsset ID: {queue_asset.id}")
         print(f"     Video ID: {queue_asset.video_id}")
+        print(f"     Person candidates imported: {imported_people}")
+        print(f"     Person candidates updated: {updated_people}")
 
         return queue_asset.id
 
@@ -993,11 +1190,13 @@ def run_full_pipeline(
         metadata_path, video_payload, people = generate_metadata(
             h265_path=h265_path,
             camera_id=camera_id,
+            drive_video_file_id=drive_video.get("file_id") if upload_to_drive else None,
         )
         results["steps"]["metadata"] = {
             "metadata_path": str(metadata_path),
             "person_count": len(people),
             "video_id": video_payload.get("video_id"),
+            "processing_backend": video_payload.get("processing_backend"),
         }
 
         # ── STEP 4: Upload metadata to Drive ────────────────────
@@ -1033,18 +1232,26 @@ def run_full_pipeline(
 
         # ── STEP 6: Call LightningAI GPU ────────────────────────
         if call_lightning and upload_to_drive:
-            try:
-                lightning_result = call_lightning_ai_gpu(
-                    video_id=video_payload.get("video_id"),
-                    drive_video_file_id=drive_video["file_id"],
-                    source_filename=Path(h265_path).name,
-                    camera_id=video_payload.get("camera_id"),
-                )
-                results["steps"]["lightning_ai"] = lightning_result
-            except Exception as exc:
-                results["steps"]["lightning_ai_error"] = str(exc)
-                results["status"] = "completed_with_lightning_error"
-                print(f"  ⚠️ LightningAI step failed: {exc}")
+            if str(video_payload.get("processing_backend") or "").strip() == "tracking_service_remote":
+                results["steps"]["lightning_ai"] = {
+                    "status": "skipped",
+                    "reason": "metadata already generated by remote tracking-service ingestion",
+                    "job_id": video_payload.get("video_id"),
+                }
+                print("  ℹ️ Skipping legacy LightningAI step because metadata already came from remote tracking-service")
+            else:
+                try:
+                    lightning_result = call_lightning_ai_gpu(
+                        video_id=video_payload.get("video_id"),
+                        drive_video_file_id=drive_video["file_id"],
+                        source_filename=Path(h265_path).name,
+                        camera_id=video_payload.get("camera_id"),
+                    )
+                    results["steps"]["lightning_ai"] = lightning_result
+                except Exception as exc:
+                    results["steps"]["lightning_ai_error"] = str(exc)
+                    results["status"] = "completed_with_lightning_error"
+                    print(f"  ⚠️ LightningAI step failed: {exc}")
 
         # ── SUCCESS ──────────────────────────────────────────────
         if results.get("status") != "completed_with_lightning_error":
@@ -1146,19 +1353,29 @@ def main():
             f"Running batch in parallel with {worker_count} workers"
             f" ({'GPU NVENC' if runtime_profile['use_gpu'] else 'CPU'})"
         )
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            future_to_video = {
-                executor.submit(
-                    run_full_pipeline,
+        if worker_count == 1:
+            for video_path in videos:
+                result = run_full_pipeline(
                     input_video_path=video_path,
                     camera_id=args.camera_id,
                     upload_to_drive=not args.no_drive,
                     call_lightning=not args.no_lightning,
-                ): video_path
-                for video_path in videos
-            }
-            for future in as_completed(future_to_video):
-                all_results.append(future.result())
+                )
+                all_results.append(result)
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_to_video = {
+                    executor.submit(
+                        run_full_pipeline,
+                        input_video_path=video_path,
+                        camera_id=args.camera_id,
+                        upload_to_drive=not args.no_drive,
+                        call_lightning=not args.no_lightning,
+                    ): video_path
+                    for video_path in videos
+                }
+                for future in as_completed(future_to_video):
+                    all_results.append(future.result())
     else:
         for video_path in videos:
             print(f"\n{'='*80}")
