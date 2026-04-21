@@ -10,9 +10,13 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
+    from shared_secret_runtime import load_runtime_env
+    load_runtime_env(include_tracking_service_env=False)
 except ImportError:
     pass
 

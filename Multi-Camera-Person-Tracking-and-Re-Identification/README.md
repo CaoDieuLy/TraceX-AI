@@ -1,101 +1,206 @@
-# _Multi-Camera Person Tracking and Re-Identification_ (using video)
-[![HitCount](http://hits.dwyl.com/samihormi/https://githubcom/samihormi/Multi-Camera-Person-Tracking-and-Re-Identification.svg)](http://hits.dwyl.com/samihormi/https://githubcom/samihormi/Multi-Camera-Person-Tracking-and-Re-Identification)
-Simple model to _"Detect/Track"_ and _"Re-identify"_ individuals in different cameras/videos.
+# MCPT Video AI Platform
 
-<img align="right" img src="assets/2.gif" width="380" />  <img align="left" img src="assets/1.gif" width="380" />
-<p align="center">
-  <img src="assets/arrow.png" width="400"/>
-</p>
-<p align="center">
-  <img src="assets/3.gif" width="500"/>
-</p>
+Website quan ly video tich hop AI duoc tach theo kien truc microservice:
 
+- `frontend/`: Next.js cho end-user
+- `backend/services/api-gateway/`: FastAPI gateway cho domain/frontend
+- `backend/services/metadata-service/`: FastAPI cho auth, video, text query, PostgreSQL
+- `backend/services/tracking-service/`: AI orchestration service goi LightningAI GPU
+- `backend/legacy-engine/`: legacy ReID code duoc giu lai de tai su dung
+- `infra/postgres/`: khoi tao PostgreSQL
 
-# # Introduction
-This repository is forked from https://githubcom/samihormi/Multi-Camera-Person-Tracking-and-Re-Identification and adapted to the specific needs of a project that needs Multi-Person-ReID.
-The following ReadMe stands for itself and is still valid. However whats added to the initial coding base is stated here:
+## Chuc nang da scaffold
 
-- Select the people you want to track:
-    - After all videos are processed all IDs which were found are displayed to select if it should be tracked with a "y" or "no" in the console.
-    - Everything except the IDs bounding box selected with "y" is blacked out in the video - This ensures that in later processing stages only the correct person is subject to further evaluations.
-- Speed up the process:
-    - Include the option to look only at every n-th frame and apply the bounding-box to every following (n-1)th frame. 
+- Dang ky va dang nhap tai khoan bang JWT
+- Upload video vao local Docker volume hoac dang ky URL/path san co
+- PostgreSQL chi luu metadata va duong dan `storage_path`
+- Tao text query theo video
+- API gateway goi AI service, AI service goi LightningAI endpoint
+- Docker compose cho Next.js, FastAPI, PostgreSQL
+- GitHub Actions scaffold cho CI/CD deploy VPS
 
+## Kien truc
 
-This project aims to track people in different videos accounting for different angles.
-
-
-The framework used to accomplish this task relies on MOT and ReID to track and re-identify ID's of humans, respectively.
-The tracking can be completed using YOLO_v3 or YOLO_v4 and ReID relies on KaiyangZhou's Torchreid library.
-
-# # Installation
- - Download [Anaconda](https://www.anaconda.com/products/individual) if it is not installed on your machine
-
-
-
- - Clone the repository
-```python
-git clone https://github.com/danielkrauss2/Multi-Camera-Person-Tracking-and-Re-Identification
-```
-- Create a project environment
-```python
-cd Multi-Camera-Person-Tracking-and-Re-Identification
-```
-- If not already happened, install miniconda
-```
-mkdir -p ~/miniconda3
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
-bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
-rm ~/miniconda3/miniconda.sh
-```
-- Activate the environment
-```
-source ~/miniconda3/bin/activate
-```
-- Create a new environment
-```
-conda init --all
-conda create -n py37 python=3.7 anaconda
+```text
+Next.js
+   |
+   v
+API Gateway (FastAPI)
+   |
+   +--> Metadata Service (FastAPI + PostgreSQL)
+   |
+   +--> Tracking / AI Service (FastAPI -> LightningAI GPU)
 ```
 
-- Install dependencies
-```python
-pip install -r requirements.txt
-```
-- Install torch and torchvision based on the cuda version of your machine
-```python
-conda install pytorch torchvision cudatoolkit -c pytorch
-```
-# # Convert models
-- Download the YOLO models for [YOLO_v3](https://drive.google.com/file/d/18fmQMegNsAzPte7tJeCxwf1iE8JUTQhQ/view?usp=sharing) and [YOLO_v4](https://drive.google.com/file/d/1w9furPagm3KytRW2uNooLcBoiYWDwbop/view?usp=sharing) and add them to /model_data/weights/
-* YOLO_v3
-```python
-python convert_y3.py model_data\weights\yolov3.weights model_data\models\yolov3.h5
-```
-* YOLO_v4
-```python
-python convert_y4.py model_data\weights\yolov4.weights model_data\models\yolov4.h5
+## Chay local
+
+```bash
+docker compose --env-file ../secrets/shared.env up --build
 ```
 
-# Pre-trained models (.h5) (If you want to start right away)
-- Download the Keras models for [YOLO_v3](https://drive.google.com/file/d/1a7JI-A920lrdt6OKya-qCXx-5ZUWvkMg/view?usp=sharing) and [YOLO_v4](https://drive.google.com/file/d/1pwFo4aHKPi0ztpL5tEYaXIr8RltYYQeY/view?usp=sharing) and add them to \model_data\models\
+Mac dinh:
 
-- Download either one of the following Torchreid models [1](https://drive.google.com/file/d/1EtkBARD398UW93HwiVO9x3mByr0AeWMg/view?usp=sharing),[2](https://drive.google.com/open?id=15Ayri_sHtrctJ1Zb8qERjvdi66y6QaI4) and add them to \model_data\models\ (you might have to change the path in reid.py)
+- Frontend: `http://localhost:3000`
+- API Gateway: `http://localhost:8000`
+- Metadata Service: `http://localhost:8001`
+- Tracking Service: `http://localhost:8002`
+- PostgreSQL: `localhost:5432`
 
-# # Demo
+## Bien moi truong quan trong
 
-You can try out your own videos by running tracking_and_reid.py.
-You should specify the path of the videos and the version of YOLO you would like to use (v3 or v4)
+Xem [`.env.example`](./.env.example).
 
-```python
-python tracking_and_reid.py --videos videos\init\Double1.mp4 videos\init\Single1.mp4 --version v3
+Canh bao:
+
+- Muon goi LightningAI that, set:
+  - `LIGHTNING_API_BASE_URL`
+  - `LIGHTNING_API_ENDPOINT`
+  - `LIGHTNING_API_TOKEN`
+
+## Queue Google Drive va xu ly video
+
+Kien truc queue da duoc tach thanh 2 vai tro:
+
+- `queue-worker`: poll `VinUni/Import_New`, download file, goi `tracking-service`, upload `.h265` va metadata len `VinUni/Queue`, xu ly FIFO, cap nhat PostgreSQL.
+- `tracking-service`: nhan job ingestion video qua `POST /api/v1/ingestion/process`, chiu trach nhiem detect / re-id / sinh metadata chi tiet.
+
+API moi o metadata-service:
+
+- `GET /api/v1/queue/videos`
+- `POST /api/v1/queue/bootstrap`
+- `POST /api/v1/queue/process-imports`
+
+Chay bootstrap tu folder nguon local:
+
+```bash
+docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --source-dir /workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos --once
 ```
 
-# # Acknowledgement
-This model is build on top of the incredible work done in the following projects:
-  * https://github.com/samihormi/Multi-Camera-Person-Tracking-and-Re-Identification
-  * https://github.com/nwojke/cosine_metric_learning
-  * https://github.com/KaiyangZhou/deep-person-reid
-  * https://github.com/Qidian213/deep_sort_yolov3
-  * https://github.com/Ma-Dan/keras-yolo4
-  * https://github.com/lyrgwlr/Human-tracking-multicam
+Neu muon xoa source `.h265`/`.hevc` local sau khi da dua len Queue Drive:
+
+```bash
+docker compose run --rm queue-worker python -m app.queue_worker --bootstrap --source-dir /workspace/data/NVIDIA_SmartSpaces/MTMC_Tracking_2025/val/Hospital_000/videos --delete-source --once
+```
+
+Dong bo `Import_New` lien tuc:
+
+```bash
+docker compose up -d queue-worker
+```
+
+Luu y:
+
+- Google Drive hien dung OAuth2 user token trong `../secrets/oauth/oauth2_credentials.json` va `../secrets/oauth/oauth2_token.pickle`.
+- Metadata se duoc sinh boi processor thuc te khi `tracking-service`/LightningAI duoc cau hinh day du.
+
+## CI/CD VPS
+
+Workflow mau nam tai [`.github/workflows/mcpt-ci-cd.yml`](../.github/workflows/mcpt-ci-cd.yml).
+
+Can cung cap GitHub Secrets sau:
+
+- `VPS_HOST`
+- `VPS_PORT`
+- `VPS_USERNAME`
+- `VPS_SSH_KEY`
+- `VPS_APP_DIR`
+
+Pipeline hien tai:
+
+1. Build Docker stack
+2. Copy source len VPS
+3. Chay `docker compose up -d --build` tren VPS
+
+## Deploy production len `search-engine-119.smartnovi.tech`
+
+Repo da co san bo script VPS va nginx host-level de deploy end-to-end:
+
+- `infra/vps/provision.sh`: cai Docker, nginx, certbot
+- `infra/vps/deploy.sh`: build va chay stack Docker
+- `infra/vps/configure_nginx.sh`: tao virtual host nginx cho domain
+- `infra/vps/enable_https.sh`: bat Let's Encrypt
+- `infra/vps/.env.vps.example`: mau env production
+
+Kien truc production khuyen nghi:
+
+- VPS chay `frontend`, `api-gateway`, `metadata-service`, `queue-worker`, `postgres`
+- `tracking-service` local la tuy chon va mac dinh khong bat
+- `TRACKING_SERVICE_URL` tro sang LightningAI GPU public endpoint
+- nginx tren host reverse proxy:
+  - `/` -> Next.js frontend
+  - `/api/` -> FastAPI api-gateway
+
+Trinh tu deploy tren Ubuntu VPS:
+
+```bash
+apt update
+apt install -y git
+mkdir -p /opt/mcpt
+cd /opt/mcpt
+git clone <your-repo-url> app
+cd app
+bash infra/vps/provision.sh
+mkdir -p secrets
+cp infra/vps/.env.vps.example .env
+```
+
+Copy file service-account Google Drive vao:
+
+```bash
+/opt/mcpt/secrets/oauth/oauth2_credentials.json
+/opt/mcpt/secrets/oauth/oauth2_token.pickle
+```
+
+Sua `.env` production:
+
+- `POSTGRES_PASSWORD`
+- `JWT_SECRET_KEY`
+- `LETSENCRYPT_EMAIL`
+- `GOOGLE_DRIVE_VINUNI_FOLDER_ID`
+- `LIGHTNING_API_TOKEN`
+- `TRACKING_SERVICE_URL`
+- `LIGHTNING_API_BASE_URL`
+
+Sau do deploy app:
+
+```bash
+cd /opt/mcpt/app
+bash infra/vps/deploy.sh
+```
+
+Cau hinh nginx cho domain:
+
+```bash
+cd /opt/mcpt/app
+bash infra/vps/configure_nginx.sh search-engine-119.smartnovi.tech 13000 18000
+```
+
+Bat HTTPS:
+
+```bash
+cd /opt/mcpt/app
+bash infra/vps/enable_https.sh search-engine-119.smartnovi.tech your-email@example.com
+```
+
+Kiem tra:
+
+- `https://search-engine-119.smartnovi.tech`
+- `https://search-engine-119.smartnovi.tech/api/v1/overview`
+
+Ghi chu production:
+
+- Port container tren VPS duoc bind vao `127.0.0.1` de chi co nginx host moi public ra Internet.
+- Frontend production mac dinh goi API cung origin, khong con phu thuoc `localhost:8000`.
+- Neu sau nay muon bat `tracking-service` local co GPU tren VPS, chay them:
+
+```bash
+COMPOSE_PROFILES=local-gpu docker compose up -d --build tracking-service
+```
+
+## Mo rong tiep theo
+
+- Gan domain vao reverse proxy/Nginx tren VPS
+- Chuyen local volume sang object storage (S3/MinIO)
+- Kich hoat LightningAI GPU endpoint production
+- Them migration Alembic va role-based access
+- Xem tai lieu `../docs/ACCURACY_FIRST_REARCHITECTURE.md` de theo profile `accuracy_first`

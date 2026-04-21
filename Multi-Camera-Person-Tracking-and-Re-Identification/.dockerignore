@@ -1,0 +1,10 @@
+.git
+.gitignore
+frontend/node_modules
+frontend/.next
+**/__pycache__
+**/.pytest_cache
+postgres_data
+backend/legacy-engine/data/videos
+backend/legacy-engine/data/db
+storage

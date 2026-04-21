@@ -3,14 +3,45 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
+*.egg
+.pytest_cache/
+
+# Builds
 dist/
 build/
-*.egg
 
 # Virtual environments
 venv/
 env/
-.env/
+.env
+.env.*
+**/.env
+**/.env.*
+.env.local
+.env.*.local
+!**/.env.example
+!**/.env.*.example
+!**/.env.vps.example
+
+# Secrets / credentials
+oauth2_credentials.json
+oauth2_token.pickle
+**/credentials/
+**/*service-account*.json
+**/*drive-sa*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+secret_backups/
+*.tar.gz.enc.manifest.txt
+*.tar.gz
+*.tgz
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
 
 # Video files (large)
 *.mp4
@@ -21,14 +52,14 @@ env/
 *.flv
 *.webm
 
-# Data directories (large datasets)
-data/NVIDIA_SmartSpaces/
-data/Hospital_Scene_Data/
-data/db/
-data/videos/
+# Legacy engine data
+backend/legacy-engine/data/NVIDIA_SmartSpaces/
+backend/legacy-engine/data/Hospital_Scene_Data/
+backend/legacy-engine/data/db/
+backend/legacy-engine/data/videos/
 
 # Model weights & binaries
-model_data/models/*
+backend/legacy-engine/model_data/models/*
 *.weights
 *.h5
 *.onnx
@@ -37,8 +68,9 @@ model_data/models/*
 *.pkl
 *.tflite
 
-# Demo videos
-videos/*
+# Docker / local infra
+postgres_data/
+storage/
 
 # OS files
 .DS_Store
@@ -52,6 +84,10 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Google Drive credentials (SENSITIVE - DO NOT COMMIT)
+backend/services/tracking-service/credentials/
+backend/services/metadata-service/credentials/
 
 # Logs & outputs
 *.log

@@ -1,0 +1,38 @@
+[
+  {
+    "input_video": "/teamspace/studios/this_studio/A20-App-119/Multi-Camera-Person-Tracking-and-Re-Identification/videos/Camera_02.mp4",
+    "camera_id": null,
+    "timestamp": "2026-04-19T13:20:36.997175+00:00",
+    "steps": {
+      "input_prepare": {
+        "input_path": "/teamspace/studios/this_studio/A20-App-119/Multi-Camera-Person-Tracking-and-Re-Identification/videos/Camera_02.mp4",
+        "prepared_path": "/teamspace/studios/this_studio/A20-App-119/Multi-Camera-Person-Tracking-and-Re-Identification/videos/Camera_02.h265",
+        "size_mb": 30.943683624267578
+      },
+      "upload_video": {
+        "file_id": "1EMRt4zKXkHBxT9XfYSIdajux6TuHvcZE",
+        "view_link": "https://drive.google.com/file/d/1EMRt4zKXkHBxT9XfYSIdajux6TuHvcZE/view?usp=drivesdk",
+        "download_link": "https://drive.google.com/uc?id=1EMRt4zKXkHBxT9XfYSIdajux6TuHvcZE&export=download"
+      },
+      "metadata": {
+        "metadata_path": "/tmp/mcpt_exchange_3o_l_mip/metadata/Camera_02_20260419T132052Z.json",
+        "person_count": 85,
+        "video_id": "Camera_02_20260419T132052Z.h265"
+      },
+      "upload_metadata": {
+        "file_id": "1tHFC9n8scgk33MY_M-wECjtsLZ004jVt",
+        "view_link": "https://drive.google.com/file/d/1tHFC9n8scgk33MY_M-wECjtsLZ004jVt/view?usp=drivesdk",
+        "download_link": "https://drive.google.com/uc?id=1tHFC9n8scgk33MY_M-wECjtsLZ004jVt&export=download"
+      },
+      "postgres": {
+        "queue_asset_id": 1,
+        "video_id": "Camera_02_20260419T132052Z.h265"
+      },
+      "lightning_ai_error": "404 Client Error: Not Found for url: https://8000-01knx6m0mcz130wc8qs9pg9wje.cloudspaces.litng.ai/api/v1/ingestion/process"
+    },
+    "status": "completed_with_lightning_error",
+    "video_id": "Camera_02_20260419T132052Z.h265",
+    "drive_video_link": "https://drive.google.com/file/d/1EMRt4zKXkHBxT9XfYSIdajux6TuHvcZE/view?usp=drivesdk",
+    "drive_metadata_link": "https://drive.google.com/file/d/1tHFC9n8scgk33MY_M-wECjtsLZ004jVt/view?usp=drivesdk"
+  }
+]
