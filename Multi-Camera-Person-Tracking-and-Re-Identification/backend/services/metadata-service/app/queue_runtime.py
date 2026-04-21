@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,7 +82,14 @@ class QueueSyncService:
 
     def _query_single(self, query: str, fields: str = "files(id, name)") -> list[dict]:
         service = self._build_drive_service()
-        response = service.files().list(q=query, spaces="drive", fields=f"files({fields})", pageSize=200).execute()
+        response = service.files().list(
+            q=query,
+            spaces="drive",
+            fields=f"files({fields})",
+            pageSize=200,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
         return list(response.get("files") or [])
 
     def _find_child_folder(self, parent_id: str, name: str) -> dict | None:
@@ -101,6 +109,7 @@ class QueueSyncService:
         created = service.files().create(
             body={"name": name, "mimeType": DRIVE_FOLDER_MIME_TYPE, "parents": [parent_id]},
             fields="id",
+            supportsAllDrives=True,
         ).execute()
         return str(created["id"])
 
@@ -135,7 +144,12 @@ class QueueSyncService:
             return
         service = self._build_drive_service()
         try:
-            service.permissions().create(fileId=file_id, body={"type": "anyone", "role": "reader"}, fields="id").execute()
+            service.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
         except Exception as exc:  # pragma: no cover
             LOGGER.warning("Could not set public Drive permission for %s: %s", file_id, exc)
 
@@ -144,7 +158,7 @@ class QueueSyncService:
             return
         service = self._build_drive_service()
         try:
-            service.files().delete(fileId=file_id).execute()
+            service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
         except Exception as exc:
             LOGGER.warning("Failed to delete Drive file %s: %s", file_id, exc)
 
@@ -169,11 +183,12 @@ class QueueSyncService:
 
     def _upload_to_drive(self, local_path: Path, parent_id: str, name: str, mime_type: str) -> dict[str, str]:
         service = self._build_drive_service()
-        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=False)
+        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
         created = service.files().create(
             body={"name": name, "parents": [parent_id]},
             media_body=media,
             fields="id, name, webViewLink, webContentLink",
+            supportsAllDrives=True,
         ).execute()
         file_id = str(created["id"])
         self._ensure_public_read(file_id)
@@ -185,7 +200,7 @@ class QueueSyncService:
 
     def _download_drive_file(self, file_id: str, target_path: Path) -> None:
         service = self._build_drive_service()
-        request = service.files().get_media(fileId=file_id)
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         with target_path.open("wb") as handle:
             downloader = MediaIoBaseDownload(handle, request)
@@ -207,6 +222,18 @@ class QueueSyncService:
         destination_video_folder_id: str | None = None,
         destination_metadata_folder_id: str | None = None,
     ) -> dict:
+        endpoint_root = settings.tracking_service_url.rstrip("/")
+        if settings.tracking_service_prefer_local and settings.tracking_service_local_url:
+            try:
+                local_url = settings.tracking_service_local_url.rstrip("/")
+                parsed_host = local_url.split("://", 1)[-1].split("/", 1)[0]
+                host, _, raw_port = parsed_host.partition(":")
+                port = int(raw_port or 80)
+                with socket.create_connection((host, port), timeout=1.5):
+                    endpoint_root = local_url
+            except Exception:
+                endpoint_root = settings.tracking_service_url.rstrip("/")
+
         payload = {
             "source_path": str(source_path) if source_path is not None else None,
             "source_drive_file_id": source_drive_file_id,
@@ -224,7 +251,7 @@ class QueueSyncService:
                 "pipeline_profile": "accuracy_first",
             },
         }
-        endpoint = f"{settings.tracking_service_url.rstrip('/')}/api/v1/ingestion/process"
+        endpoint = f"{endpoint_root}/api/v1/ingestion/process"
         headers: dict[str, str] = {}
         if settings.lightning_api_token:
             headers[settings.lightning_api_auth_header] = f"{settings.lightning_api_auth_prefix}{settings.lightning_api_token}"
@@ -254,25 +281,26 @@ class QueueSyncService:
     def _process_import_drive_item(self, import_file: dict) -> dict:
         original_name = str(import_file.get("name") or "imported_video.h265")
         source_file_id = str(import_file["id"])
-        local_source_path = self.local_download_dir / original_name
-        self._download_drive_file(source_file_id, local_source_path)
         recorded_start = datetime.now(timezone.utc).replace(microsecond=0)
         camera_id = self._slug(Path(original_name).stem)
         original_suffix = Path(original_name).suffix.lower()
         output_basename = f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}{original_suffix}"
         result = self._request_tracking_processing(
-            source_path=local_source_path,
+            source_drive_file_id=source_file_id,
+            source_filename=original_name,
             camera_id=camera_id,
             recorded_start=recorded_start,
             output_basename=output_basename,
             source_mode="google_drive_import",
+            # Keep Drive writes centralized in metadata-service so import flow
+            # performs a single upload per artifact and avoids duplicate files.
+            upload_outputs_to_drive=False,
         )
         return {
             "result": result,
             "source_filename": original_name,
             "source_mode": "google_drive_import",
             "source_file_id": source_file_id,
-            "local_source_path": local_source_path,
         }
 
     def list_import_files(self) -> list[dict]:
@@ -302,8 +330,8 @@ class QueueSyncService:
         current_rows = get_queue_video_rows(session)
         video = result["video"]
         people = result.get("people") or []
-        compressed_path = Path(result["compressed_path"])
-        metadata_path = Path(result["metadata_path"])
+        compressed_path_value = result.get("compressed_path")
+        metadata_path_value = result.get("metadata_path")
         layout = self.ensure_drive_layout()
 
         for row in list(current_rows):
@@ -329,8 +357,23 @@ class QueueSyncService:
             row.queue_position = index
             session.add(row)
 
-        uploaded_video = self._upload_to_drive(compressed_path, layout["queue_h265_id"], compressed_path.name, "video/h265")
-        uploaded_metadata = self._upload_to_drive(metadata_path, layout["queue_metadata_id"], metadata_path.name, "application/json")
+        drive_video_file_id = str(result.get("drive_video_file_id") or "").strip() or None
+        drive_metadata_file_id = str(result.get("drive_metadata_file_id") or "").strip() or None
+        drive_video_link = str(result.get("drive_video_link") or "").strip() or None
+        drive_metadata_link = str(result.get("drive_metadata_link") or "").strip() or None
+
+        if drive_video_file_id and drive_metadata_file_id and drive_video_link and drive_metadata_link:
+            uploaded_video = {"file_id": drive_video_file_id, "view_link": drive_video_link}
+            uploaded_metadata = {"file_id": drive_metadata_file_id, "view_link": drive_metadata_link}
+        else:
+            if not compressed_path_value or not metadata_path_value:
+                raise RuntimeError(
+                    "Tracking result missing both Drive output links and local output paths."
+                )
+            compressed_path = Path(str(compressed_path_value))
+            metadata_path = Path(str(metadata_path_value))
+            uploaded_video = self._upload_to_drive(compressed_path, layout["queue_h265_id"], compressed_path.name, "video/h265")
+            uploaded_metadata = self._upload_to_drive(metadata_path, layout["queue_metadata_id"], metadata_path.name, "application/json")
 
         upsert_queue_video_asset(
             session,
@@ -345,11 +388,11 @@ class QueueSyncService:
             source_mode=source_mode,
             drive_video_file_id=uploaded_video["file_id"],
             drive_metadata_file_id=uploaded_metadata["file_id"],
-            local_video_path=str(compressed_path),
-            local_metadata_path=str(metadata_path),
+            local_video_path=str(compressed_path_value or ""),
+            local_metadata_path=str(metadata_path_value or ""),
             raw_video_metadata=video,
         )
-        upsert_person_candidates(session, people, str(metadata_path))
+        upsert_person_candidates(session, people, str(metadata_path_value or ""))
         session.commit()
         return evicted_video_ids
 
@@ -435,7 +478,6 @@ class QueueSyncService:
                 )
             )
             self._delete_drive_file(item["source_file_id"])
-            Path(item["local_source_path"]).unlink(missing_ok=True)
             imported_source_files.append(item["source_filename"])
             processed_videos += 1
 

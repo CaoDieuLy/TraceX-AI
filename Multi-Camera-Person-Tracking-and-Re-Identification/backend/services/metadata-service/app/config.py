@@ -24,6 +24,10 @@ A20_ROOT = _detect_a20_root()
 if A20_ROOT and str(A20_ROOT) not in sys.path:
     sys.path.insert(0, str(A20_ROOT))
 
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_ROOT", str(_HERE.parent.parent.parent.parent.parent))
+).resolve()
+
 loaded_envs: list[Path] = []
 
 
@@ -73,8 +77,10 @@ class Settings(BaseSettings):
     app_name: str = "mcpt-metadata-service"
     api_prefix: str = "/api/v1"
     database_url: str = _build_default_database_url()
-    legacy_metadata_dir: str = "/workspace/backend/legacy-engine/data/metadata"
+    legacy_metadata_dir: str = str(PROJECT_ROOT / "backend" / "legacy-engine" / "data" / "metadata")
     tracking_service_url: str = "http://tracking-service:8000"
+    tracking_service_local_url: str = "http://127.0.0.1:8000"
+    tracking_service_prefer_local: bool = True
     lightning_api_token: str = ""
     lightning_api_auth_header: str = "Authorization"
     lightning_api_auth_prefix: str = "Bearer "
@@ -82,9 +88,9 @@ class Settings(BaseSettings):
     jwt_secret_key: str = os.getenv("JWT_SECRET_KEY", "")
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24
-    video_storage_root: str = "/workspace/storage/videos"
+    video_storage_root: str = str(PROJECT_ROOT / "storage" / "videos")
     default_storage_backend: str = "local_volume"
-    queue_local_root: str = "/workspace/storage/queue"
+    queue_local_root: str = str(PROJECT_ROOT / "storage" / "queue")
     queue_max_size: int = 32
     queue_poll_interval_seconds: int = 30
     queue_parallel_jobs: int = 4

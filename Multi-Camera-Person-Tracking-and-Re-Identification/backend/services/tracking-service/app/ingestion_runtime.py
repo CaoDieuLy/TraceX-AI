@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,19 @@ for candidate in [Path(os.getenv("A20_ROOT", "")).expanduser() if os.getenv("A20
         break
 
 from shared_secret_runtime import build_google_drive_oauth_service  # noqa: E402
+
+_SHARED_VLM_ENGINE = None
+_SHARED_VLM_ENGINE_LOCK = threading.Lock()
+
+
+def _metadata_int(metadata: dict[str, Any], key: str, default: int) -> int:
+    raw_value = metadata.get(key)
+    if raw_value in (None, ""):
+        return default
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return default
 
 
 class VideoIngestionRuntime:
@@ -78,23 +92,35 @@ class VideoIngestionRuntime:
         metadata = _dict_or_empty(metadata)
         profile_name = str(metadata.get("pipeline_profile") or settings.pipeline_profile).strip() or settings.pipeline_profile
         profile = resolve_pipeline_profile(profile_name, _dict_or_empty(metadata.get("hyperparameter_overrides")))
+        gpu_count = max(0, _metadata_int(metadata, "gpu_count", settings.gpu_count))
+        host_cpu_count = max(1, _metadata_int(metadata, "host_cpu_count", settings.host_cpu_count))
+        host_ram_gb = max(1, _metadata_int(metadata, "host_ram_gb", settings.host_ram_gb))
         hardware_profile, execution_plan = resolve_execution_plan(
             pipeline_profile=profile,
             gpu_profile_name=str(metadata.get("gpu_hardware_profile") or settings.gpu_hardware_profile),
             gpu_profile_overrides=_dict_or_empty(metadata.get("gpu_hardware_overrides")),
-            gpu_count=settings.gpu_count,
-            host_cpu_count=settings.host_cpu_count,
-            host_ram_gb=settings.host_ram_gb,
+            gpu_count=gpu_count,
+            host_cpu_count=host_cpu_count,
+            host_ram_gb=host_ram_gb,
         )
         return profile, hardware_profile, execution_plan
 
     def _get_vlm_engine(self):
+        global _SHARED_VLM_ENGINE
+
         if self._vlm_engine is not None:
             return self._vlm_engine
-        with legacy_workdir():
-            from src_vlm.vlm_engine import VLM_Metadata_Engine
+        if _SHARED_VLM_ENGINE is not None:
+            self._vlm_engine = _SHARED_VLM_ENGINE
+            return self._vlm_engine
 
-            self._vlm_engine = VLM_Metadata_Engine(use_mock=False)
+        with _SHARED_VLM_ENGINE_LOCK:
+            if _SHARED_VLM_ENGINE is None:
+                with legacy_workdir():
+                    from src_vlm.vlm_engine import VLM_Metadata_Engine
+
+                    _SHARED_VLM_ENGINE = VLM_Metadata_Engine(use_mock=False)
+            self._vlm_engine = _SHARED_VLM_ENGINE
         return self._vlm_engine
 
     def _build_drive_service(self):
@@ -122,13 +148,14 @@ class VideoIngestionRuntime:
                 fileId=file_id,
                 body={"type": "anyone", "role": "reader"},
                 fields="id",
+                supportsAllDrives=True,
             ).execute()
         except Exception:
             pass
 
     def _download_drive_file(self, file_id: str, target_path: Path) -> None:
         service = self._build_drive_service()
-        request = service.files().get_media(fileId=file_id)
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         import io
         with target_path.open("wb") as handle:
@@ -140,11 +167,12 @@ class VideoIngestionRuntime:
 
     def _upload_to_drive(self, local_path: Path, parent_id: str, mime_type: str) -> dict[str, str]:
         service = self._build_drive_service()
-        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=False)
+        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
         created = service.files().create(
             body={"name": local_path.name, "parents": [parent_id]},
             media_body=media,
             fields="id, webViewLink, webContentLink",
+            supportsAllDrives=True,
         ).execute()
         file_id = str(created["id"])
         self._ensure_public_read(file_id)
