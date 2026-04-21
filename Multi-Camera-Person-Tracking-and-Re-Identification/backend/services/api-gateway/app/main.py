@@ -26,6 +26,25 @@ def _forward_auth_headers(request: Request) -> dict[str, str]:
     return headers
 
 
+def _service_auth_headers() -> dict[str, str]:
+    token = settings.lightning_api_token.strip()
+    if not token:
+        return {}
+    header_name = settings.lightning_api_auth_header.strip() or "Authorization"
+    auth_prefix = settings.lightning_api_auth_prefix
+    if auth_prefix and not auth_prefix.endswith(" "):
+        auth_prefix = f"{auth_prefix} "
+    return {header_name: f"{auth_prefix}{token}".strip()}
+
+
+def _tracking_service_headers(request: Request | None = None) -> dict[str, str]:
+    if request is not None:
+        forwarded = _forward_auth_headers(request)
+        if forwarded:
+            return forwarded
+    return _service_auth_headers()
+
+
 async def _get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.get(url, params=params, headers=headers)
@@ -56,7 +75,10 @@ async def healthcheck() -> dict:
 async def overview() -> dict:
     try:
         metadata = await _get_json(f"{settings.metadata_service_url}/api/v1/overview")
-        ai = await _get_json(f"{settings.tracking_service_url}/api/v1/pipeline/config")
+        ai = await _get_json(
+            f"{settings.tracking_service_url}/api/v1/pipeline/config",
+            headers=_tracking_service_headers(),
+        )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Downstream service error: {exc}") from exc
     return {"metadata": metadata, "ai": ai}
@@ -176,7 +198,11 @@ async def run_video_query(payload: dict[str, Any], request: Request) -> dict:
             "query_text": created_query["query_text"],
             "metadata": {"gateway_source": "api-gateway"},
         }
-        ai_result = await _post_json(f"{settings.tracking_service_url}/api/v1/ai/process", ai_payload)
+        ai_result = await _post_json(
+            f"{settings.tracking_service_url}/api/v1/ai/process",
+            ai_payload,
+            headers=_tracking_service_headers(request),
+        )
         updated_query = await _patch_json(
             f"{settings.metadata_service_url}/api/v1/video-queries/{created_query['query_id']}",
             {
@@ -194,9 +220,13 @@ async def run_video_query(payload: dict[str, Any], request: Request) -> dict:
 
 
 @app.post("/api/v1/ai/process")
-async def ai_process(payload: dict[str, Any]) -> dict:
+async def ai_process(payload: dict[str, Any], request: Request) -> dict:
     try:
-        return await _post_json(f"{settings.tracking_service_url}/api/v1/ai/process", payload)
+        return await _post_json(
+            f"{settings.tracking_service_url}/api/v1/ai/process",
+            payload,
+            headers=_tracking_service_headers(request),
+        )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:
@@ -263,8 +293,12 @@ async def queue_process_imports(payload: dict[str, Any] | None = None) -> dict:
 
 
 @app.post("/api/v1/tracking/run")
-async def tracking_run(payload: dict[str, Any]) -> dict:
+async def tracking_run(payload: dict[str, Any], request: Request) -> dict:
     try:
-        return await _post_json(f"{settings.tracking_service_url}/api/v1/tracking/run", payload)
+        return await _post_json(
+            f"{settings.tracking_service_url}/api/v1/tracking/run",
+            payload,
+            headers=_tracking_service_headers(request),
+        )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Tracking service error: {exc}") from exc

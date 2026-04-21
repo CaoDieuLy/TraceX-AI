@@ -10,6 +10,12 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+os.environ.setdefault("OPENCV_VIDEOIO_DEBUG", "0")
+os.environ.setdefault("OPENCV_VIDEOCAPTURE_DEBUG", "0")
+os.environ.setdefault("OPENCV_FFMPEG_DEBUG", "0")
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -17,6 +23,11 @@ import torch
 from ultralytics import YOLO
 import open_clip
 from transformers import AutoProcessor, AutoModelForImageTextToText, pipeline
+
+try:
+    cv2.setLogLevel(getattr(cv2, "LOG_LEVEL_ERROR", 2))
+except Exception:
+    pass
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
@@ -666,8 +677,6 @@ def _build_detected_people(
         max_age_seconds=8.0,
         min_frames_to_confirm=4,
     )
-    itself_engine = ITSELFSearchEngineLite()
-
     stride = _sample_stride(fps, DEFAULT_DETECTION_FPS)
     frame_idx = 0
 
@@ -793,12 +802,14 @@ def _build_detected_people(
     _apply_person_captions(candidates, compressed_path, vlm_engine, crop_map=representative_crops)
 
     # ── STEP 6: ITSELF-lite Fine-Grained Features ────────────────
+    # Reuse the already-loaded OpenCLIP ReID backbone instead of instantiating
+    # a second identical model on the same GPU for each video.
     itself_jobs = [(candidate, representative_crops.get(candidate["candidate_id"])) for candidate in candidates]
     valid_itself_jobs = [(candidate, crop) for candidate, crop in itself_jobs if crop is not None]
     itself_features_batch = np.zeros((0, 512), dtype=np.float32)
     if valid_itself_jobs:
         try:
-            itself_features_batch = itself_engine.extract_features_batch([crop for _, crop in valid_itself_jobs])
+            itself_features_batch = reid_extractor.extract_batch([crop for _, crop in valid_itself_jobs])
         except Exception:
             itself_features_batch = np.zeros((0, 512), dtype=np.float32)
     for candidate, features in zip([candidate for candidate, _ in valid_itself_jobs], itself_features_batch):
