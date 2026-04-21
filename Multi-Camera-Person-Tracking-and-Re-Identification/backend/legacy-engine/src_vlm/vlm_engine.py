@@ -1,8 +1,19 @@
 import os
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+os.environ.setdefault("OPENCV_VIDEOIO_DEBUG", "0")
+os.environ.setdefault("OPENCV_VIDEOCAPTURE_DEBUG", "0")
+os.environ.setdefault("OPENCV_FFMPEG_DEBUG", "0")
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")
+
 import cv2
 from PIL import Image
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
+
+try:
+    cv2.setLogLevel(getattr(cv2, "LOG_LEVEL_ERROR", 2))
+except Exception:
+    pass
 
 try:
     import torch

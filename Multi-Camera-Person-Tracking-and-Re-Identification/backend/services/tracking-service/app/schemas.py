@@ -79,3 +79,31 @@ class VideoIngestionResponse(BaseModel):
     people: list[dict[str, Any]] = Field(default_factory=list)
     person_count: int
     processed_at: datetime
+
+
+class CandidateSearchRequest(BaseModel):
+    query_text: str = Field(min_length=1, max_length=4000)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    limit: int = Field(default=5, ge=1, le=50)
+
+
+class CandidateSearchResponse(BaseModel):
+    query_text: str
+    count: int
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CandidateTrackRequest(BaseModel):
+    selected_candidate_id: str = Field(min_length=1, max_length=255)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    candidate_ids: list[str] = Field(default_factory=list)
+    query_text: str | None = Field(default=None, max_length=4000)
+    max_segments_per_candidate: int = Field(default=2, ge=1, le=8)
+
+
+class CandidateTrackResponse(BaseModel):
+    artifact_id: str
+    video_url: str
+    manifest_url: str
+    selected_candidate_id: str
+    manifest: dict[str, Any]

@@ -108,7 +108,7 @@ HARDWARE_PROFILES: dict[str, dict] = {
         "allow_tf32": True,
         "cudnn_benchmark": True,
         "ffmpeg_hevc_preset": "p1",
-        "exchange_max_workers": 4,
+        "exchange_max_workers": 6,
         "torch_thread_cap": 32,
         "execution_notes": [
             "Use one GPU-serving process per physical GPU and saturate the card with multiple CUDA streams.",

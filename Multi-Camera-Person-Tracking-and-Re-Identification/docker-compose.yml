@@ -30,7 +30,7 @@ services:
       MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
       POSTGRES_HOST: postgres
       PYTHONPATH: /workspace/a20-root
-      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
+      TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL}
       UVICORN_WORKERS: ${METADATA_UVICORN_WORKERS:-4}
     depends_on:
       postgres:
@@ -58,7 +58,7 @@ services:
       PYTHONPATH: /workspace/a20-root
       QUEUE_PARALLEL_JOBS: ${QUEUE_PARALLEL_JOBS:-4}
       QUEUE_DOWNLOAD_WORKERS: ${QUEUE_DOWNLOAD_WORKERS:-4}
-      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
+      TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL}
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,7 +114,7 @@ services:
       A20_ROOT: /workspace/a20-root
       MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
       PYTHONPATH: /workspace/a20-root
-      TRACKING_SERVICE_URL: ${LIGHTNING_API_BASE_URL}
+      TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL}
       UVICORN_WORKERS: ${API_GATEWAY_UVICORN_WORKERS:-4}
     depends_on:
       - metadata-service

@@ -117,23 +117,6 @@ class LightningAIClient:
         if not Path(video_path).exists():
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
-        # Read video file as bytes for upload
-        try:
-            with open(video_path, "rb") as f:
-                video_bytes = f.read()
-        except Exception as e:
-            raise LightningAIError(f"Failed to read video file: {e}") from e
-
-        # Prepare multipart payload
-        # Lightning AI expects file upload + JSON fields
-        files = {
-            "file": (
-                Path(video_path).name,
-                video_bytes,
-                "video/h265",
-            )
-        }
-
         # JSON fields (sent as form fields)
         data = {
             "query_id": query_id or str(uuid.uuid4()),
@@ -166,10 +149,18 @@ class LightningAIClient:
         logger.debug(f"Payload: query_id={data['query_id']}, video_id={data['video_id']}")
 
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(url, files=files, data=data, headers=headers)
-                response.raise_for_status()
-                body = response.json()
+            with open(video_path, "rb") as video_handle:
+                files = {
+                    "file": (
+                        Path(video_path).name,
+                        video_handle,
+                        "video/h265",
+                    )
+                }
+                with httpx.Client(timeout=self.timeout) as client:
+                    response = client.post(url, files=files, data=data, headers=headers)
+                    response.raise_for_status()
+                    body = response.json()
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Lightning AI API error {e.response.status_code}: {e.response.text}")

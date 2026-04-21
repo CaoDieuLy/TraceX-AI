@@ -4,6 +4,9 @@ import json
 import logging
 import re
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -24,6 +27,10 @@ from .runtime import AccuracyFirstTrackerRuntime
 
 logger = logging.getLogger(__name__)
 ALREADY_COMPRESSED_SUFFIXES = {".h265", ".hevc"}
+_SHARED_TEXT_MODEL = None
+_SHARED_TEXT_TOKENIZER = None
+_SHARED_TEXT_DEVICE = None
+_SHARED_TEXT_MODEL_LOCK = threading.Lock()
 
 
 def _dict_or_empty(value: object) -> dict:
@@ -43,6 +50,88 @@ def _json_dict_or_empty(value: object) -> dict:
             return {}
         return payload if isinstance(payload, dict) else {}
     return {}
+
+
+def _tracking_slug(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "")).strip("-._") or "tracking"
+
+
+def _artifact_root() -> Path:
+    root = Path(settings.tracking_artifact_root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def resolve_tracking_artifact_paths(artifact_id: str) -> tuple[Path, Path]:
+    cleaned = _tracking_slug(artifact_id)
+    root = _artifact_root()
+    return root / f"{cleaned}.mp4", root / f"{cleaned}.json"
+
+
+def _candidate_payload_view(candidate: dict) -> dict:
+    payload = dict(candidate)
+    raw_metadata = _json_dict_or_empty(payload.get("raw_metadata"))
+    merged = dict(raw_metadata)
+    for key in (
+        "candidate_id",
+        "camera_id",
+        "video_id",
+        "track_id",
+        "frame_idx",
+        "search_text",
+        "appearance_summary",
+        "semantic_attributes",
+        "visibility_scores",
+        "world_position",
+        "matched_segments",
+        "embedding_vector",
+        "candidate_vector",
+        "itself_features",
+    ):
+        if payload.get(key) not in (None, "", []):
+            merged[key] = payload.get(key)
+    return merged
+
+
+def _get_text_model_components() -> tuple[object, object, str]:
+    global _SHARED_TEXT_MODEL
+    global _SHARED_TEXT_TOKENIZER
+    global _SHARED_TEXT_DEVICE
+
+    if _SHARED_TEXT_MODEL is not None and _SHARED_TEXT_TOKENIZER is not None and _SHARED_TEXT_DEVICE is not None:
+        return _SHARED_TEXT_MODEL, _SHARED_TEXT_TOKENIZER, _SHARED_TEXT_DEVICE
+
+    with _SHARED_TEXT_MODEL_LOCK:
+        if _SHARED_TEXT_MODEL is None or _SHARED_TEXT_TOKENIZER is None or _SHARED_TEXT_DEVICE is None:
+            import open_clip
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model, _, _preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
+            model = model.to(device)
+            model.eval()
+            tokenizer = open_clip.get_tokenizer("ViT-B-32")
+            _SHARED_TEXT_MODEL = model
+            _SHARED_TEXT_TOKENIZER = tokenizer
+            _SHARED_TEXT_DEVICE = device
+    return _SHARED_TEXT_MODEL, _SHARED_TEXT_TOKENIZER, _SHARED_TEXT_DEVICE
+
+
+def _compute_query_embedding(query_text: str) -> np.ndarray | None:
+    cleaned_query = str(query_text or "").strip()
+    if not cleaned_query:
+        return None
+    try:
+        model, tokenizer, device = _get_text_model_components()
+        text_tokens = tokenizer([cleaned_query]).to(device)
+        autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if device == "cuda" else nullcontext()
+        with torch.inference_mode():
+            with autocast_ctx:
+                query_emb = model.encode_text(text_tokens)
+            query_emb = query_emb / query_emb.norm(dim=-1, keepdim=True)
+        return query_emb.detach().cpu().numpy()[0].astype(np.float32)
+    except Exception as exc:
+        logger.warning("Failed to compute query embedding: %s", exc)
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -93,6 +182,7 @@ def _rank_candidate_itself(
     query_text: str,
     query_embedding: np.ndarray | None,
     candidate: dict,
+    precomputed_embedding_similarity: float | None = None,
 ) -> float:
     """
     ITSELF RANGE-style ensemble scoring.
@@ -103,7 +193,11 @@ def _rank_candidate_itself(
       - World position:      0.08
     """
     # 1. Embedding similarity (ITSELF fine-grained)
-    emb_sim = _embedding_similarity(query_embedding, candidate.get("embedding_vector")) if query_embedding is not None else 0.0
+    emb_sim = (
+        float(precomputed_embedding_similarity)
+        if precomputed_embedding_similarity is not None
+        else _embedding_similarity(query_embedding, candidate.get("embedding_vector")) if query_embedding is not None else 0.0
+    )
 
     # 2. Semantic overlap (token Jaccard)
     sem_overlap = _semantic_overlap_itself(query_text, candidate)
@@ -187,6 +281,62 @@ def _extract_candidate_segments(candidate: dict, limit: int = 3) -> list[dict]:
     return segments
 
 
+def _normalize_tracking_segments(candidate: dict, limit: int) -> list[dict[str, float | str]]:
+    raw_segments = candidate.get("matched_segments") or _extract_candidate_segments(_candidate_payload_view(candidate), limit)
+    if not isinstance(raw_segments, list):
+        return []
+
+    normalized: list[dict[str, float | str]] = []
+    for segment in raw_segments[:limit]:
+        if not isinstance(segment, dict):
+            continue
+        start_second = max(0.0, float(segment.get("start_second") or 0.0))
+        end_second = max(start_second + 0.1, float(segment.get("end_second") or 0.0))
+        normalized.append(
+            {
+                "start_second": start_second,
+                "end_second": end_second,
+                "action_summary": str(segment.get("action_summary") or "").strip(),
+            }
+        )
+    return normalized
+
+
+def _precompute_candidate_embedding_scores(query_embedding: np.ndarray | None, candidates: list[dict]) -> dict[int, float]:
+    if query_embedding is None:
+        return {}
+
+    normalized_query = np.asarray(query_embedding, dtype=np.float32)
+    query_norm = float(np.linalg.norm(normalized_query))
+    if query_norm <= 1e-8:
+        return {}
+    normalized_query = normalized_query / query_norm
+
+    row_indices: list[int] = []
+    matrix_rows: list[np.ndarray] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        raw_embedding = candidate.get("embedding_vector")
+        if not isinstance(raw_embedding, list) or not raw_embedding:
+            continue
+        candidate_vector = np.asarray(raw_embedding, dtype=np.float32)
+        if candidate_vector.ndim != 1 or candidate_vector.shape[0] != normalized_query.shape[0]:
+            continue
+        candidate_norm = float(np.linalg.norm(candidate_vector))
+        if candidate_norm <= 1e-8:
+            continue
+        row_indices.append(index)
+        matrix_rows.append(candidate_vector / candidate_norm)
+
+    if not matrix_rows:
+        return {}
+
+    matrix = np.stack(matrix_rows, axis=0)
+    scores = matrix @ normalized_query
+    return {row_index: float(score) for row_index, score in zip(row_indices, scores)}
+
+
 def _summarize_matches(query_text: str, video_id: str, matches: list[dict], person_count: int) -> str:
     if not matches:
         return f"Processed video '{video_id}' and generated metadata for {person_count} people, but no strong match was found for '{query_text}'."
@@ -198,27 +348,6 @@ def _summarize_matches(query_text: str, video_id: str, matches: list[dict], pers
         f"Processed video '{video_id}' and found {len(matches)} likely matches for '{query_text}'. "
         f"Best match: camera {camera_id}, track {track_id}, score {score:.3f}."
     )
-    timeline = candidate.get("timeline")
-    if not isinstance(timeline, list):
-        return []
-    segments: list[dict] = []
-    for item in timeline:
-        if not isinstance(item, dict):
-            continue
-        start_second = item.get("start_second")
-        end_second = item.get("end_second")
-        if start_second is None or end_second is None:
-            continue
-        segments.append(
-            {
-                "start_second": float(start_second),
-                "end_second": float(end_second),
-                "action_summary": str(item.get("action_summary") or "").strip(),
-            }
-        )
-        if len(segments) >= limit:
-            break
-    return segments
 
 
 def _build_worker_match(
@@ -276,6 +405,19 @@ def _prepare_remote_query_video(source_path: Path, video_id: str | None = None) 
     raise ValueError(
         f"Only pre-encoded .h265/.hevc inputs are supported for query processing. Got: {source_path.name}"
     )
+
+
+def _cleanup_remote_query_files(*paths: Path | None) -> None:
+    if not settings.cleanup_remote_query_inputs:
+        return
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+        except Exception as exc:
+            logger.debug("Skipped cleanup for %s: %s", path, exc)
 
 
 def _load_env_profile_overrides() -> dict:
@@ -384,11 +526,13 @@ def _download_file(url: str, output_path: str, timeout: int = 180) -> None:
     if url.startswith("http://") or url.startswith("https://"):
         logger.info(f"Downloading from {url} to {output_path}")
         with httpx.Client(timeout=timeout) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "wb") as f:
-                f.write(response.content)
+            with client.stream("GET", url) as response:
+                response.raise_for_status()
+                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(output_path, "wb") as f:
+                    for chunk in response.iter_bytes():
+                        if chunk:
+                            f.write(chunk)
     else:
         # Assume it's a local file path - copy if different location
         src = Path(url)
@@ -470,6 +614,8 @@ def process_video_query(payload: dict) -> dict:
     logger.info("Using Lightning AI remote mode")
     from .gpu_client import get_lightning_client
 
+    input_path: Path | None = None
+    h265_path: Path | None = None
     try:
         input_path = _resolve_query_source_path(storage_path, video_id=video_id or None)
         file_exists = input_path.exists()
@@ -496,7 +642,7 @@ def process_video_query(payload: dict) -> dict:
         compressed_video_path = ai_response.get("compressed_video_path", "")
         downloaded_output_path = None
 
-        if compressed_video_path:
+        if compressed_video_path and settings.download_remote_outputs:
             try:
                 # Ensure output directory exists
                 output_dir = Path(settings.video_download_output_dir)
@@ -562,6 +708,17 @@ def process_video_query(payload: dict) -> dict:
             "acceleration_state": acceleration_state,
             "raw_response": {"error": str(e)},
         }
+    finally:
+        cleanup_targets: list[Path] = []
+        if h265_path is not None and h265_path.exists():
+            try:
+                if input_path is None or h265_path.resolve() != input_path.resolve():
+                    cleanup_targets.append(h265_path)
+            except Exception:
+                cleanup_targets.append(h265_path)
+        if input_path is not None and "query-inputs" in input_path.parts:
+            cleanup_targets.append(input_path)
+        _cleanup_remote_query_files(*cleanup_targets)
 
 
 def process_video_query_worker(payload: dict) -> dict:
@@ -594,23 +751,7 @@ def process_video_query_worker(payload: dict) -> dict:
 
     people = ingestion_result.get("people") or []
 
-    # Compute query embedding from query text (ITSELF-style)
-    # For edge-first, we use CLIP text encoder as query embedding
-    query_embedding = None
-    try:
-        import open_clip
-        from transformers import AutoTokenizer, AutoModel
-        # Use CLIP text encoder for query
-        model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
-        tokenizer = open_clip.get_tokenizer("ViT-B-32")
-        text_tokens = tokenizer([query_text]).to(model.device)
-        with torch.no_grad():
-            query_emb = model.encode_text(text_tokens)
-            query_emb = query_emb / query_emb.norm(dim=-1, keepdim=True)
-            query_embedding = query_emb.cpu().numpy()[0].astype(np.float32)
-    except Exception as e:
-        logger.warning(f"Failed to compute query embedding: {e}")
-        query_embedding = None
+    query_embedding = _compute_query_embedding(query_text)
 
     ranked_matches = [
         _build_worker_match(person, query_text, query_embedding)
@@ -649,6 +790,244 @@ def process_video_query_worker(payload: dict) -> dict:
             "gpu_hardware_profile": ingestion_result.get("gpu_hardware_profile"),
             "acceleration_state": ingestion_result.get("acceleration_state"),
         },
+    }
+
+
+def search_candidates_remote(query_text: str, candidates: list[dict], limit: int = 5) -> dict:
+    cleaned_query = str(query_text or "").strip()
+    if not cleaned_query:
+        return {"query_text": cleaned_query, "count": 0, "items": []}
+
+    query_embedding = _compute_query_embedding(cleaned_query)
+    embedding_scores = _precompute_candidate_embedding_scores(query_embedding, candidates)
+    ranked: list[dict] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_view = _candidate_payload_view(candidate)
+        score = _rank_candidate_itself(
+            cleaned_query,
+            query_embedding,
+            candidate_view,
+            precomputed_embedding_similarity=embedding_scores.get(index),
+        )
+        if score <= 0:
+            continue
+        enriched = dict(candidate)
+        enriched["score"] = score
+        if not enriched.get("matched_segments"):
+            enriched["matched_segments"] = _normalize_tracking_segments(candidate_view, limit=3)
+        ranked.append(enriched)
+
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("camera_id") or ""),
+            str(item.get("track_id") or ""),
+            str(item.get("candidate_id") or ""),
+        )
+    )
+    limited = ranked[: max(1, min(limit, 50))]
+    return {"query_text": cleaned_query, "count": len(limited), "items": limited}
+
+
+def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> Path:
+    runtime = get_ingestion_runtime()
+    source_root = _artifact_root() / artifact_id / "sources"
+    source_root.mkdir(parents=True, exist_ok=True)
+
+    drive_file_id = str(candidate.get("drive_video_file_id") or "").strip()
+    if drive_file_id:
+        filename = Path(
+            str(candidate.get("source_filename") or candidate.get("video_title") or candidate.get("candidate_id") or drive_file_id)
+        ).name
+        if not Path(filename).suffix:
+            filename = f"{filename}.h265"
+        target_path = source_root / filename
+        runtime._download_drive_file(drive_file_id, target_path)
+        return target_path
+
+    for key in ("available_link_video", "storage_path", "local_video_path"):
+        value = str(candidate.get(key) or "").strip()
+        if not value:
+            continue
+        if value.startswith(("http://", "https://")):
+            suffix = Path(urlparse(value).path).suffix or ".h265"
+            target_path = source_root / f"{_tracking_slug(candidate.get('candidate_id') or 'candidate')}{suffix}"
+            _download_file(value, str(target_path))
+            return target_path
+        path = Path(value).expanduser()
+        if path.exists():
+            return path
+
+    raise FileNotFoundError(f"Unable to resolve source video for candidate {candidate.get('candidate_id')}")
+
+
+def _prepare_remote_tracking_jobs(
+    selected_candidates: list[dict],
+    *,
+    artifact_id: str,
+    max_segments_per_candidate: int,
+) -> list[dict[str, object]]:
+    if not selected_candidates:
+        return []
+
+    max_workers = max(1, min(len(selected_candidates), 4))
+
+    def resolve(candidate: dict) -> tuple[str, Path, list[dict[str, float | str]], dict]:
+        source_path = _resolve_remote_candidate_source_path(candidate, artifact_id)
+        segments = _normalize_tracking_segments(candidate, max_segments_per_candidate)
+        return str(candidate.get("candidate_id") or ""), source_path, segments, candidate
+
+    resolved_rows: list[tuple[str, Path, list[dict[str, float | str]], dict]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for row in executor.map(resolve, selected_candidates):
+            resolved_rows.append(row)
+
+    grouped_jobs: dict[str, dict[str, object]] = {}
+    for candidate_id, source_path, segments, candidate in resolved_rows:
+        if not segments:
+            continue
+        source_key = str(source_path)
+        job = grouped_jobs.setdefault(
+            source_key,
+            {"source_path": source_path, "clips": []},
+        )
+        for segment in segments:
+            job["clips"].append(
+                {
+                    "candidate_id": candidate_id,
+                    "camera_id": candidate.get("camera_id"),
+                    "track_id": candidate.get("track_id"),
+                    "search_text": candidate.get("search_text"),
+                    "start_second": float(segment["start_second"]),
+                    "end_second": float(segment["end_second"]),
+                    "action_summary": str(segment["action_summary"]),
+                }
+            )
+    return list(grouped_jobs.values())
+
+
+def build_tracking_video_remote(
+    *,
+    selected_candidate_id: str,
+    candidates: list[dict],
+    candidate_ids: list[str] | None = None,
+    query_text: str | None = None,
+    max_segments_per_candidate: int = 2,
+) -> dict:
+    import cv2
+
+    requested_ids: list[str] = []
+    for candidate_id in [selected_candidate_id, *(candidate_ids or [])]:
+        cleaned = str(candidate_id or "").strip()
+        if cleaned and cleaned not in requested_ids:
+            requested_ids.append(cleaned)
+
+    selected_candidates = [
+        candidate for candidate in candidates
+        if isinstance(candidate, dict) and str(candidate.get("candidate_id") or "").strip() in requested_ids
+    ]
+    if not selected_candidates:
+        raise FileNotFoundError("No candidates found for remote tracking build")
+
+    artifact_id = uuid4().hex
+    output_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    writer = None
+    written_frames = 0
+    output_fps = 12.0
+    output_size: tuple[int, int] | None = None
+    clips_manifest: list[dict[str, object]] = []
+    grouped_jobs = _prepare_remote_tracking_jobs(
+        selected_candidates,
+        artifact_id=artifact_id,
+        max_segments_per_candidate=max_segments_per_candidate,
+    )
+
+    for job in grouped_jobs:
+        source_path = job["source_path"]
+        cap = cv2.VideoCapture(str(source_path))
+        if not cap.isOpened():
+            continue
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or output_fps)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        if width <= 0 or height <= 0:
+            cap.release()
+            continue
+        if output_size is None:
+            output_size = (width, height)
+            output_fps = max(8.0, min(fps or 12.0, 24.0))
+            writer = cv2.VideoWriter(
+                str(output_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                output_fps,
+                output_size,
+            )
+        for clip in job["clips"]:
+            start_second = float(clip["start_second"])
+            end_second = float(clip["end_second"])
+            start_frame = max(0, int(start_second * fps))
+            end_frame = max(start_frame, int(end_second * fps))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            frame_idx = start_frame
+            while frame_idx <= end_frame:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if output_size and (frame.shape[1], frame.shape[0]) != output_size:
+                    frame = cv2.resize(frame, output_size)
+                overlay_1 = f"Query: {query_text or 'candidate tracking'}"
+                overlay_2 = f"{clip.get('camera_id') or 'camera'} | track {clip.get('track_id') or '?'}"
+                overlay_3 = str(clip.get("action_summary") or clip.get("search_text") or "")[:120]
+                cv2.rectangle(frame, (0, 0), (frame.shape[1], 90), (0, 0, 0), -1)
+                cv2.putText(frame, overlay_1[:120], (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 2)
+                cv2.putText(frame, overlay_2[:120], (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(frame, overlay_3[:120], (12, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 255, 180), 1)
+                if writer is not None:
+                    writer.write(frame)
+                    written_frames += 1
+                frame_idx += 1
+            clips_manifest.append(
+                {
+                    "candidate_id": clip.get("candidate_id"),
+                    "camera_id": clip.get("camera_id"),
+                    "track_id": clip.get("track_id"),
+                    "source_video": str(source_path),
+                    "start_second": start_second,
+                    "end_second": end_second,
+                    "action_summary": clip.get("action_summary"),
+                }
+            )
+        cap.release()
+
+    if writer is not None:
+        writer.release()
+
+    if written_frames <= 0 or not output_path.exists():
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("Could not create remote tracking compilation from the selected candidates")
+
+    manifest = {
+        "artifact_id": artifact_id,
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "query_text": query_text,
+        "selected_candidate_id": selected_candidate_id,
+        "candidate_ids": [candidate.get("candidate_id") for candidate in selected_candidates],
+        "clip_count": len(clips_manifest),
+        "written_frames": written_frames,
+        "video_path": str(output_path),
+        "clips": clips_manifest,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "artifact_id": artifact_id,
+        "video_url": f"/api/v1/tracking-artifacts/{artifact_id}",
+        "manifest_url": f"/api/v1/tracking-artifacts/{artifact_id}/manifest",
+        "manifest": manifest,
+        "selected_candidate_id": selected_candidate_id,
     }
 
 

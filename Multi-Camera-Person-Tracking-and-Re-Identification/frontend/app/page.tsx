@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type Overview = {
   metadata: {
@@ -11,13 +11,12 @@ type Overview = {
       total_candidates: number;
       total_cameras: number;
       total_candidate_videos: number;
+      total_queue_videos: number;
     };
   };
   ai: {
     provider: string;
     mode: string;
-    lightning_api_base_url?: string | null;
-    lightning_api_endpoint?: string;
   };
 };
 
@@ -27,66 +26,91 @@ type User = {
   full_name: string;
 };
 
-type Video = {
+type QueueVideo = {
   video_id: string;
+  camera_id?: string | null;
   title: string;
-  description?: string | null;
-  storage_path: string;
+  queue_position: number;
   storage_backend: string;
+  available_link_video: string;
+  available_link_metadata?: string | null;
+  local_video_path?: string | null;
+  local_metadata_path?: string | null;
   source_filename?: string | null;
-  content_type?: string | null;
-  created_at: string;
 };
 
-type QueryItem = {
-  query_id: string;
-  video_id: string;
-  video_title: string;
-  storage_path: string;
-  query_text: string;
-  status: string;
-  ai_job_id?: string | null;
-  ai_response?: {
-    summary?: string;
-    mode?: string;
-    provider?: string;
-    raw_response?: Record<string, unknown>;
-  } | null;
-  created_at: string;
-  updated_at: string;
+type Candidate = {
+  candidate_id: string;
+  camera_id?: string | null;
+  video_id?: string | null;
+  track_id?: string | null;
+  frame_idx?: number | null;
+  search_text?: string | null;
+  appearance_summary?: string | null;
+  semantic_attributes?: string[];
+  matched_segments?: Array<{
+    start_second?: number;
+    end_second?: number;
+    action_summary?: string;
+  }>;
+  score?: number | null;
+  available_link_video?: string | null;
+  available_link_metadata?: string | null;
+  local_video_path?: string | null;
+  local_metadata_path?: string | null;
+  storage_path?: string | null;
+  video_title?: string | null;
+  raw_metadata: Record<string, unknown>;
+};
+
+type TrackingResult = {
+  artifact_id: string;
+  video_url: string;
+  manifest_url: string;
+  selected_candidate_id: string;
+  manifest: {
+    clip_count: number;
+    written_frames: number;
+    candidate_ids: string[];
+  };
+};
+
+type MoveResult = {
+  processed_videos: number;
+  evicted_video_ids: string[];
+  imported_source_files: string[];
 };
 
 type AuthMode = "login" | "register";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "").replace(/\/$/, "");
 const TOKEN_KEY = "mcpt_access_token";
+const defaultRegister = { full_name: "", email: "", password: "" };
+const defaultLogin = { identifier: "admin", password: "admin" };
 
-const defaultRegister = {
-  full_name: "",
-  email: "",
-  password: "",
-};
-
-const defaultLogin = {
-  email: "",
-  password: "",
-};
+function withApiBase(path: string | null | undefined): string {
+  if (!path) {
+    return "";
+  }
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    return path;
+  }
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 export default function HomePage() {
   const [authMode, setAuthMode] = useState<AuthMode>("login");
-  const [token, setToken] = useState<string>("");
+  const [token, setToken] = useState("");
   const [user, setUser] = useState<User | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [videos, setVideos] = useState<Video[]>([]);
-  const [queries, setQueries] = useState<QueryItem[]>([]);
-  const [selectedVideoId, setSelectedVideoId] = useState<string>("");
-  const [queryText, setQueryText] = useState("doctor carrying a medical box");
+  const [queueVideos, setQueueVideos] = useState<QueueVideo[]>([]);
+  const [candidateQuery, setCandidateQuery] = useState("doctor carrying a medical box");
+  const [candidateResults, setCandidateResults] = useState<Candidate[]>([]);
+  const [selectedCandidateId, setSelectedCandidateId] = useState("");
+  const [trackingResult, setTrackingResult] = useState<TrackingResult | null>(null);
+  const [moveResult, setMoveResult] = useState<MoveResult | null>(null);
   const [registerForm, setRegisterForm] = useState(defaultRegister);
   const [loginForm, setLoginForm] = useState(defaultLogin);
-  const [uploadTitle, setUploadTitle] = useState("");
-  const [uploadDescription, setUploadDescription] = useState("");
-  const [storageUrl, setStorageUrl] = useState("");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,9 +124,12 @@ export default function HomePage() {
     localStorage.removeItem(TOKEN_KEY);
     setToken("");
     setUser(null);
-    setVideos([]);
-    setQueries([]);
-    setSelectedVideoId("");
+    setCandidateResults([]);
+    setSelectedCandidateId("");
+    setTrackingResult(null);
+    setMoveResult(null);
+    setMessage(null);
+    setError(null);
   }
 
   async function apiFetch(path: string, init: RequestInit = {}) {
@@ -110,11 +137,7 @@ export default function HomePage() {
     if (token) {
       headers.set("Authorization", `Bearer ${token}`);
     }
-    const response = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      headers,
-      cache: "no-store",
-    });
+    const response = await fetch(`${API_BASE}${path}`, { ...init, headers, cache: "no-store" });
     if (response.status === 401) {
       clearSession();
       throw new Error("Session expired. Please log in again.");
@@ -122,55 +145,40 @@ export default function HomePage() {
     return response;
   }
 
-  async function refreshDashboard() {
-    const [overviewResponse, meResponse, videosResponse, queriesResponse] = await Promise.all([
+  async function refreshWorkspace() {
+    const [overviewResponse, meResponse, queueResponse] = await Promise.all([
       fetch(`${API_BASE}/api/v1/overview`, { cache: "no-store" }),
       apiFetch("/api/v1/auth/me"),
-      apiFetch("/api/v1/videos"),
-      apiFetch("/api/v1/video-queries"),
+      fetch(`${API_BASE}/api/v1/queue/videos`, { cache: "no-store" }),
     ]);
 
-    if (!overviewResponse.ok) {
-      throw new Error(`Overview failed: ${overviewResponse.status}`);
-    }
-    if (!meResponse.ok || !videosResponse.ok || !queriesResponse.ok) {
-      throw new Error("Failed to load authenticated dashboard.");
+    if (!overviewResponse.ok || !meResponse.ok || !queueResponse.ok) {
+      throw new Error("Failed to refresh the workspace.");
     }
 
-    const overviewPayload = (await overviewResponse.json()) as Overview;
-    const mePayload = (await meResponse.json()) as User;
-    const videosPayload = (await videosResponse.json()) as { items: Video[] };
-    const queriesPayload = (await queriesResponse.json()) as { items: QueryItem[] };
-
-    setOverview(overviewPayload);
-    setUser(mePayload);
-    setVideos(videosPayload.items);
-    setQueries(queriesPayload.items);
-    setSelectedVideoId((current) => current || videosPayload.items[0]?.video_id || "");
+    setOverview((await overviewResponse.json()) as Overview);
+    setUser((await meResponse.json()) as User);
+    const queuePayload = (await queueResponse.json()) as { items: QueueVideo[] };
+    setQueueVideos(queuePayload.items);
   }
 
   useEffect(() => {
     const stored = localStorage.getItem(TOKEN_KEY);
     if (stored) {
       setToken(stored);
+      return;
     }
+    fetch(`${API_BASE}/api/v1/overview`, { cache: "no-store" })
+      .then((response) => response.json())
+      .then((payload: Overview) => setOverview(payload))
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
     if (!token) {
-      fetch(`${API_BASE}/api/v1/overview`, { cache: "no-store" })
-        .then(async (response) => {
-          if (!response.ok) {
-            throw new Error(`Overview failed: ${response.status}`);
-          }
-          const payload = (await response.json()) as Overview;
-          setOverview(payload);
-        })
-        .catch((err: Error) => setError(err.message));
       return;
     }
-
-    refreshDashboard().catch((err: Error) => setError(err.message));
+    refreshWorkspace().catch((err: Error) => setError(err.message));
   }, [token]);
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
@@ -179,18 +187,18 @@ export default function HomePage() {
     setError(null);
     setMessage(null);
     try {
-      const body = authMode === "register" ? registerForm : loginForm;
+      const payload = authMode === "register" ? registerForm : loginForm;
       const response = await fetch(`${API_BASE}/api/v1/auth/${authMode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      const payload = (await response.json()) as { access_token: string; user: User };
-      persistToken(payload.access_token);
-      setUser(payload.user);
+      const data = (await response.json()) as { access_token: string; user: User };
+      persistToken(data.access_token);
+      setUser(data.user);
       setRegisterForm(defaultRegister);
       setLoginForm(defaultLogin);
       setMessage(authMode === "register" ? "Account created successfully." : "Logged in successfully.");
@@ -201,322 +209,413 @@ export default function HomePage() {
     }
   }
 
-  async function handleUpload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleMove() {
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
-      const formData = new FormData();
-      formData.set("title", uploadTitle);
-      formData.set("description", uploadDescription);
-      if (selectedFile) {
-        formData.set("file", selectedFile);
-      }
-      if (storageUrl.trim()) {
-        formData.set("storage_url", storageUrl.trim());
-      }
-
-      const response = await apiFetch("/api/v1/videos", {
+      const response = await apiFetch("/api/v1/queue/process-imports", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      const payload = (await response.json()) as Video;
-      setMessage(`Video '${payload.title}' added successfully.`);
-      setUploadTitle("");
-      setUploadDescription("");
-      setStorageUrl("");
-      setSelectedFile(null);
-      await refreshDashboard();
+      const payload = (await response.json()) as MoveResult;
+      setMoveResult(payload);
+      await refreshWorkspace();
+      setMessage(
+        payload.imported_source_files.length
+          ? `Move finished. Imported ${payload.imported_source_files.length} file(s) from Import_New.`
+          : "Move finished. No new .h265 files were waiting in Import_New.",
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Video upload failed");
+      setError(err instanceof Error ? err.message : "Move failed");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleRunQuery() {
-    if (!selectedVideoId) {
-      setError("Please select a video first.");
+  async function handleSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    setMessage(null);
+    setTrackingResult(null);
+    try {
+      const response = await apiFetch("/api/v1/candidates/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query_text: candidateQuery, limit: 5 }),
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const payload = (await response.json()) as { items: Candidate[]; count: number };
+      setCandidateResults(payload.items);
+      setSelectedCandidateId(payload.items[0]?.candidate_id ?? "");
+      setMessage(payload.count ? `Found ${payload.count} candidate match(es).` : "No candidates matched this query.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Candidate search failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleBuildTracking() {
+    if (!selectedCandidateId) {
+      setError("Choose a candidate first.");
       return;
     }
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
-      const response = await apiFetch("/api/v1/video-queries/run", {
+      const response = await apiFetch("/api/v1/candidates/track", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          video_id: selectedVideoId,
-          query_text: queryText,
+          selected_candidate_id: selectedCandidateId,
+          candidate_ids: candidateResults.map((item) => item.candidate_id),
+          query_text: candidateQuery,
+          max_segments_per_candidate: 2,
         }),
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      const payload = (await response.json()) as { query: QueryItem; ai_result: { summary: string } };
-      setMessage(payload.ai_result.summary);
-      await refreshDashboard();
+      const payload = (await response.json()) as TrackingResult;
+      setTrackingResult(payload);
+      setMessage("Tracking video is ready.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "AI query failed");
+      setError(err instanceof Error ? err.message : "Tracking compilation failed");
     } finally {
       setLoading(false);
     }
   }
 
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const nextFile = event.target.files?.[0] ?? null;
-    setSelectedFile(nextFile);
-    if (nextFile) {
-      setStorageUrl("");
-      if (!uploadTitle.trim()) {
-        setUploadTitle(nextFile.name.replace(/\.[^.]+$/, ""));
-      }
-    }
-  }
+  const selectedCandidate = useMemo(
+    () => candidateResults.find((item) => item.candidate_id === selectedCandidateId) ?? candidateResults[0] ?? null,
+    [candidateResults, selectedCandidateId],
+  );
 
-  const latestQuery = queries[0] ?? null;
-
-  return (
-    <main className="shell">
-      <section className="hero">
-        <div className="hero-copy">
-          <p className="eyebrow">Video AI Management Platform</p>
-          <h1>GPU-ready Video Ops Control Center</h1>
-          <p className="lead">
-            Next.js frontend, FastAPI backend, PostgreSQL metadata store, and LightningAI GPU orchestration for
-            video-text processing.
-          </p>
-          <div className="hero-actions">
-            {user ? (
-              <>
-                <button className="primary" onClick={() => refreshDashboard().catch((err: Error) => setError(err.message))}>
-                  Refresh workspace
-                </button>
-                <button className="secondary" onClick={clearSession}>
-                  Log out
-                </button>
-              </>
-            ) : null}
+  if (!user) {
+    return (
+      <main className="shell auth-shell">
+        <section className="hero auth-hero">
+          <div className="hero-copy">
+            <p className="eyebrow">MCPT Control Center</p>
+            <h1>Login first, then move files, query people, and build tracking video output.</h1>
+            <p className="lead">
+              Screen 1 is access only. After login, you land in a dedicated workspace for `Move`, text query, top-k
+              candidates, and final tracking video output.
+            </p>
+            <div className="badge-row">
+              <span className="chip">Auto detect from `Import_New`</span>
+              <span className="chip">Manual `Move` trigger</span>
+              <span className="chip">GPU metadata on LightningAI</span>
+            </div>
           </div>
-        </div>
 
-        <div className="overview-grid">
+          <section className="panel auth-panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Access</p>
+                <h2>{authMode === "login" ? "Login" : "Create account"}</h2>
+              </div>
+            </div>
+
+            <div className="tab-row">
+              <button className={authMode === "login" ? "tab active" : "tab"} onClick={() => setAuthMode("login")} type="button">
+                Login
+              </button>
+              <button className={authMode === "register" ? "tab active" : "tab"} onClick={() => setAuthMode("register")} type="button">
+                Register
+              </button>
+            </div>
+
+            <form className="stack" onSubmit={handleAuthSubmit}>
+              {authMode === "register" ? (
+                <input
+                  placeholder="Full name"
+                  value={registerForm.full_name}
+                  onChange={(event) => setRegisterForm((current) => ({ ...current, full_name: event.target.value }))}
+                />
+              ) : null}
+
+              <input
+                placeholder={authMode === "login" ? "Username or email" : "Email"}
+                value={authMode === "register" ? registerForm.email : loginForm.identifier}
+                onChange={(event) =>
+                  authMode === "register"
+                    ? setRegisterForm((current) => ({ ...current, email: event.target.value }))
+                    : setLoginForm((current) => ({ ...current, identifier: event.target.value }))
+                }
+              />
+
+              <input
+                placeholder="Password"
+                type="password"
+                value={authMode === "register" ? registerForm.password : loginForm.password}
+                onChange={(event) =>
+                  authMode === "register"
+                    ? setRegisterForm((current) => ({ ...current, password: event.target.value }))
+                    : setLoginForm((current) => ({ ...current, password: event.target.value }))
+                }
+              />
+
+              <button className="primary" type="submit" disabled={loading}>
+                {loading ? "Working..." : authMode === "register" ? "Create account" : "Sign in"}
+              </button>
+            </form>
+
+            <div className="detail-card">
+              <p>
+                <span>Admin login</span>
+                <strong>Username: admin</strong>
+              </p>
+              <p>
+                <span>Password</span>
+                <strong>admin</strong>
+              </p>
+            </div>
+          </section>
+        </section>
+
+        <section className="summary-strip">
           <article className="stat-card">
-            <span>Users</span>
-            <strong>{overview?.metadata.metrics.total_users ?? 0}</strong>
+            <span>Queue videos</span>
+            <strong>{overview?.metadata.metrics.total_queue_videos ?? 0}</strong>
           </article>
           <article className="stat-card">
-            <span>Managed videos</span>
-            <strong>{overview?.metadata.metrics.total_managed_videos ?? 0}</strong>
+            <span>Candidates</span>
+            <strong>{overview?.metadata.metrics.total_candidates ?? 0}</strong>
           </article>
           <article className="stat-card">
-            <span>AI queries</span>
-            <strong>{overview?.metadata.metrics.total_queries ?? 0}</strong>
+            <span>Cameras</span>
+            <strong>{overview?.metadata.metrics.total_cameras ?? 0}</strong>
           </article>
-          <article className="stat-card wide">
-            <span>AI backend</span>
+          <article className="stat-card">
+            <span>GPU backend</span>
             <strong>
               {overview?.ai.provider ?? "lightningai"} / {overview?.ai.mode ?? "loading"}
             </strong>
           </article>
+        </section>
+
+        {message ? <p className="message success">{message}</p> : null}
+        {error ? <p className="message error">{error}</p> : null}
+      </main>
+    );
+  }
+
+  return (
+    <main className="shell workspace-shell">
+      <section className="hero workspace-hero">
+        <div className="hero-copy">
+          <p className="eyebrow">Workspace</p>
+          <h1>Move queue files, search people by text, then output one tracking video.</h1>
+          <p className="lead">
+            Screen 2 is the working area only. New `.h265` files can enter from auto detect or the manual `Move`
+            button, then you query local metadata, choose a candidate, and export a combined tracking video.
+          </p>
+          <div className="hero-actions">
+            <button className="primary" onClick={handleMove} disabled={loading}>
+              {loading ? "Working..." : "Move"}
+            </button>
+            <button className="secondary" onClick={() => refreshWorkspace().catch((err: Error) => setError(err.message))} type="button">
+              Refresh
+            </button>
+            <button className="secondary" onClick={clearSession} type="button">
+              Log out
+            </button>
+          </div>
         </div>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Session</p>
+              <h2>{user.full_name}</h2>
+            </div>
+            <span className="chip">Signed in as {user.email}</span>
+          </div>
+          <div className="summary-strip compact">
+            <article className="stat-card">
+              <span>Queue videos</span>
+              <strong>{queueVideos.length}</strong>
+            </article>
+            <article className="stat-card">
+              <span>Candidates</span>
+              <strong>{overview?.metadata.metrics.total_candidates ?? 0}</strong>
+            </article>
+            <article className="stat-card">
+              <span>GPU</span>
+              <strong>{overview?.ai.provider ?? "lightningai"}</strong>
+            </article>
+          </div>
+          <div className="detail-card">
+            <p>
+              <span>Manual move</span>
+              <strong>Button `Move` runs the same Import_New detection flow as the background worker.</strong>
+            </p>
+            <p>
+              <span>Auto move</span>
+              <strong>Queue worker still keeps watching `Import_New` in parallel.</strong>
+            </p>
+          </div>
+        </section>
       </section>
 
       {message ? <p className="message success">{message}</p> : null}
       {error ? <p className="message error">{error}</p> : null}
 
-      <section className="workspace-grid">
-        <section className="panel auth-panel">
+      <section className="step-grid">
+        <section className="panel step-card">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Access</p>
-              <h2>{user ? `Welcome, ${user.full_name}` : "Authenticate"}</h2>
+              <p className="eyebrow">Step 1</p>
+              <h2>Move from Import_New</h2>
             </div>
-            {user ? <p className="muted">{user.email}</p> : null}
           </div>
-
-          {!user ? (
-            <>
-              <div className="tab-row">
-                <button className={authMode === "login" ? "tab active" : "tab"} onClick={() => setAuthMode("login")}>
-                  Login
-                </button>
-                <button className={authMode === "register" ? "tab active" : "tab"} onClick={() => setAuthMode("register")}>
-                  Register
-                </button>
-              </div>
-              <form className="stack" onSubmit={handleAuthSubmit}>
-                {authMode === "register" ? (
-                  <input
-                    placeholder="Full name"
-                    value={registerForm.full_name}
-                    onChange={(event) => setRegisterForm((current) => ({ ...current, full_name: event.target.value }))}
-                  />
-                ) : null}
-                <input
-                  placeholder="Email"
-                  type="email"
-                  value={authMode === "register" ? registerForm.email : loginForm.email}
-                  onChange={(event) =>
-                    authMode === "register"
-                      ? setRegisterForm((current) => ({ ...current, email: event.target.value }))
-                      : setLoginForm((current) => ({ ...current, email: event.target.value }))
-                  }
-                />
-                <input
-                  placeholder="Password"
-                  type="password"
-                  value={authMode === "register" ? registerForm.password : loginForm.password}
-                  onChange={(event) =>
-                    authMode === "register"
-                      ? setRegisterForm((current) => ({ ...current, password: event.target.value }))
-                      : setLoginForm((current) => ({ ...current, password: event.target.value }))
-                  }
-                />
-                <button className="primary" type="submit" disabled={loading}>
-                  {loading ? "Working..." : authMode === "register" ? "Create account" : "Sign in"}
-                </button>
-              </form>
-            </>
-          ) : (
+          <div className="detail-card">
+            <p>
+              <span>What it does</span>
+              <strong>Detect new `.h265`, call LightningAI for metadata, update local DB, then place the video into Queue logic.</strong>
+            </p>
+            <p>
+              <span>Current queue size</span>
+              <strong>{queueVideos.length} indexed queue video(s)</strong>
+            </p>
+          </div>
+          {moveResult ? (
             <div className="detail-card">
               <p>
-                <span>Account</span>
-                <strong>{user.full_name}</strong>
+                <span>Last move</span>
+                <strong>{moveResult.processed_videos} processed video(s)</strong>
               </p>
               <p>
-                <span>Email</span>
-                <strong>{user.email}</strong>
-              </p>
-              <p>
-                <span>LightningAI mode</span>
-                <strong>{overview?.ai.mode ?? "unknown"}</strong>
+                <span>Imported files</span>
+                <strong>{moveResult.imported_source_files.join(", ") || "No new file"}</strong>
               </p>
             </div>
+          ) : (
+            <div className="empty-state">Use `Move` when you want to trigger detection immediately instead of waiting for auto polling.</div>
           )}
         </section>
 
-        <section className="panel upload-panel">
+        <section className="panel step-card">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Video Library</p>
-              <h2>Add a new video</h2>
+              <p className="eyebrow">Step 2</p>
+              <h2>Text query to top-k candidates</h2>
             </div>
-            <p className="muted">Database stores only the path/URL reference.</p>
           </div>
-          <form className="stack" onSubmit={handleUpload}>
-            <input placeholder="Video title" value={uploadTitle} onChange={(event) => setUploadTitle(event.target.value)} />
+          <form className="stack" onSubmit={handleSearch}>
             <textarea
-              placeholder="Description"
-              value={uploadDescription}
-              onChange={(event) => setUploadDescription(event.target.value)}
+              value={candidateQuery}
+              onChange={(event) => setCandidateQuery(event.target.value)}
+              placeholder="Describe the person you want to find across all indexed cameras."
             />
-            <label className="file-input">
-              <span>{selectedFile ? selectedFile.name : "Choose a local video file"}</span>
-              <input type="file" accept="video/*" onChange={handleFileChange} />
-            </label>
-            <div className="divider">
-              <span>or</span>
-            </div>
-            <input
-              placeholder="Existing storage URL / mounted path"
-              value={storageUrl}
-              onChange={(event) => setStorageUrl(event.target.value)}
-            />
-            <button className="primary" type="submit" disabled={loading || !user}>
-              {loading ? "Saving..." : "Add video reference"}
+            <button className="primary" type="submit" disabled={loading}>
+              {loading ? "Searching..." : "Find top candidates"}
             </button>
           </form>
-
-          <div className="video-list">
-            {videos.map((video) => (
+          <div className="history-list">
+            {candidateResults.map((candidate) => (
               <button
-                key={video.video_id}
-                className={selectedVideoId === video.video_id ? "video-card active" : "video-card"}
-                onClick={() => setSelectedVideoId(video.video_id)}
+                key={candidate.candidate_id}
+                className={selectedCandidateId === candidate.candidate_id ? "video-card active" : "video-card"}
+                onClick={() => setSelectedCandidateId(candidate.candidate_id)}
+                type="button"
               >
-                <strong>{video.title}</strong>
-                <span>{video.source_filename ?? video.storage_backend}</span>
-                <small>{video.storage_path}</small>
+                <strong>
+                  {candidate.camera_id ?? candidate.video_title ?? "candidate"} / track {candidate.track_id ?? "?"}
+                </strong>
+                <span>Score {(candidate.score ?? 0).toFixed(3)}</span>
+                <small>{candidate.appearance_summary ?? candidate.search_text ?? "No summary yet."}</small>
               </button>
             ))}
+            {!candidateResults.length ? <div className="empty-state">Top-k candidate results will appear here.</div> : null}
           </div>
         </section>
-      </section>
 
-      <section className="workspace-grid">
-        <section className="panel query-panel">
+        <section className="panel step-card">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">AI Query</p>
-              <h2>Run text search against a video</h2>
+              <p className="eyebrow">Step 3</p>
+              <h2>Build tracking video output</h2>
             </div>
-            <p className="muted">FastAPI gateway persists the query then calls LightningAI GPU.</p>
           </div>
-          <div className="stack">
-            <select value={selectedVideoId} onChange={(event) => setSelectedVideoId(event.target.value)}>
-              <option value="">Select a video</option>
-              {videos.map((video) => (
-                <option key={video.video_id} value={video.video_id}>
-                  {video.title}
-                </option>
-              ))}
-            </select>
-            <textarea
-              placeholder="Describe the event or object to find in the video"
-              value={queryText}
-              onChange={(event) => setQueryText(event.target.value)}
-            />
-            <button className="primary" onClick={handleRunQuery} disabled={loading || !user}>
-              {loading ? "Processing..." : "Run AI query"}
-            </button>
-          </div>
+          {selectedCandidate ? (
+            <div className="stack">
+              <div className="detail-card">
+                <p>
+                  <span>Selected candidate</span>
+                  <strong>{selectedCandidate.candidate_id}</strong>
+                </p>
+                <p>
+                  <span>Camera / track</span>
+                  <strong>
+                    {selectedCandidate.camera_id ?? "unknown"} / {selectedCandidate.track_id ?? "?"}
+                  </strong>
+                </p>
+                <p>
+                  <span>Summary</span>
+                  <strong>{selectedCandidate.appearance_summary ?? selectedCandidate.search_text ?? "No summary"}</strong>
+                </p>
+              </div>
+              <button className="primary" onClick={handleBuildTracking} disabled={loading} type="button">
+                {loading ? "Building..." : "Build tracking video"}
+              </button>
+            </div>
+          ) : (
+            <div className="empty-state">Pick one candidate from Step 2, then build the output video here.</div>
+          )}
 
-          {latestQuery ? (
-            <div className="detail-card">
-              <p>
-                <span>Latest query</span>
-                <strong>{latestQuery.query_text}</strong>
-              </p>
-              <p>
-                <span>Status</span>
-                <strong>{latestQuery.status}</strong>
-              </p>
-              <p>
-                <span>AI summary</span>
-                <strong>{latestQuery.ai_response?.summary ?? "Awaiting AI response"}</strong>
-              </p>
+          {trackingResult ? (
+            <div className="stack">
+              <video className="video-frame" controls preload="metadata" src={withApiBase(trackingResult.video_url)} />
+              <div className="detail-card">
+                <p>
+                  <span>Artifact</span>
+                  <strong>{trackingResult.artifact_id}</strong>
+                </p>
+                <p>
+                  <span>Clips used</span>
+                  <strong>{trackingResult.manifest.clip_count}</strong>
+                </p>
+                <p>
+                  <span>Frames written</span>
+                  <strong>{trackingResult.manifest.written_frames}</strong>
+                </p>
+              </div>
+              <a className="secondary inline-link" href={withApiBase(trackingResult.manifest_url)} rel="noreferrer" target="_blank">
+                Open manifest JSON
+              </a>
             </div>
           ) : null}
         </section>
+      </section>
 
-        <section className="panel history-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">History</p>
-              <h2>Recent AI jobs</h2>
-            </div>
-            <p className="muted">Tracked per user and per video in PostgreSQL.</p>
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Queue</p>
+            <h2>Indexed `.h265` videos</h2>
           </div>
-          <div className="history-list">
-            {queries.map((item) => (
-              <article key={item.query_id} className="history-card">
-                <header>
-                  <strong>{item.video_title}</strong>
-                  <span>{item.status}</span>
-                </header>
-                <p>{item.query_text}</p>
-                <small>{item.ai_response?.summary ?? "No AI summary yet."}</small>
-              </article>
-            ))}
-            {!queries.length ? <div className="empty-state">No AI jobs yet. Upload a video and run your first query.</div> : null}
-          </div>
-        </section>
+        </div>
+        <div className="video-list">
+          {queueVideos.map((video) => (
+            <a key={video.video_id} className="video-card" href={video.available_link_video} target="_blank" rel="noreferrer">
+              <strong>{video.title}</strong>
+              <span>{video.source_filename ?? video.camera_id ?? "queue"}</span>
+              <small>{video.storage_backend}</small>
+            </a>
+          ))}
+          {!queueVideos.length ? <div className="empty-state">Queue is still empty. Add `.h265` into `Import_New` or press `Move`.</div> : null}
+        </div>
       </section>
     </main>
   );

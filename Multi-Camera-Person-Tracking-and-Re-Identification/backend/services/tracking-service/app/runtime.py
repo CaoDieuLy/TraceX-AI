@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+os.environ.setdefault("OPENCV_VIDEOIO_DEBUG", "0")
+os.environ.setdefault("OPENCV_VIDEOCAPTURE_DEBUG", "0")
+os.environ.setdefault("OPENCV_FFMPEG_DEBUG", "0")
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")
+
 import cv2
+
+try:
+    cv2.setLogLevel(getattr(cv2, "LOG_LEVEL_ERROR", 2))
+except Exception:
+    pass
 
 from .config import settings
 from .cuda_runtime import configure_torch_runtime

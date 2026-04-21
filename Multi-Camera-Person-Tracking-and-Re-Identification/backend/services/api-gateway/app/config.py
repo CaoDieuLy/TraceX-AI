@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     metadata_service_url: str = "http://metadata-service:8000"
     tracking_service_url: str = "http://tracking-service:8000"
     cors_allowed_origins: str = "http://localhost:3000"
+    lightning_api_token: str = ""
+    lightning_api_auth_header: str = "Authorization"
+    lightning_api_auth_prefix: str = "Bearer "
 
     model_config = SettingsConfigDict(extra="ignore")
 

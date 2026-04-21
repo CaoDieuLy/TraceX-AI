@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     ingestion_work_root: str = str(PROJECT_ROOT / "storage" / "tracking-ingestion")
     video_conversion_output_dir: str = str(PROJECT_ROOT / "storage" / "video-conversion")
     video_download_output_dir: str = str(PROJECT_ROOT / "storage" / "tracking-outputs")
+    tracking_artifact_root: str = str(PROJECT_ROOT / "storage" / "tracking-artifacts")
 
     # Camera calibration for 3D world projection
     camera_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "camera_calibration.json")
@@ -102,6 +103,8 @@ class Settings(BaseSettings):
     lightning_api_auth_header: str = "Authorization"
     lightning_api_auth_prefix: str = "Bearer "
     lightning_timeout_seconds: int = 180
+    download_remote_outputs: bool = False
+    cleanup_remote_query_inputs: bool = True
 
     enable_trackeval: bool = True
     enable_geometry_gating: bool = True
