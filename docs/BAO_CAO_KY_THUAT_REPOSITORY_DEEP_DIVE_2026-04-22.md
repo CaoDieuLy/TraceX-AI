@@ -100,6 +100,43 @@ User Browser
 | `shared_secret_runtime.py` | loader hợp nhất env + OAuth secret + Google Drive client |
 | `exchange.py` | script full-pipeline/bootstrap/integration test để ingest hàng loạt và seed DB |
 
+### 1.5. Kiến trúc cốt lõi AI ở mức profile
+
+Trong `tracking-service/app/pipeline_profiles.py`, profile mặc định `accuracy_first` mô tả một stack SOTA hơn:
+
+- detector: `RF-DETR 2x-large`
+- tracker: `OCMCTrack-style corrective cascade`
+- ReID: `SOLIDER + KPR`
+- semantic search: `ITSELF`
+- evaluation: `TrackEval HOTA`
+
+### 1.6. Bức tranh AI core theo cách hiểu đúng
+
+Nếu nhìn đúng bản chất, lõi của hệ thống không phải “frontend gọi backend”, mà là:
+
+```text
+Ingestion core
+  -> detect người
+  -> track theo thời gian
+  -> sinh embedding đại diện cho từng person track
+  -> sinh caption / appearance summary
+  -> build candidate document
+  -> lưu DB + local metadata
+
+Query core
+  -> text embedding
+  -> shortlist candidate từ DB
+  -> rerank bằng embedding + semantic overlap + visibility/world cues
+  -> top-k candidate
+
+Tracking artifact core
+  -> lấy selected candidate làm anchor
+  -> chọn clips liên quan
+  -> dựng video tracking output + manifest
+```
+
+Nghĩa là web stack chỉ là “vỏ orchestration”; lõi thật nằm ở `hospital_pipeline.py`, `vlm_engine.py`, `tracking-service/service.py`, `ingestion_runtime.py`.
+
 ## 2. Cấu trúc thư mục và vai trò từng phần
 
 ### 2.1. Root workspace `A20-App-119`
@@ -1449,11 +1486,111 @@ Tức là repo hiện tại chưa phải kiến trúc vector DB riêng biệt.
 
 ## 7. AI / Model / ML / LLM Flow
 
+## 7.0. Kiến trúc AI cốt lõi gốc của repo đang vận hành thế nào?
+
+Đây là phần nên đọc trước khi xem các subsection còn lại.
+
+### 7.0.1. Entrypoint AI thật nằm ở đâu?
+
+Luồng AI production hiện tại không bắt đầu ở frontend, mà bắt đầu ở:
+
+- `tracking-service/app/ingestion_runtime.py`
+- `backend/legacy-engine/src_vlm/hospital_pipeline.py`
+- `backend/legacy-engine/src_vlm/vlm_engine.py`
+- `tracking-service/app/service.py`
+
+Trong `ingestion_runtime.py`, runtime nạp `VLM_Metadata_Engine`, sau đó gọi vào hospital pipeline để build `people`:
+
+```python
+from src_vlm.vlm_engine import VLM_Metadata_Engine
+...
+_SHARED_VLM_ENGINE = VLM_Metadata_Engine(use_mock=False)
+```
+
+Và chính `hospital_pipeline._build_detected_people(...)` mới là nơi chạy chuỗi:
+
+- detect
+- track
+- embedding
+- caption
+- semantic enrichment
+
+### 7.0.2. Trình tự tuần tự của pipeline lõi khi ingest một video
+
+Với một file `.h265` hợp lệ, flow cốt lõi đang chạy hiện tại là:
+
+1. `ingestion_runtime.process_video(...)` resolve source local hoặc Google Drive
+2. `_prepare_compressed_video()` đảm bảo input là `.h265/.hevc`
+3. `hospital_pipeline._build_detected_people(...)` được gọi
+4. `_probe_video(...)` lấy fps, frame_count, width, height
+5. khởi tạo detector `YOLO26`
+6. khởi tạo `CLIPReIDExtractor`
+7. khởi tạo `ByteTrackStyleTracker`
+8. sample frame theo `DEFAULT_DETECTION_FPS`
+9. detect person theo batch
+10. crop từng detection hợp lệ và trích embedding ReID theo batch
+11. associate detection -> track qua `ByteTrackStyleTracker`
+12. aggregate các track đủ dài thành candidate
+13. chọn representative frame / representative bbox / content frames / timeline
+14. caption representative crop bằng `BLIP`
+15. trích semantic attributes từ caption
+16. gán `embedding_vector`, `itself_features`, `search_text`
+17. ghi metadata JSON
+18. trả `video_payload + people` cho tracking-service
+19. metadata-service hoặc `exchange.py` upsert vào PostgreSQL
+
+Tức là thứ tự cốt lõi thực tế là:
+
+```text
+source video
+  -> probe metadata
+  -> frame sampling
+  -> person detection
+  -> track association
+  -> representative crops
+  -> ReID embeddings
+  -> BLIP caption
+  -> semantic attributes + timeline
+  -> candidate documents
+  -> metadata JSON + DB rows
+```
+
+### 7.0.3. Mô hình lõi nào đang giữ vai trò nào?
+
+| Vai trò | Model / thuật toán | Nơi dùng |
+|---|---|---|
+| detector | `YOLO26-X` | `hospital_pipeline.py` |
+| tracker | `ByteTrackStyleTracker` custom | `hospital_pipeline.py` |
+| image/person embedding | `OpenCLIP ViT-B/32` | `CLIPReIDExtractor`, `tracking-service/service.py` |
+| caption VLM | `Salesforce/blip-image-captioning-large` | `src_vlm/vlm_engine.py` |
+| text query embedding | `OpenCLIP ViT-B/32` | `tracking-service/service.py` |
+| semantic retrieval heuristic | ITSELF-lite style ensemble | `hospital_pipeline.py`, `tracking-service/service.py` |
+
+### 7.0.4. “Accuracy-first” có nghĩa gì trong repo này?
+
+`accuracy_first` hiện là một **orchestration profile**, không phải bảo đảm rằng toàn bộ model RF-DETR/SOLIDER/KPR/ITSELF full-stack đã được mount và chạy thật.
+
+Nghĩa là repo đang ở trạng thái:
+
+- implementation runtime thật: `YOLO26 + ByteTrack-style + OpenCLIP + BLIP`
+- contract/roadmap target: `RF-DETR + OCMCTrack + SOLIDER/KPR + ITSELF`
+
+Đây là lý do khi phân tích repo phải luôn tách:
+
+1. `model đang execute thật`
+2. `model được khai báo như pipeline mục tiêu`
+
 ## 7.1. Có model nào đang dùng?
 
 Từ code hiện tại:
 
-- OpenCLIP `ViT-B-32` pretrained `openai` cho text-image embedding/rerank
+- `YOLO26-X` cho person detection
+- `ByteTrackStyleTracker` custom cho temporal association
+- `OpenCLIP ViT-B-32` pretrained `openai` cho:
+  - person embedding
+  - text embedding
+  - candidate reranking
+- `Salesforce/blip-image-captioning-large` cho caption representative crop
 - legacy hospital pipeline trong `backend/legacy-engine`
 - VLM metadata engine trong `src_vlm/vlm_engine.py`
 
@@ -1478,6 +1615,42 @@ Nếu có CUDA:
 device = "cuda" if torch.cuda.is_available() else "cpu"
 ```
 
+Vai trò cụ thể:
+
+- encode query text
+- so cosine với `embedding_vector` của candidate
+- kết hợp với semantic overlap, visibility, world-position bonus
+
+### Detection + tracking + embedding ingest
+
+Chạy trong `backend/legacy-engine/src_vlm/hospital_pipeline.py`
+
+Detector:
+
+```python
+model = YOLO("yolo26x.pt")
+```
+
+Tracker:
+
+```python
+class ByteTrackStyleTracker:
+```
+
+ReID/image embedding:
+
+```python
+self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+    "ViT-B-32", pretrained="openai"
+)
+```
+
+Caption model:
+
+```python
+self.model_id = "Salesforce/blip-image-captioning-large"
+```
+
 ### Video ingestion / metadata generation
 
 Chạy qua:
@@ -1485,6 +1658,21 @@ Chạy qua:
 - `tracking-service/app/ingestion_runtime.py`
 - `backend/legacy-engine/src_vlm/hospital_pipeline.py`
 - `backend/legacy-engine/src_vlm/vlm_engine.py`
+
+Trình tự thực thi thật của `_build_detected_people(...)` là:
+
+1. probe video
+2. sample frame theo stride
+3. detect person batch bằng YOLO26
+4. lọc bbox theo `DEFAULT_MIN_PERSON_AREA`
+5. crop person batch
+6. trích embedding ReID bằng OpenCLIP batch
+7. associate qua `ByteTrackStyleTracker`
+8. aggregate track thành candidate
+9. tạo timeline/content frames/representative bbox
+10. caption representative crop bằng BLIP
+11. trích semantic attributes từ caption
+12. finalize `search_text` giàu ngữ nghĩa để phục vụ search
 
 ### Remote LightningAI
 
@@ -1511,6 +1699,8 @@ AI ở đây chủ yếu là:
 - embedding/retrieval/rerank
 - VLM caption/metadata
 
+Với BLIP caption, “prompting” ở đây không phải prompt engineering nhiều tầng, mà là feed image vào caption model để sinh mô tả ngắn, sau đó hệ thống tự bọc caption đó thành `appearance_summary`, `search_text`, `semantic_attributes`.
+
 ## 7.4. Input / output theo từng luồng AI
 
 ### A. Ingestion
@@ -1533,6 +1723,22 @@ Output:
 Schema:
 
 - `tracking-service/app/schemas.py -> VideoIngestionRequest/Response`
+
+Ở mức lõi AI, object trung gian quan trọng nhất sinh ra trong ingest là mỗi `person candidate`, gồm:
+
+- `candidate_id`
+- `track_id`
+- `bbox`
+- `timeline`
+- `content_frames`
+- `person_caption`
+- `appearance_summary`
+- `semantic_attributes`
+- `embedding_vector`
+- `itself_features`
+- `search_text`
+
+Nói cách khác, **candidate** là “đơn vị dữ liệu trung tâm” của toàn bộ hệ thống. Frontend và DB chỉ đang hiển thị/lưu trữ những candidate này.
 
 ### B. Candidate search rerank
 
@@ -1581,6 +1787,12 @@ Chúng thường được giữ trong `raw_metadata` của `person_candidates` d
 - `candidate_vector`
 - `itself_features`
 
+Điểm đáng chú ý:
+
+- `embedding_vector` hiện vừa đóng vai trò ReID-ish image embedding, vừa là vector dùng cho text-image rerank
+- hệ thống đang “nhúng vector trực tiếp vào JSONB row”, thay vì thiết kế một vector store chuyên dụng
+- vì vậy DB hiện là catalog store, còn tính toán similarity diễn ra ở application layer
+
 ## 7.6. Có memory / session / streaming?
 
 - không có conversation memory
@@ -1600,6 +1812,86 @@ Có fallback cục bộ ở một số điểm:
 - build query mode local nếu không có `LIGHTNING_API_BASE_URL`
 
 Nhưng hệ thống **không có retry framework chuẩn** cho Lightning/Drive/DB.
+
+## 7.8. Pipeline profile nào gần với runtime thật nhất?
+
+Đây là câu hỏi rất quan trọng khi reverse engineering repo.
+
+### `accuracy_first`
+
+- là profile mặc định ở tầng orchestration/config
+- mô tả stack mục tiêu hiện đại hơn
+- chưa phản ánh 1-1 model runtime thật ở legacy engine
+
+### `edge_accuracy`
+
+Đây là profile **gần với code runtime hiện hành hơn**, vì nó khai báo:
+
+- detector: `YOLO26-X`
+- tracker: `ByteTrack with geometry gates`
+- semantic search: lightweight rerank
+
+Nó gần với phần `hospital_pipeline.py` hơn `accuracy_first`.
+
+### `legacy_compat`
+
+- mô tả stack cũ `YOLOv4 + Deep SORT + Torchreid`
+- chủ yếu để giữ backward-compatibility về concept
+
+Kết luận thực dụng:
+
+- nếu hỏi “profile config mặc định là gì?” -> `accuracy_first`
+- nếu hỏi “model nào đang chạy thật trong ingestion runtime hiện tại?” -> gần `edge_accuracy` hơn
+
+## 7.9. Luồng tuần tự từ video thô đến query kết quả
+
+Đây là chuỗi end-to-end ở mức AI core:
+
+### Giai đoạn 1. Ingestion
+
+```text
+.h265 video
+  -> sample frame
+  -> detect person (YOLO26)
+  -> associate detections qua thời gian (ByteTrack-style)
+  -> collect track
+  -> representative crop + content frames
+  -> embedding person (OpenCLIP image encoder)
+  -> caption representative crop (BLIP)
+  -> semantic attributes + search_text
+  -> metadata JSON + person_candidates rows
+```
+
+### Giai đoạn 2. Query
+
+```text
+user query text
+  -> OpenCLIP text embedding
+  -> local shortlist từ PostgreSQL
+  -> rerank bằng embedding similarity + semantic overlap + visibility/world cues
+  -> top-k candidates
+```
+
+### Giai đoạn 3. Artifact output
+
+```text
+selected candidate
+  -> lấy matched segments / anchor similarity shortlist
+  -> resolve source video
+  -> cắt clip tương ứng
+  -> overlay text / stitch
+  -> output mp4 + manifest
+```
+
+### Ý nghĩa kiến trúc
+
+Toàn bộ hệ thống đang tối ưu theo hướng:
+
+- **nặng ở ingestion**
+- **nhẹ hơn ở query**
+- **artifact build dựa nhiều vào metadata đã sinh sẵn**
+
+Đây là triết lý kiến trúc xuyên suốt repo, và cũng là lý do vì sao dữ liệu metadata/candidate là tài sản cốt lõi của hệ thống.
 
 ## 8. Main Flow và Sub-flow chi tiết
 
@@ -2467,4 +2759,3 @@ const response = await apiFetch("/api/v1/candidates/track", {
   }),
 });
 ```
-
