@@ -1,17 +1,33 @@
+import json
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 
 from .schemas import (
     AiProcessRequest,
     AiProcessResponse,
+    CandidateSearchRequest,
+    CandidateSearchResponse,
+    CandidateTrackRequest,
+    CandidateTrackResponse,
     TrackingRequest,
     TrackingResponse,
     VideoIngestionRequest,
     VideoIngestionResponse,
 )
 from .config import settings
-from .service import get_pipeline_config, process_video_ingestion, process_video_query, process_video_query_worker, run_tracking
+from .service import (
+    build_tracking_video_remote,
+    get_pipeline_config,
+    process_video_ingestion,
+    process_video_query,
+    process_video_query_worker,
+    resolve_tracking_artifact_paths,
+    run_tracking,
+    search_candidates_remote,
+)
 
 app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
 
@@ -96,3 +112,76 @@ def tracking_run(payload: TrackingRequest) -> dict:
 @app.post("/api/v1/ingestion/process", response_model=VideoIngestionResponse)
 def ingestion_process(payload: VideoIngestionRequest) -> dict:
     return process_video_ingestion(payload.model_dump())
+
+
+@app.post("/api/v1/ingestion/upload", response_model=VideoIngestionResponse)
+async def ingestion_upload(
+    file: UploadFile = File(...),
+    source_filename: str | None = Form(default=None),
+    camera_id: str | None = Form(default=None),
+    recorded_start: str | None = Form(default=None),
+    output_basename: str | None = Form(default=None),
+    metadata: str | None = Form(default=None),
+) -> dict:
+    upload_root = Path(settings.ingestion_work_root) / "uploaded-ingestion-inputs"
+    upload_root.mkdir(parents=True, exist_ok=True)
+    filename = source_filename or file.filename or "upload.h265"
+    local_input_path = upload_root / filename
+    local_input_path.write_bytes(await file.read())
+
+    parsed_recorded_start = None
+    if recorded_start:
+        normalized = recorded_start.strip().replace("Z", "+00:00")
+        parsed_recorded_start = datetime.fromisoformat(normalized)
+
+    parsed_metadata = {}
+    if metadata:
+        try:
+            payload = json.loads(metadata)
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict):
+            parsed_metadata = payload
+
+    return process_video_ingestion(
+        {
+            "source_path": str(local_input_path),
+            "source_filename": filename,
+            "camera_id": camera_id,
+            "recorded_start": parsed_recorded_start,
+            "output_basename": output_basename,
+            "metadata": parsed_metadata,
+        }
+    )
+
+
+@app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)
+def candidate_search(payload: CandidateSearchRequest) -> dict:
+    return search_candidates_remote(payload.query_text, payload.candidates, payload.limit)
+
+
+@app.post("/api/v1/candidates/track", response_model=CandidateTrackResponse)
+def candidate_track(payload: CandidateTrackRequest) -> dict:
+    return build_tracking_video_remote(
+        selected_candidate_id=payload.selected_candidate_id,
+        candidates=payload.candidates,
+        candidate_ids=payload.candidate_ids,
+        query_text=payload.query_text,
+        max_segments_per_candidate=payload.max_segments_per_candidate,
+    )
+
+
+@app.get("/api/v1/tracking-artifacts/{artifact_id}")
+def tracking_artifact_video(artifact_id: str) -> FileResponse:
+    video_path, _manifest_path = resolve_tracking_artifact_paths(artifact_id)
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail=f"Tracking artifact not found: {artifact_id}")
+    return FileResponse(video_path, media_type="video/mp4", filename=video_path.name)
+
+
+@app.get("/api/v1/tracking-artifacts/{artifact_id}/manifest")
+def tracking_artifact_manifest(artifact_id: str) -> JSONResponse:
+    _video_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail=f"Tracking artifact manifest not found: {artifact_id}")
+    return JSONResponse(content=json.loads(manifest_path.read_text(encoding="utf-8")))

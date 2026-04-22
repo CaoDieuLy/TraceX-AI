@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from .auth import create_access_token
-from .database import Base, engine, get_session
+from .database import Base, SessionLocal, engine, get_session
 from .deps import get_current_user
 from .models import User
 from .queue_runtime import QueueSyncService
 from .schemas import (
     AuthTokenResponse,
     CandidateListResponse,
+    CandidateSearchRequest,
+    CandidateSearchResponse,
+    CandidateTrackRequest,
+    CandidateTrackResponse,
     CandidateResponse,
     ImportResponse,
     OverviewResponse,
@@ -30,6 +37,8 @@ from .schemas import (
 )
 from .service import (
     authenticate_user,
+    build_candidate_preview_image,
+    build_tracking_video,
     create_user,
     create_video_asset,
     create_video_query,
@@ -41,8 +50,13 @@ from .service import (
     list_queue_videos,
     list_video_queries,
     list_videos,
+    load_queue_video_metadata,
+    load_queue_video_file_path,
+    rank_candidates,
+    resolve_tracking_artifact_paths,
     save_uploaded_video_bytes,
     search_candidates,
+    sync_local_queue_state,
     update_video_query,
     video_to_payload,
     query_to_payload,
@@ -54,6 +68,13 @@ app = FastAPI(title="MCPT Metadata Service", version="2.0.0")
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    session = SessionLocal()
+    try:
+        sync_local_queue_state(session, only_if_empty=True)
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
 
 
 @app.get("/health")
@@ -73,9 +94,9 @@ def register(payload: UserRegisterRequest, session: Session = Depends(get_sessio
 
 @app.post("/api/v1/auth/login", response_model=AuthTokenResponse)
 def login(payload: UserLoginRequest, session: Session = Depends(get_session)) -> dict:
-    user = authenticate_user(session, email=payload.email, password=payload.password)
+    user = authenticate_user(session, identifier=payload.identifier, password=payload.password)
     if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username, email, or password")
     token = create_access_token(user.email)
     return {"access_token": token, "user": user}
 
@@ -200,6 +221,45 @@ def candidate_detail(candidate_id: str, session: Session = Depends(get_session))
     return candidate
 
 
+@app.get("/api/v1/candidates/{candidate_id}/preview")
+def candidate_preview(candidate_id: str, session: Session = Depends(get_session)) -> FileResponse:
+    try:
+        preview_path = build_candidate_preview_image(session, candidate_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(preview_path, media_type="image/jpeg", filename=preview_path.name)
+
+
+@app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)
+def candidate_search(
+    payload: CandidateSearchRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    items = rank_candidates(session=session, query_text=payload.query_text, limit=payload.limit)
+    return {"query_text": payload.query_text, "count": len(items), "items": items}
+
+
+@app.post("/api/v1/candidates/track", response_model=CandidateTrackResponse)
+def candidate_track(
+    payload: CandidateTrackRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    try:
+        return build_tracking_video(
+            session,
+            selected_candidate_id=payload.selected_candidate_id,
+            candidate_ids=payload.candidate_ids,
+            query_text=payload.query_text,
+            max_segments_per_candidate=payload.max_segments_per_candidate,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/candidates/import-legacy", response_model=ImportResponse)
 def import_candidates(session: Session = Depends(get_session)) -> dict:
     return import_legacy_metadata(session)
@@ -209,6 +269,23 @@ def import_candidates(session: Session = Depends(get_session)) -> dict:
 def queue_videos(session: Session = Depends(get_session)) -> dict:
     items = list_queue_videos(session)
     return {"count": len(items), "items": items}
+
+
+@app.get("/api/v1/queue/videos/{video_id}/metadata")
+def queue_video_metadata(video_id: str, session: Session = Depends(get_session)) -> dict:
+    try:
+        return load_queue_video_metadata(session, video_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/queue/videos/{video_id}/file")
+def queue_video_file(video_id: str, session: Session = Depends(get_session)) -> FileResponse:
+    try:
+        video_path = load_queue_video_file_path(session, video_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(video_path, media_type="video/h265", filename=video_path.name)
 
 
 @app.post("/api/v1/queue/bootstrap", response_model=QueueBootstrapResponse)
@@ -233,3 +310,19 @@ def process_imports(session: Session = Depends(get_session)) -> dict:
     except Exception as exc:
         session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/tracking-artifacts/{artifact_id}")
+def tracking_artifact_video(artifact_id: str) -> FileResponse:
+    video_path, _manifest_path = resolve_tracking_artifact_paths(artifact_id)
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Tracking artifact not found")
+    return FileResponse(video_path, media_type="video/mp4", filename=video_path.name)
+
+
+@app.get("/api/v1/tracking-artifacts/{artifact_id}/manifest")
+def tracking_artifact_manifest(artifact_id: str) -> JSONResponse:
+    _video_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="Tracking manifest not found")
+    return JSONResponse(content=json.loads(manifest_path.read_text(encoding="utf-8")))

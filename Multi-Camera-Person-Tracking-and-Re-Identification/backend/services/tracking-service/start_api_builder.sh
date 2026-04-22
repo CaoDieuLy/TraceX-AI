@@ -19,6 +19,46 @@ echo "[start_api_builder] shared_env=$MCPT_SHARED_ENV_FILE"
 echo "[start_api_builder] python=$(command -v python)"
 echo "[start_api_builder] python_version=$(python --version 2>&1)"
 echo "[start_api_builder] port=${PORT:-8000}"
+echo "[start_api_builder] require_cuda=${REQUIRE_CUDA:-0}"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  echo "[start_api_builder] nvidia_smi=$(command -v nvidia-smi)"
+  if ! nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; then
+    echo "[start_api_builder] WARNING: nvidia-smi exists but could not query GPU state" >&2
+  fi
+else
+  echo "[start_api_builder] WARNING: nvidia-smi not found in PATH"
+fi
+
+python - <<'PY'
+try:
+    import torch
+    print(f"[start_api_builder] torch_version={getattr(torch, '__version__', 'unknown')}")
+    print(f"[start_api_builder] torch_cuda_available={torch.cuda.is_available()}")
+    print(f"[start_api_builder] torch_cuda_device_count={torch.cuda.device_count() if torch.cuda.is_available() else 0}")
+    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        print(f"[start_api_builder] torch_cuda_device_name={torch.cuda.get_device_name(0)}")
+except Exception as exc:
+    print(f"[start_api_builder] WARNING: torch CUDA probe failed: {exc}")
+PY
+
+if [[ "${REQUIRE_CUDA:-0}" == "1" ]]; then
+  python - <<'PY'
+import sys
+try:
+    import torch
+except Exception as exc:
+    print(f"[start_api_builder] ERROR: REQUIRE_CUDA=1 but torch import failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+    print(
+        "[start_api_builder] ERROR: REQUIRE_CUDA=1 but no CUDA device is visible to the tracking-service process",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+fi
 
 missing_modules="$(
 python - <<'PY'

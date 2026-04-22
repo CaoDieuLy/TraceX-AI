@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from .config import settings
 
@@ -64,6 +65,13 @@ async def _patch_json(url: str, payload: dict[str, Any] | None = None, headers: 
         response = await client.patch(url, json=payload or {}, headers=headers)
         response.raise_for_status()
         return response.json()
+
+
+async def _get_bytes(url: str, headers: dict[str, str] | None = None) -> tuple[bytes, str]:
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        return response.content, response.headers.get("content-type", "application/octet-stream")
 
 
 @app.get("/health")
@@ -262,10 +270,70 @@ async def candidate_detail(candidate_id: str) -> dict:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
+@app.get("/api/v1/candidates/{candidate_id}/preview")
+async def candidate_preview(candidate_id: str) -> Response:
+    try:
+        content, content_type = await _get_bytes(f"{settings.metadata_service_url}/api/v1/candidates/{candidate_id}/preview")
+        return Response(content=content, media_type=content_type)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.post("/api/v1/candidates/search")
+async def candidate_search(payload: dict[str, Any], request: Request) -> dict:
+    try:
+        return await _post_json(
+            f"{settings.metadata_service_url}/api/v1/candidates/search",
+            payload,
+            headers=_forward_auth_headers(request),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.post("/api/v1/candidates/track")
+async def candidate_track(payload: dict[str, Any], request: Request) -> dict:
+    try:
+        return await _post_json(
+            f"{settings.metadata_service_url}/api/v1/candidates/track",
+            payload,
+            headers=_forward_auth_headers(request),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
 @app.get("/api/v1/queue/videos")
 async def queue_videos() -> dict:
     try:
         return await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.get("/api/v1/queue/videos/{video_id}/metadata")
+async def queue_video_metadata(video_id: str) -> dict:
+    try:
+        return await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos/{video_id}/metadata")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.get("/api/v1/queue/videos/{video_id}/file")
+async def queue_video_file(video_id: str) -> Response:
+    try:
+        content, content_type = await _get_bytes(f"{settings.metadata_service_url}/api/v1/queue/videos/{video_id}/file")
+        return Response(content=content, media_type=content_type)
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:
@@ -300,5 +368,37 @@ async def tracking_run(payload: dict[str, Any], request: Request) -> dict:
             payload,
             headers=_tracking_service_headers(request),
         )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Tracking service error: {exc}") from exc
+
+
+@app.get("/api/v1/tracking-artifacts/{artifact_id}")
+async def tracking_artifact_video(artifact_id: str) -> Response:
+    try:
+        content, content_type = await _get_bytes(
+            f"{settings.tracking_service_url}/api/v1/tracking-artifacts/{artifact_id}",
+            headers=_tracking_service_headers(),
+        )
+        return Response(content=content, media_type=content_type)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+        content, content_type = await _get_bytes(f"{settings.metadata_service_url}/api/v1/tracking-artifacts/{artifact_id}")
+        return Response(content=content, media_type=content_type)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Tracking service error: {exc}") from exc
+
+
+@app.get("/api/v1/tracking-artifacts/{artifact_id}/manifest")
+async def tracking_artifact_manifest(artifact_id: str) -> dict:
+    try:
+        return await _get_json(
+            f"{settings.tracking_service_url}/api/v1/tracking-artifacts/{artifact_id}/manifest",
+            headers=_tracking_service_headers(),
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+        return await _get_json(f"{settings.metadata_service_url}/api/v1/tracking-artifacts/{artifact_id}/manifest")
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Tracking service error: {exc}") from exc
