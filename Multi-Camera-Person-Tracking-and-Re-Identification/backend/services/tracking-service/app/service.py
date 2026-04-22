@@ -337,6 +337,136 @@ def _precompute_candidate_embedding_scores(query_embedding: np.ndarray | None, c
     return {row_index: float(score) for row_index, score in zip(row_indices, scores)}
 
 
+def _candidate_embedding_values(candidate: dict) -> list[float]:
+    for key in ("embedding_vector", "candidate_vector", "itself_features"):
+        values = candidate.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        try:
+            vector = [float(value) for value in values]
+        except (TypeError, ValueError):
+            continue
+        if vector:
+            return vector
+    return []
+
+
+def _precompute_anchor_similarity_scores(anchor_candidate: dict, candidates: list[dict]) -> dict[int, float]:
+    anchor_embedding = _candidate_embedding_values(anchor_candidate)
+    if not anchor_embedding:
+        return {}
+
+    anchor_vector = np.asarray(anchor_embedding, dtype=np.float32)
+    if anchor_vector.ndim != 1:
+        return {}
+
+    anchor_norm = float(np.linalg.norm(anchor_vector))
+    if anchor_norm <= 1e-8:
+        return {}
+    anchor_vector = anchor_vector / anchor_norm
+
+    row_indices: list[int] = []
+    matrix_rows: list[np.ndarray] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_embedding = _candidate_embedding_values(candidate)
+        if not candidate_embedding or len(candidate_embedding) != anchor_vector.shape[0]:
+            continue
+        candidate_vector = np.asarray(candidate_embedding, dtype=np.float32)
+        candidate_norm = float(np.linalg.norm(candidate_vector))
+        if candidate_norm <= 1e-8:
+            continue
+        row_indices.append(index)
+        matrix_rows.append(candidate_vector / candidate_norm)
+
+    if not matrix_rows:
+        return {}
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        matrix_tensor = torch.as_tensor(np.stack(matrix_rows, axis=0), device=device)
+        anchor_tensor = torch.as_tensor(anchor_vector, device=device)
+        scores_tensor = matrix_tensor @ anchor_tensor
+        scores = scores_tensor.detach().cpu().numpy()
+    else:
+        matrix = np.stack(matrix_rows, axis=0)
+        scores = matrix @ anchor_vector
+    return {row_index: float(score) for row_index, score in zip(row_indices, scores)}
+
+
+def _global_tracking_matches(
+    *,
+    selected_candidate_id: str,
+    candidates: list[dict],
+    query_text: str | None,
+    max_matches: int = 24,
+    per_video_limit: int = 3,
+) -> list[dict]:
+    normalized_candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
+    if not normalized_candidates:
+        return []
+
+    anchor = next(
+        (
+            candidate for candidate in normalized_candidates
+            if str(candidate.get("candidate_id") or "").strip() == str(selected_candidate_id or "").strip()
+        ),
+        None,
+    )
+    if anchor is None:
+        return []
+
+    cleaned_query = str(query_text or "").strip()
+    anchor_scores = _precompute_anchor_similarity_scores(anchor, normalized_candidates)
+
+    ranked: list[dict] = []
+    for index, candidate in enumerate(normalized_candidates):
+        candidate_view = _candidate_payload_view(candidate)
+        anchor_score = float(anchor_scores.get(index) or 0.0)
+        semantic_score = _semantic_overlap_itself(cleaned_query, candidate_view) if cleaned_query else 0.0
+        visibility_score = _visibility_bonus(candidate_view)
+        timeline_bonus = min(len(_normalize_tracking_segments(candidate_view, limit=3)), 3) * 0.01
+        total_score = anchor_score * 0.78 + semantic_score * 0.12 + visibility_score * 0.06 + timeline_bonus
+
+        enriched = dict(candidate)
+        enriched["anchor_similarity"] = round(anchor_score, 6)
+        enriched["score"] = round(total_score, 6)
+        if not enriched.get("matched_segments"):
+            enriched["matched_segments"] = _normalize_tracking_segments(candidate_view, limit=3)
+        ranked.append(enriched)
+
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -float(item.get("anchor_similarity") or 0.0),
+            str(item.get("video_id") or ""),
+            str(item.get("candidate_id") or ""),
+        )
+    )
+
+    selected: list[dict] = []
+    used_ids: set[str] = set()
+    per_video_counts: dict[str, int] = {}
+    for candidate in ranked:
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        if not candidate_id or candidate_id in used_ids:
+            continue
+        video_id = str(candidate.get("video_id") or "").strip()
+        if video_id and per_video_counts.get(video_id, 0) >= per_video_limit:
+            continue
+        selected.append(candidate)
+        used_ids.add(candidate_id)
+        if video_id:
+            per_video_counts[video_id] = per_video_counts.get(video_id, 0) + 1
+        if len(selected) >= max(2, min(max_matches, 48)):
+            break
+
+    if str(anchor.get("candidate_id") or "").strip() not in used_ids:
+        selected.insert(0, anchor)
+    return selected
+
+
 def _summarize_matches(query_text: str, video_id: str, matches: list[dict], person_count: int) -> str:
     if not matches:
         return f"Processed video '{video_id}' and generated metadata for {person_count} people, but no strong match was found for '{query_text}'."
@@ -918,16 +1048,12 @@ def build_tracking_video_remote(
 ) -> dict:
     import cv2
 
-    requested_ids: list[str] = []
-    for candidate_id in [selected_candidate_id, *(candidate_ids or [])]:
-        cleaned = str(candidate_id or "").strip()
-        if cleaned and cleaned not in requested_ids:
-            requested_ids.append(cleaned)
-
-    selected_candidates = [
-        candidate for candidate in candidates
-        if isinstance(candidate, dict) and str(candidate.get("candidate_id") or "").strip() in requested_ids
-    ]
+    selected_candidates = _global_tracking_matches(
+        selected_candidate_id=selected_candidate_id,
+        candidates=candidates,
+        query_text=query_text,
+        max_matches=max(12, min(len(candidates), 24)),
+    )
     if not selected_candidates:
         raise FileNotFoundError("No candidates found for remote tracking build")
 
@@ -1016,6 +1142,7 @@ def build_tracking_video_remote(
         "query_text": query_text,
         "selected_candidate_id": selected_candidate_id,
         "candidate_ids": [candidate.get("candidate_id") for candidate in selected_candidates],
+        "global_tracking_mode": "anchor_similarity_gpu",
         "clip_count": len(clips_manifest),
         "written_frames": written_frames,
         "video_path": str(output_path),

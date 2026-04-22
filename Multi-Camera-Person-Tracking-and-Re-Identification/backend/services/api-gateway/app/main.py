@@ -270,6 +270,17 @@ async def candidate_detail(candidate_id: str) -> dict:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
+@app.get("/api/v1/candidates/{candidate_id}/preview")
+async def candidate_preview(candidate_id: str) -> Response:
+    try:
+        content, content_type = await _get_bytes(f"{settings.metadata_service_url}/api/v1/candidates/{candidate_id}/preview")
+        return Response(content=content, media_type=content_type)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
 @app.post("/api/v1/candidates/search")
 async def candidate_search(payload: dict[str, Any], request: Request) -> dict:
     try:

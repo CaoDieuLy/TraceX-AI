@@ -95,6 +95,7 @@ class CandidateResponse(BaseModel):
     track_id: str | None = None
     human_key: str | None = None
     frame_idx: int | None = None
+    bbox: list[int] = Field(default_factory=list)
     search_text: str | None = None
     metadata_path: str | None = None
     appearance_summary: str | None = None
@@ -111,6 +112,7 @@ class CandidateResponse(BaseModel):
     local_metadata_path: str | None = None
     storage_path: str | None = None
     video_title: str | None = None
+    preview_image_url: str | None = None
     raw_metadata: dict[str, Any]
 
     model_config = ConfigDict(from_attributes=True)

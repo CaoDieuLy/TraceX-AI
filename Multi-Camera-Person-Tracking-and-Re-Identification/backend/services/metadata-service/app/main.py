@@ -37,6 +37,7 @@ from .schemas import (
 )
 from .service import (
     authenticate_user,
+    build_candidate_preview_image,
     build_tracking_video,
     create_user,
     create_video_asset,
@@ -218,6 +219,17 @@ def candidate_detail(candidate_id: str, session: Session = Depends(get_session))
     if candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
     return candidate
+
+
+@app.get("/api/v1/candidates/{candidate_id}/preview")
+def candidate_preview(candidate_id: str, session: Session = Depends(get_session)) -> FileResponse:
+    try:
+        preview_path = build_candidate_preview_image(session, candidate_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(preview_path, media_type="image/jpeg", filename=preview_path.name)
 
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)

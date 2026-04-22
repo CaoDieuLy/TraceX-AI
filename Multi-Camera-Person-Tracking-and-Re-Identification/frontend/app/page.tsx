@@ -44,7 +44,9 @@ type Candidate = {
   camera_id?: string | null;
   video_id?: string | null;
   track_id?: string | null;
+  human_key?: string | null;
   frame_idx?: number | null;
+  bbox?: number[];
   search_text?: string | null;
   appearance_summary?: string | null;
   semantic_attributes?: string[];
@@ -60,6 +62,7 @@ type Candidate = {
   local_metadata_path?: string | null;
   storage_path?: string | null;
   video_title?: string | null;
+  preview_image_url?: string | null;
   raw_metadata: Record<string, unknown>;
 };
 
@@ -96,6 +99,32 @@ function withApiBase(path: string | null | undefined): string {
     return path;
   }
   return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function candidatePreviewUrl(candidate: Candidate | null | undefined): string {
+  if (!candidate) {
+    return "";
+  }
+  return withApiBase(candidate.preview_image_url ?? null);
+}
+
+function formatSeconds(value: number | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "--";
+  }
+  const minutes = Math.floor(value / 60);
+  const seconds = Math.floor(value % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function candidatePrimaryMoment(candidate: Candidate | null | undefined) {
+  const firstSegment = candidate?.matched_segments?.[0];
+  if (!firstSegment) {
+    return null;
+  }
+  return `${formatSeconds(firstSegment.start_second)} - ${formatSeconds(firstSegment.end_second)}`;
 }
 
 export default function HomePage() {
@@ -523,20 +552,73 @@ export default function HomePage() {
             </button>
           </form>
           <div className="history-list">
-            {candidateResults.map((candidate) => (
-              <button
-                key={candidate.candidate_id}
-                className={selectedCandidateId === candidate.candidate_id ? "video-card active" : "video-card"}
-                onClick={() => setSelectedCandidateId(candidate.candidate_id)}
-                type="button"
-              >
-                <strong>
-                  {candidate.camera_id ?? candidate.video_title ?? "candidate"} / track {candidate.track_id ?? "?"}
-                </strong>
-                <span>Score {(candidate.score ?? 0).toFixed(3)}</span>
-                <small>{candidate.appearance_summary ?? candidate.search_text ?? "No summary yet."}</small>
-              </button>
-            ))}
+            {candidateResults.map((candidate, index) => {
+              const previewUrl = candidatePreviewUrl(candidate);
+              const isSelected = selectedCandidateId === candidate.candidate_id;
+              const primaryMoment = candidatePrimaryMoment(candidate);
+
+              return (
+                <article key={candidate.candidate_id} className={isSelected ? "candidate-card active" : "candidate-card"}>
+                  <div className="candidate-card__preview">
+                    {previewUrl ? (
+                      <img
+                        className="candidate-preview-image"
+                        src={previewUrl}
+                        alt={`${candidate.candidate_id} preview with bounding box`}
+                      />
+                    ) : (
+                      <div className="preview-placeholder">Preview image unavailable</div>
+                    )}
+                    <span className="candidate-rank">Top {index + 1}</span>
+                  </div>
+
+                  <div className="candidate-card__body">
+                    <div className="candidate-card__heading">
+                      <strong>
+                        {candidate.camera_id ?? candidate.video_title ?? "candidate"} | frame {candidate.frame_idx ?? "?"}
+                      </strong>
+                      <span>Score {(candidate.score ?? 0).toFixed(3)}</span>
+                    </div>
+
+                    <div className="candidate-meta">
+                      <span>Track {candidate.track_id ?? "?"}</span>
+                      <span>{candidate.human_key ?? "human_key unavailable"}</span>
+                    </div>
+
+                    <p className="candidate-summary">
+                      {candidate.appearance_summary ?? candidate.search_text ?? "No summary yet."}
+                    </p>
+
+                    <div className="candidate-meta">
+                      <span>{candidate.video_id ?? "unknown video"}</span>
+                      <span>{primaryMoment ? `Best moment ${primaryMoment}` : "No clip timing yet"}</span>
+                    </div>
+
+                    {candidate.bbox?.length === 4 ? (
+                      <div className="candidate-meta">
+                        <span>
+                          Bounding box [{candidate.bbox.join(", ")}]
+                        </span>
+                      </div>
+                    ) : null}
+
+                    {candidate.semantic_attributes?.length ? (
+                      <div className="candidate-chip-row">
+                        {candidate.semantic_attributes.slice(0, 5).map((attribute) => (
+                          <span key={`${candidate.candidate_id}-${attribute}`} className="mini-chip">
+                            {attribute}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    <button className={isSelected ? "primary" : "secondary"} onClick={() => setSelectedCandidateId(candidate.candidate_id)} type="button">
+                      {isSelected ? "Selected for output" : "Choose this candidate"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
             {!candidateResults.length ? <div className="empty-state">Top-k candidate results will appear here.</div> : null}
           </div>
         </section>
@@ -550,6 +632,54 @@ export default function HomePage() {
           </div>
           {selectedCandidate ? (
             <div className="stack">
+              <div className="preview-stage">
+                <div className="preview-stage__media">
+                  {candidatePreviewUrl(selectedCandidate) ? (
+                    <img
+                      key={selectedCandidate.candidate_id}
+                      className="preview-stage-image"
+                      src={candidatePreviewUrl(selectedCandidate)}
+                      alt={`${selectedCandidate.candidate_id} selected preview with bounding box`}
+                    />
+                  ) : (
+                    <div className="preview-placeholder large">Candidate preview image unavailable</div>
+                  )}
+                </div>
+                <div className="preview-stage__details">
+                  <p className="eyebrow">Preview before export</p>
+                  <h3>{selectedCandidate.candidate_id}</h3>
+                  <p className="lead compact">
+                    {selectedCandidate.appearance_summary ?? selectedCandidate.search_text ?? "No summary"}
+                  </p>
+                  <div className="detail-card">
+                    <p>
+                      <span>Camera / track</span>
+                      <strong>
+                        {selectedCandidate.camera_id ?? "unknown"} / {selectedCandidate.track_id ?? "?"}
+                      </strong>
+                    </p>
+                    <p>
+                      <span>Frame / human key</span>
+                      <strong>
+                        {selectedCandidate.frame_idx ?? "?"} / {selectedCandidate.human_key ?? "unavailable"}
+                      </strong>
+                    </p>
+                    <p>
+                      <span>Source video</span>
+                      <strong>{selectedCandidate.video_id ?? "Unknown video"}</strong>
+                    </p>
+                    <p>
+                      <span>Bounding box</span>
+                      <strong>{selectedCandidate.bbox?.length === 4 ? `[${selectedCandidate.bbox.join(", ")}]` : "unavailable"}</strong>
+                    </p>
+                    <p>
+                      <span>Best moment</span>
+                      <strong>{candidatePrimaryMoment(selectedCandidate) ?? "Use full source preview"}</strong>
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               <div className="detail-card">
                 <p>
                   <span>Selected candidate</span>
@@ -576,7 +706,39 @@ export default function HomePage() {
 
           {trackingResult ? (
             <div className="stack">
-              <video className="video-frame" controls preload="metadata" src={withApiBase(trackingResult.video_url)} />
+              <div className="preview-stage output-stage">
+                <div className="preview-stage__media">
+                  <video className="video-frame" controls preload="metadata" src={withApiBase(trackingResult.video_url)} />
+                </div>
+                <div className="preview-stage__details">
+                  <p className="eyebrow">Output preview</p>
+                  <h3>Tracking video ready</h3>
+                  <p className="lead compact">
+                    This is the end-user output video assembled from the selected candidate and the top-ranked supporting clips.
+                  </p>
+                  <div className="detail-card">
+                    <p>
+                      <span>Artifact</span>
+                      <strong>{trackingResult.artifact_id}</strong>
+                    </p>
+                    <p>
+                      <span>Selected candidate</span>
+                      <strong>{trackingResult.selected_candidate_id}</strong>
+                    </p>
+                    <p>
+                      <span>Clip count</span>
+                      <strong>{trackingResult.manifest.clip_count}</strong>
+                    </p>
+                    <p>
+                      <span>Frames written</span>
+                      <strong>{trackingResult.manifest.written_frames}</strong>
+                    </p>
+                  </div>
+                  <a className="secondary inline-link" href={withApiBase(trackingResult.video_url)} rel="noreferrer" target="_blank">
+                    Open output video
+                  </a>
+                </div>
+              </div>
               <div className="detail-card">
                 <p>
                   <span>Artifact</span>

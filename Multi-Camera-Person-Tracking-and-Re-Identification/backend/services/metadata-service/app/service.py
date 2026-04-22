@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import cv2
 import httpx
 from googleapiclient.http import MediaIoBaseDownload
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from .auth import hash_password, verify_password
-from .config import PROJECT_ROOT, settings
+from .config import A20_ROOT, PROJECT_ROOT, settings
 from .models import PersonCandidate, QueueVideoAsset, User, VideoAsset, VideoQuery
 
 
@@ -93,6 +95,20 @@ def _tracking_slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-._") or "tracking"
 
 
+def _public_api_url(path: str | None) -> str | None:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return None
+    if raw_path.startswith(("http://", "https://")):
+        return raw_path
+    if not raw_path.startswith("/"):
+        raw_path = f"/{raw_path}"
+    base_url = settings.public_api_base_url.strip().rstrip("/")
+    if not base_url:
+        return raw_path
+    return f"{base_url}{raw_path}"
+
+
 def _candidate_search_document(person: dict) -> str:
     parts: list[str] = []
     for key in (
@@ -128,8 +144,23 @@ def _candidate_search_document(person: dict) -> str:
     return " ".join(parts).strip()
 
 
+def _candidate_bbox(raw_metadata: dict[str, Any]) -> list[int]:
+    for key in ("bbox", "representative_bbox"):
+        bbox = raw_metadata.get(key)
+        if isinstance(bbox, list) and len(bbox) >= 4:
+            cleaned: list[int] = []
+            for value in bbox[:4]:
+                try:
+                    cleaned.append(int(float(value)))
+                except (TypeError, ValueError):
+                    cleaned.append(0)
+            return cleaned
+    return []
+
+
 def candidate_to_payload(candidate: PersonCandidate, queue_video: QueueVideoAsset | None = None) -> dict:
     raw_metadata = candidate.raw_metadata or {}
+    bbox = _candidate_bbox(raw_metadata)
     storage_path = (
         queue_video.local_video_path
         if queue_video and (queue_video.local_video_path or "").strip()
@@ -144,6 +175,7 @@ def candidate_to_payload(candidate: PersonCandidate, queue_video: QueueVideoAsse
         "track_id": candidate.track_id,
         "human_key": candidate.human_key,
         "frame_idx": candidate.frame_idx,
+        "bbox": bbox,
         "search_text": candidate.search_text,
         "metadata_path": candidate.metadata_path,
         "appearance_summary": raw_metadata.get("appearance_summary") or raw_metadata.get("person_caption"),
@@ -162,8 +194,254 @@ def candidate_to_payload(candidate: PersonCandidate, queue_video: QueueVideoAsse
         "local_metadata_path": queue_video.local_metadata_path if queue_video else None,
         "storage_path": storage_path,
         "video_title": queue_video.title if queue_video else None,
+        "source_filename": queue_video.source_filename if queue_video else None,
+        "preview_image_url": f"/api/v1/candidates/{candidate.candidate_id}/preview",
         "raw_metadata": raw_metadata,
     }
+
+
+def _trim_tracking_segments(segments: object, *, limit: int = 5) -> list[dict[str, Any]]:
+    if not isinstance(segments, list):
+        return []
+    trimmed: list[dict[str, Any]] = []
+    for segment in segments[:limit]:
+        if not isinstance(segment, dict):
+            continue
+        trimmed.append(
+            {
+                "start_second": segment.get("start_second"),
+                "end_second": segment.get("end_second"),
+                "action_summary": str(segment.get("action_summary") or "").strip(),
+            }
+        )
+    return trimmed
+
+
+def _candidate_raw_metadata_subset(raw_metadata: object) -> dict[str, Any]:
+    payload = raw_metadata if isinstance(raw_metadata, dict) else {}
+    reduced: dict[str, Any] = {}
+
+    for key in (
+        "appearance_summary",
+        "person_caption",
+        "caption",
+        "reid_profile",
+        "pipeline_profile",
+        "score",
+    ):
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            reduced[key] = value
+
+    semantic_attributes = _coerce_string_list(payload.get("semantic_attributes"))
+    if semantic_attributes:
+        reduced["semantic_attributes"] = semantic_attributes
+
+    visibility_scores = _coerce_mapping(payload.get("visibility_scores"))
+    if visibility_scores:
+        reduced["visibility_scores"] = visibility_scores
+
+    world_position = payload.get("world_position") or payload.get("top_point_projection")
+    if isinstance(world_position, dict) and world_position:
+        reduced["world_position"] = world_position
+
+    matched_segments = _trim_tracking_segments(payload.get("matched_segments"))
+    if matched_segments:
+        reduced["matched_segments"] = matched_segments
+
+    timeline = _trim_tracking_segments(payload.get("timeline"))
+    if timeline:
+        reduced["timeline"] = timeline
+
+    return reduced
+
+
+def candidate_to_ranking_payload(candidate: PersonCandidate, queue_video: QueueVideoAsset | None = None) -> dict:
+    raw_metadata = candidate.raw_metadata or {}
+    reduced_raw_metadata = _candidate_raw_metadata_subset(raw_metadata)
+    bbox = _candidate_bbox(raw_metadata)
+    storage_path = (
+        queue_video.local_video_path
+        if queue_video and (queue_video.local_video_path or "").strip()
+        else queue_video.available_link_video
+        if queue_video
+        else None
+    )
+    return {
+        "candidate_id": candidate.candidate_id,
+        "camera_id": candidate.camera_id,
+        "video_id": candidate.video_id,
+        "track_id": candidate.track_id,
+        "human_key": candidate.human_key,
+        "frame_idx": candidate.frame_idx,
+        "bbox": bbox,
+        "search_text": candidate.search_text,
+        "metadata_path": candidate.metadata_path,
+        "appearance_summary": reduced_raw_metadata.get("appearance_summary") or reduced_raw_metadata.get("person_caption"),
+        "semantic_attributes": _coerce_string_list(reduced_raw_metadata.get("semantic_attributes")),
+        "visibility_scores": _coerce_mapping(reduced_raw_metadata.get("visibility_scores")),
+        "world_position": reduced_raw_metadata.get("world_position"),
+        "reid_profile": reduced_raw_metadata.get("reid_profile"),
+        "pipeline_profile": reduced_raw_metadata.get("pipeline_profile"),
+        "score": reduced_raw_metadata.get("score"),
+        "embedding_vector": raw_metadata.get("embedding_vector"),
+        "candidate_vector": raw_metadata.get("candidate_vector"),
+        "itself_features": raw_metadata.get("itself_features"),
+        "matched_segments": reduced_raw_metadata.get("matched_segments") or [],
+        "available_link_video": queue_video.available_link_video if queue_video else None,
+        "available_link_metadata": queue_video.available_link_metadata if queue_video else None,
+        "drive_video_file_id": queue_video.drive_video_file_id if queue_video else None,
+        "drive_metadata_file_id": queue_video.drive_metadata_file_id if queue_video else None,
+        "local_video_path": queue_video.local_video_path if queue_video else None,
+        "local_metadata_path": queue_video.local_metadata_path if queue_video else None,
+        "storage_path": storage_path,
+        "video_title": queue_video.title if queue_video else None,
+        "source_filename": queue_video.source_filename if queue_video else None,
+        "preview_image_url": f"/api/v1/candidates/{candidate.candidate_id}/preview",
+        "raw_metadata": reduced_raw_metadata,
+    }
+
+
+def _remote_ranking_shortlist_limit(limit: int) -> int:
+    bounded_limit = max(1, min(limit, 50))
+    return min(max(200, bounded_limit * 40), 400)
+
+
+def _candidate_embedding_values(candidate: dict[str, Any]) -> list[float]:
+    for key in ("embedding_vector", "candidate_vector", "itself_features"):
+        values = candidate.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        vector: list[float] = []
+        try:
+            for value in values:
+                vector.append(float(value))
+        except (TypeError, ValueError):
+            continue
+        if vector:
+            return vector
+    return []
+
+
+def _embedding_cosine_similarity(anchor_vector: list[float], candidate_vector: list[float]) -> float:
+    if not anchor_vector or not candidate_vector or len(anchor_vector) != len(candidate_vector):
+        return 0.0
+    dot = 0.0
+    anchor_norm = 0.0
+    candidate_norm = 0.0
+    for anchor_value, candidate_value in zip(anchor_vector, candidate_vector):
+        dot += anchor_value * candidate_value
+        anchor_norm += anchor_value * anchor_value
+        candidate_norm += candidate_value * candidate_value
+    if anchor_norm <= 1e-12 or candidate_norm <= 1e-12:
+        return 0.0
+    return float(dot / math.sqrt(anchor_norm * candidate_norm))
+
+
+def _public_tracking_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(candidate)
+    public_video_url = _public_api_url(payload.get("available_link_video"))
+    if public_video_url:
+        payload["available_link_video"] = public_video_url
+    if not str(payload.get("source_filename") or "").strip():
+        payload["source_filename"] = str(payload.get("video_id") or payload.get("video_title") or "").strip() or None
+    return payload
+
+
+def _global_tracking_shortlist(
+    rows: list[PersonCandidate],
+    queue_map: dict[str, QueueVideoAsset],
+    *,
+    selected_candidate_id: str,
+    query_text: str | None,
+    shortlist_limit: int = 180,
+    per_video_limit: int = 6,
+) -> list[dict[str, Any]]:
+    payload_map: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload = candidate_to_ranking_payload(row, queue_map.get(str(row.video_id or "")))
+        payload_map[str(row.candidate_id)] = _public_tracking_candidate_payload(payload)
+
+    anchor = payload_map.get(str(selected_candidate_id).strip())
+    if anchor is None:
+        return []
+
+    anchor_embedding = _candidate_embedding_values(anchor)
+    cleaned_query = str(query_text or "").strip()
+    scored_rows: list[tuple[float, int, str, dict[str, Any]]] = []
+    for row in rows:
+        payload = payload_map.get(str(row.candidate_id))
+        if payload is None:
+            continue
+        candidate_embedding = _candidate_embedding_values(payload)
+        embedding_score = _embedding_cosine_similarity(anchor_embedding, candidate_embedding)
+        semantic_score = _semantic_overlap(cleaned_query, payload) if cleaned_query else 0.0
+        timeline_bonus = min(len(payload.get("matched_segments") or []), 3) * 0.01
+        total_score = embedding_score * 0.84 + semantic_score * 0.12 + timeline_bonus
+        payload["anchor_similarity"] = round(embedding_score, 6)
+        payload["global_tracking_score"] = round(total_score, 6)
+        scored_rows.append((total_score, int(row.id), str(payload.get("video_id") or ""), payload))
+
+    scored_rows.sort(key=lambda item: (-float(item[0]), -int(item[1]), item[2], str(item[3].get("candidate_id") or "")))
+
+    selected: list[dict[str, Any]] = [anchor]
+    used_ids = {str(anchor.get("candidate_id") or "")}
+    per_video_counts: dict[str, int] = {}
+    anchor_video_id = str(anchor.get("video_id") or "")
+    if anchor_video_id:
+        per_video_counts[anchor_video_id] = 1
+
+    for _score, _row_id, video_id, payload in scored_rows:
+        candidate_id = str(payload.get("candidate_id") or "")
+        if not candidate_id or candidate_id in used_ids:
+            continue
+        if video_id and per_video_counts.get(video_id, 0) >= per_video_limit:
+            continue
+        selected.append(payload)
+        used_ids.add(candidate_id)
+        if video_id:
+            per_video_counts[video_id] = per_video_counts.get(video_id, 0) + 1
+        if len(selected) >= max(2, shortlist_limit):
+            break
+
+    return selected
+
+
+def _local_prefilter_ranked_candidates(
+    rows: list[PersonCandidate],
+    queue_map: dict[str, QueueVideoAsset],
+    *,
+    query_text: str,
+    shortlist_limit: int,
+) -> list[dict]:
+    scored: list[tuple[float, int, dict[str, Any]]] = []
+
+    for row in rows:
+        payload = candidate_to_ranking_payload(row, queue_map.get(str(row.video_id or "")))
+        score = _score_candidate(query_text, payload)
+
+        if score <= 0:
+            row_search_text = str(row.search_text or "").lower()
+            query_tokens = _tokenize(query_text)
+            if row_search_text and any(token in row_search_text for token in query_tokens):
+                score = 0.005
+
+        scored.append((score, row.id, payload))
+
+    scored.sort(
+        key=lambda item: (
+            -float(item[0]),
+            -int(item[1]),
+            str(item[2].get("camera_id") or ""),
+            str(item[2].get("track_id") or ""),
+            str(item[2].get("candidate_id") or ""),
+        )
+    )
+
+    positive = [payload for score, _row_id, payload in scored if score > 0][:shortlist_limit]
+    if positive:
+        return positive
+    return [payload for _score, _row_id, payload in scored[:shortlist_limit]]
 
 
 def video_to_payload(video: VideoAsset) -> dict:
@@ -386,20 +664,184 @@ def get_candidate(session: Session, candidate_id: str) -> dict | None:
     return candidate_to_payload(row, queue_map.get(str(row.video_id or "")))
 
 
+def _bbox_xyxy(raw_bbox: object, *, frame_width: int, frame_height: int) -> tuple[int, int, int, int] | None:
+    if not isinstance(raw_bbox, list) or len(raw_bbox) < 4:
+        return None
+    try:
+        x1 = int(float(raw_bbox[0]))
+        y1 = int(float(raw_bbox[1]))
+        third = int(float(raw_bbox[2]))
+        fourth = int(float(raw_bbox[3]))
+    except (TypeError, ValueError):
+        return None
+
+    if third > x1 and fourth > y1 and third <= frame_width and fourth <= frame_height:
+        x2 = third
+        y2 = fourth
+    else:
+        x2 = x1 + max(third, 1)
+        y2 = y1 + max(fourth, 1)
+
+    x1 = max(0, min(x1, frame_width - 1))
+    y1 = max(0, min(y1, frame_height - 1))
+    x2 = max(x1 + 1, min(x2, frame_width))
+    y2 = max(y1 + 1, min(y2, frame_height))
+    return x1, y1, x2, y2
+
+
+def _preview_frame_index(candidate: PersonCandidate, raw_metadata: dict[str, Any], *, total_frames: int) -> int:
+    if total_frames <= 0:
+        return max(int(candidate.frame_idx or 0), 0)
+
+    frame_idx = int(candidate.frame_idx or 0)
+    if frame_idx > 0:
+        return min(max(frame_idx, 0), total_frames - 1)
+
+    timeline = raw_metadata.get("timeline")
+    if isinstance(timeline, list):
+        for item in timeline:
+            if not isinstance(item, dict):
+                continue
+            sample = item.get("frame_idx")
+            if sample is None:
+                continue
+            try:
+                frame_idx = int(sample)
+            except (TypeError, ValueError):
+                continue
+            return min(max(frame_idx, 0), total_frames - 1)
+    return 0
+
+
+def _draw_bbox_trails(frame: Any, raw_metadata: dict[str, Any], *, frame_width: int, frame_height: int) -> None:
+    timeline = raw_metadata.get("timeline")
+    if not isinstance(timeline, list):
+        return
+
+    trail_count = 0
+    for item in timeline[:3]:
+        if not isinstance(item, dict):
+            continue
+        samples = item.get("bbox_samples")
+        if not isinstance(samples, list):
+            continue
+        for sample in samples[:2]:
+            bbox = _bbox_xyxy(sample, frame_width=frame_width, frame_height=frame_height)
+            if bbox is None:
+                continue
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 1)
+            trail_count += 1
+            if trail_count >= 6:
+                return
+
+
+def build_candidate_preview_image(session: Session, candidate_id: str) -> Path:
+    row = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
+    if row is None:
+        raise FileNotFoundError(f"Candidate not found: {candidate_id}")
+
+    queue_video = get_queue_video(session, str(row.video_id or ""))
+    if queue_video is None:
+        raise FileNotFoundError(f"Queue video not found for candidate: {candidate_id}")
+
+    source_path = _resolve_queue_video_file_path(queue_video)
+    preview_path = _preview_root() / f"{_slugify(candidate_id)}.jpg"
+    raw_metadata = row.raw_metadata or {}
+
+    cap = cv2.VideoCapture(str(source_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open source video for candidate preview: {source_path}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    target_frame = _preview_frame_index(row, raw_metadata, total_frames=total_frames)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        raise RuntimeError(f"Could not read preview frame {target_frame} from {source_path}")
+
+    frame_height = int(frame.shape[0])
+    frame_width = int(frame.shape[1])
+    bbox = _bbox_xyxy(_candidate_bbox(raw_metadata), frame_width=frame_width, frame_height=frame_height)
+
+    overlay = frame.copy()
+    banner_height = 72
+    cv2.rectangle(overlay, (0, 0), (frame_width, banner_height), (8, 18, 28), -1)
+    cv2.addWeighted(overlay, 0.48, frame, 0.52, 0, frame)
+    cv2.putText(
+        frame,
+        f"{row.camera_id or row.video_id or 'candidate'} | frame {target_frame}",
+        (16, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (255, 255, 255),
+        2,
+    )
+    cv2.putText(
+        frame,
+        f"Track {row.track_id or '?'} | {row.candidate_id}",
+        (16, 56),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.64,
+        (110, 230, 255),
+        2,
+    )
+
+    _draw_bbox_trails(frame, raw_metadata, frame_width=frame_width, frame_height=frame_height)
+
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 255, 120), 3)
+        label = f"track {row.track_id or '?'}"
+        label_origin_y = max(y1 - 14, 24)
+        (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.64, 2)
+        cv2.rectangle(frame, (x1, label_origin_y - text_height - 8), (x1 + text_width + 14, label_origin_y + 4), (80, 255, 120), -1)
+        cv2.putText(
+            frame,
+            label,
+            (x1 + 7, label_origin_y - 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.64,
+            (8, 18, 28),
+            2,
+        )
+
+    success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not success:
+        raise RuntimeError(f"Could not encode candidate preview image for {candidate_id}")
+    preview_path.write_bytes(encoded.tobytes())
+    return preview_path
+
+
 def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[dict]:
     cleaned_query = query_text.strip()
     if not cleaned_query:
         return []
+
+    bounded_limit = max(1, min(limit, 50))
     statement = select(PersonCandidate).order_by(PersonCandidate.updated_at.desc(), PersonCandidate.id.desc())
     rows = session.scalars(statement).all()
+    if not rows:
+        return []
+
     queue_map = _queue_video_map(session, [str(row.video_id or "") for row in rows])
-    candidates = [candidate_to_payload(row, queue_map.get(str(row.video_id or ""))) for row in rows]
+    shortlist_limit = _remote_ranking_shortlist_limit(bounded_limit)
+    candidates = _local_prefilter_ranked_candidates(
+        rows,
+        queue_map,
+        query_text=cleaned_query,
+        shortlist_limit=shortlist_limit,
+    )
+
     response = _post_tracking_json(
         "/api/v1/candidates/search",
         {
             "query_text": cleaned_query,
             "candidates": candidates,
-            "limit": max(1, min(limit, 50)),
+            "limit": bounded_limit,
         },
     )
     items = response.get("items")
@@ -659,14 +1101,98 @@ def load_queue_video_metadata(session: Session, video_id: str) -> dict[str, Any]
     }
 
 
+def _preview_root() -> Path:
+    root = PROJECT_ROOT / "storage" / "candidate-previews"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _preview_source_cache_root() -> Path:
+    root = _preview_root() / "source-cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _queue_video_path_candidates(row: QueueVideoAsset) -> list[Path]:
+    candidates: list[Path] = []
+    raw_value = str(row.local_video_path or "").strip()
+    source_filename = Path(str(row.source_filename or row.video_id or "")).name
+
+    def push(path: Path | None) -> None:
+        if path is None:
+            return
+        normalized = path.expanduser()
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    if raw_value:
+        raw_path = Path(raw_value).expanduser()
+        push(raw_path)
+        if raw_path.is_absolute() and A20_ROOT:
+            raw_parts = raw_path.parts
+            host_root_parts = Path("/opt/mcpt/A20-App-119").parts
+            if raw_parts[: len(host_root_parts)] == host_root_parts:
+                try:
+                    relative = raw_path.relative_to(Path("/opt/mcpt/A20-App-119"))
+                    push(A20_ROOT / relative)
+                except ValueError:
+                    pass
+            project_mount_root = A20_ROOT / "Multi-Camera-Person-Tracking-and-Re-Identification"
+            if str(raw_path).startswith(str(PROJECT_ROOT)):
+                try:
+                    relative = raw_path.relative_to(PROJECT_ROOT)
+                    push(project_mount_root / relative)
+                except ValueError:
+                    pass
+
+    if source_filename:
+        push(PROJECT_ROOT / "storage" / "queue" / "local" / "Queue" / ".h265" / source_filename)
+        push(Path("/workspace/storage/queue/local/Queue/.h265") / source_filename)
+        if A20_ROOT:
+            push(A20_ROOT / "Multi-Camera-Person-Tracking-and-Re-Identification" / "storage" / "queue" / "local" / "Queue" / ".h265" / source_filename)
+
+    return candidates
+
+
+def _download_drive_video_to_cache(row: QueueVideoAsset) -> Path | None:
+    drive_file_id = str(row.drive_video_file_id or "").strip()
+    if not drive_file_id:
+        return None
+
+    suffix = Path(str(row.source_filename or row.video_id or drive_file_id)).suffix or ".h265"
+    target_path = _preview_source_cache_root() / f"{_slugify(drive_file_id)}{suffix}"
+    if target_path.exists() and target_path.stat().st_size > 0:
+        return target_path
+
+    from shared_secret_runtime import build_google_drive_oauth_service
+
+    drive_service = build_google_drive_oauth_service()
+    request = drive_service.files().get_media(fileId=drive_file_id, supportsAllDrives=True)
+    with target_path.open("wb") as handle:
+        downloader = MediaIoBaseDownload(handle, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+    return target_path if target_path.exists() else None
+
+
+def _resolve_queue_video_file_path(row: QueueVideoAsset) -> Path:
+    for path in _queue_video_path_candidates(row):
+        if path.exists() and path.is_file():
+            return path
+
+    downloaded = _download_drive_video_to_cache(row)
+    if downloaded is not None and downloaded.exists():
+        return downloaded
+
+    raise FileNotFoundError(f"Queue video file not found: {row.video_id}")
+
+
 def load_queue_video_file_path(session: Session, video_id: str) -> Path:
     row = get_queue_video(session, video_id)
     if row is None:
         raise FileNotFoundError(f"Queue video not found: {video_id}")
-    video_path = Path(str(row.local_video_path or "")).expanduser()
-    if video_path.exists() and video_path.is_file():
-        return video_path
-    raise FileNotFoundError(f"Queue video file not found: {video_id}")
+    return _resolve_queue_video_file_path(row)
 
 
 def _resolve_candidate_source_path(candidate: dict) -> Path:
@@ -744,6 +1270,13 @@ def _build_tracking_video_local(
         if row is None:
             continue
         payload = candidate_to_payload(row, queue_map.get(str(row.video_id or "")))
+        public_video_url = _public_api_url(payload.get("available_link_video"))
+        if public_video_url:
+            payload["available_link_video"] = public_video_url
+        if not str(payload.get("source_filename") or "").strip():
+            payload["source_filename"] = (
+                str(payload.get("video_id") or payload.get("video_title") or "").strip() or None
+            )
         selected_candidates.append(payload)
     if not selected_candidates:
         raise FileNotFoundError("No candidates found for tracking compilation")
@@ -857,34 +1390,31 @@ def build_tracking_video(
     query_text: str | None = None,
     max_segments_per_candidate: int = 2,
 ) -> dict[str, Any]:
-    candidate_order = [selected_candidate_id, *candidate_ids]
-    unique_ids: list[str] = []
-    for candidate_id in candidate_order:
-        cleaned = str(candidate_id or "").strip()
-        if cleaned and cleaned not in unique_ids:
-            unique_ids.append(cleaned)
-    if not unique_ids:
-        raise ValueError("No candidate ids were provided")
+    cleaned_selected_id = str(selected_candidate_id or "").strip()
+    if not cleaned_selected_id:
+        raise ValueError("selected_candidate_id is required")
 
-    rows = session.scalars(select(PersonCandidate).where(PersonCandidate.candidate_id.in_(unique_ids))).all()
-    row_map = {row.candidate_id: row for row in rows}
-    queue_map = _queue_video_map(session, [str(row.video_id or "") for row in rows])
-    selected_candidates: list[dict] = []
-    for candidate_id in unique_ids:
-        row = row_map.get(candidate_id)
-        if row is None:
-            continue
-        payload = candidate_to_payload(row, queue_map.get(str(row.video_id or "")))
-        selected_candidates.append(payload)
-    if not selected_candidates:
+    rows = session.scalars(select(PersonCandidate).order_by(PersonCandidate.updated_at.desc(), PersonCandidate.id.desc())).all()
+    if not rows:
         raise FileNotFoundError("No candidates found for tracking compilation")
+    queue_map = _queue_video_map(session, [str(row.video_id or "") for row in rows])
+    shortlisted_candidates = _global_tracking_shortlist(
+        rows,
+        queue_map,
+        selected_candidate_id=cleaned_selected_id,
+        query_text=query_text,
+    )
+    if not shortlisted_candidates:
+        raise FileNotFoundError(f"Selected candidate was not found: {cleaned_selected_id}")
 
+    shortlisted_ids = [str(item.get("candidate_id") or "").strip() for item in shortlisted_candidates]
+    shortlisted_ids = [item for item in shortlisted_ids if item]
     response = _post_tracking_json(
         "/api/v1/candidates/track",
         {
-            "selected_candidate_id": selected_candidate_id,
-            "candidate_ids": unique_ids,
-            "candidates": selected_candidates,
+            "selected_candidate_id": cleaned_selected_id,
+            "candidate_ids": shortlisted_ids,
+            "candidates": shortlisted_candidates,
             "query_text": query_text,
             "max_segments_per_candidate": max_segments_per_candidate,
         },
