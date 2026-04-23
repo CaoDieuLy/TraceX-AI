@@ -7,6 +7,9 @@ type VideoListProps = {
 };
 
 export function VideoList({ clips }: VideoListProps) {
+  const isVideoSource = (url: string | undefined) =>
+    Boolean(url && (url.includes("/file") || /\.(mp4|webm|ogg|mov|m3u8)(\?.*)?$/i.test(url)));
+
   return (
     <ul className="flex flex-col gap-4">
       {clips.map((clip) => (
@@ -15,13 +18,18 @@ export function VideoList({ clips }: VideoListProps) {
           className="flex gap-4 overflow-hidden rounded-2xl border border-surface-muted bg-white p-4 shadow-card"
         >
           <div className="relative h-40 w-64 shrink-0 overflow-hidden rounded-xl bg-surface-muted">
-            <Image
-              src={clip.previewUrl ?? clip.thumbnailUrl}
-              alt={clip.title}
-              fill
-              className="object-cover"
-              sizes="256px"
-            />
+            {isVideoSource(clip.previewUrl) ? (
+              <video className="h-full w-full object-cover" controls muted preload="metadata" src={clip.previewUrl} />
+            ) : (
+              <Image
+                src={clip.previewUrl ?? clip.thumbnailUrl}
+                alt={clip.title}
+                fill
+                unoptimized
+                className="object-cover"
+                sizes="256px"
+              />
+            )}
             {clip.durationLabel ? (
               <span className="absolute bottom-2 right-2 rounded-md bg-black/60 px-2 py-0.5 text-xs font-medium text-white">
                 {clip.durationLabel}

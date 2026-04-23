@@ -736,84 +736,147 @@ def _draw_bbox_trails(frame: Any, raw_metadata: dict[str, Any], *, frame_width: 
                 return
 
 
-def build_candidate_preview_image(session: Session, candidate_id: str) -> Path:
-    row = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
-    if row is None:
-        raise FileNotFoundError(f"Candidate not found: {candidate_id}")
+def _build_metadata_only_candidate_preview(
+    row: PersonCandidate,
+    raw_metadata: dict[str, Any],
+    preview_path: Path,
+) -> Path:
+    import numpy as np
 
-    queue_video = get_queue_video(session, str(row.video_id or ""))
-    if queue_video is None:
-        raise FileNotFoundError(f"Queue video not found for candidate: {candidate_id}")
-
-    source_path = _resolve_queue_video_file_path(queue_video)
-    preview_path = _preview_root() / f"{_slugify(candidate_id)}.jpg"
-    raw_metadata = row.raw_metadata or {}
-
-    cap = cv2.VideoCapture(str(source_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Could not open source video for candidate preview: {source_path}")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    target_frame = _preview_frame_index(row, raw_metadata, total_frames=total_frames)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-    ok, frame = cap.read()
-    cap.release()
-    if not ok or frame is None:
-        raise RuntimeError(f"Could not read preview frame {target_frame} from {source_path}")
-
-    frame_height = int(frame.shape[0])
-    frame_width = int(frame.shape[1])
-    bbox = _bbox_xyxy(_candidate_bbox(raw_metadata), frame_width=frame_width, frame_height=frame_height)
-
+    frame_height = 720
+    frame_width = 1280
+    frame = np.full((frame_height, frame_width, 3), (18, 26, 34), dtype=np.uint8)
     overlay = frame.copy()
-    banner_height = 72
-    cv2.rectangle(overlay, (0, 0), (frame_width, banner_height), (8, 18, 28), -1)
-    cv2.addWeighted(overlay, 0.48, frame, 0.52, 0, frame)
+    cv2.rectangle(overlay, (0, 0), (frame_width, 120), (8, 18, 28), -1)
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+
     cv2.putText(
         frame,
-        f"{row.camera_id or row.video_id or 'candidate'} | frame {target_frame}",
-        (16, 28),
+        "Candidate preview from DB raw_metadata",
+        (24, 40),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.72,
+        0.8,
         (255, 255, 255),
         2,
     )
     cv2.putText(
         frame,
-        f"Track {row.track_id or '?'} | {row.candidate_id}",
-        (16, 56),
+        f"{row.camera_id or row.video_id or 'camera?'} | track {row.track_id or '?'}",
+        (24, 76),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.64,
+        0.72,
         (110, 230, 255),
         2,
     )
+    cv2.putText(
+        frame,
+        f"{row.candidate_id}",
+        (24, 108),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        (190, 255, 190),
+        2,
+    )
 
+    bbox = _bbox_xyxy(_candidate_bbox(raw_metadata), frame_width=frame_width, frame_height=frame_height)
     _draw_bbox_trails(frame, raw_metadata, frame_width=frame_width, frame_height=frame_height)
-
     if bbox is not None:
         x1, y1, x2, y2 = bbox
         cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 255, 120), 3)
-        label = f"track {row.track_id or '?'}"
-        label_origin_y = max(y1 - 14, 24)
-        (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.64, 2)
-        cv2.rectangle(frame, (x1, label_origin_y - text_height - 8), (x1 + text_width + 14, label_origin_y + 4), (80, 255, 120), -1)
-        cv2.putText(
-            frame,
-            label,
-            (x1 + 7, label_origin_y - 2),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.64,
-            (8, 18, 28),
-            2,
-        )
 
     success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
     if not success:
-        raise RuntimeError(f"Could not encode candidate preview image for {candidate_id}")
+        raise RuntimeError(f"Could not encode metadata-only candidate preview for {row.candidate_id}")
     preview_path.write_bytes(encoded.tobytes())
     return preview_path
+
+
+def build_candidate_preview_image(session: Session, candidate_id: str) -> Path:
+    row = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
+    if row is None:
+        raise FileNotFoundError(f"Candidate not found: {candidate_id}")
+
+    preview_path = _preview_root() / f"{_slugify(candidate_id)}.jpg"
+    raw_metadata = row.raw_metadata or {}
+    try:
+        queue_video = get_queue_video(session, str(row.video_id or ""))
+        if queue_video is None:
+            raise FileNotFoundError(f"Queue video not found for candidate: {candidate_id}")
+
+        source_path = _resolve_queue_video_file_path(queue_video)
+        cap = cv2.VideoCapture(str(source_path))
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Could not open source video for candidate preview: {source_path}")
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        target_frame = _preview_frame_index(row, raw_metadata, total_frames=total_frames)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            raise RuntimeError(f"Could not read preview frame {target_frame} from {source_path}")
+
+        frame_height = int(frame.shape[0])
+        frame_width = int(frame.shape[1])
+        bbox = _bbox_xyxy(_candidate_bbox(raw_metadata), frame_width=frame_width, frame_height=frame_height)
+
+        overlay = frame.copy()
+        banner_height = 72
+        cv2.rectangle(overlay, (0, 0), (frame_width, banner_height), (8, 18, 28), -1)
+        cv2.addWeighted(overlay, 0.48, frame, 0.52, 0, frame)
+        cv2.putText(
+            frame,
+            f"{row.camera_id or row.video_id or 'candidate'} | frame {target_frame}",
+            (16, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"Track {row.track_id or '?'} | {row.candidate_id}",
+            (16, 56),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.64,
+            (110, 230, 255),
+            2,
+        )
+
+        _draw_bbox_trails(frame, raw_metadata, frame_width=frame_width, frame_height=frame_height)
+
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 255, 120), 3)
+            label = f"track {row.track_id or '?'}"
+            label_origin_y = max(y1 - 14, 24)
+            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.64, 2)
+            cv2.rectangle(
+                frame,
+                (x1, label_origin_y - text_height - 8),
+                (x1 + text_width + 14, label_origin_y + 4),
+                (80, 255, 120),
+                -1,
+            )
+            cv2.putText(
+                frame,
+                label,
+                (x1 + 7, label_origin_y - 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.64,
+                (8, 18, 28),
+                2,
+            )
+
+        success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if not success:
+            raise RuntimeError(f"Could not encode candidate preview image for {candidate_id}")
+        preview_path.write_bytes(encoded.tobytes())
+        return preview_path
+    except Exception:
+        return _build_metadata_only_candidate_preview(row, raw_metadata, preview_path)
 
 
 def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[dict]:
@@ -836,16 +899,39 @@ def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[d
         shortlist_limit=shortlist_limit,
     )
 
-    response = _post_tracking_json(
-        "/api/v1/candidates/search",
-        {
-            "query_text": cleaned_query,
-            "candidates": candidates,
-            "limit": bounded_limit,
-        },
-    )
-    items = response.get("items")
-    return items if isinstance(items, list) else []
+    try:
+        response = _post_tracking_json(
+            "/api/v1/candidates/search",
+            {
+                "query_text": cleaned_query,
+                "candidates": candidates,
+                "limit": bounded_limit,
+            },
+        )
+        items = response.get("items")
+        if isinstance(items, list) and items:
+            return items
+    except httpx.HTTPError:
+        # Tracking service can be unavailable or unauthorized. Fall back to local ranking
+        # so search still returns person_candidates-derived preview images.
+        pass
+
+    candidate_ids: list[str] = []
+    for payload in candidates:
+        candidate_id = str(payload.get("candidate_id") or "").strip()
+        if candidate_id and candidate_id not in candidate_ids:
+            candidate_ids.append(candidate_id)
+        if len(candidate_ids) >= bounded_limit:
+            break
+
+    row_map = {row.candidate_id: row for row in rows}
+    fallback_items: list[dict[str, Any]] = []
+    for candidate_id in candidate_ids:
+        row = row_map.get(candidate_id)
+        if row is None:
+            continue
+        fallback_items.append(candidate_to_payload(row, queue_map.get(str(row.video_id or ""))))
+    return fallback_items
 
 
 def get_overview(session: Session) -> dict:

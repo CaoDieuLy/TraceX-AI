@@ -14,7 +14,7 @@ const PAGE_SIZE = GRID_BATCH_SIZE;
 function HomeViewInner() {
   const searchParams = useSearchParams();
   const view = searchParams.get("view");
-  const { hasSearched, results, gridPage, setGridPage, topK } = useSearch();
+  const { hasSearched, isLoading, error, hasMore, results, gridPage, setGridPage, topK, loadMore } = useSearch();
 
   const pageItems = useMemo(
     () => results.slice(gridPage * PAGE_SIZE, gridPage * PAGE_SIZE + PAGE_SIZE),
@@ -22,7 +22,8 @@ function HomeViewInner() {
   );
 
   const totalPages = Math.ceil(results.length / PAGE_SIZE) || 1;
-  const isLastPage = gridPage >= totalPages - 1 || pageItems.length === 0;
+  const isLastLoadedPage = gridPage >= totalPages - 1 || pageItems.length === 0;
+  const isLastPage = isLastLoadedPage && !hasMore;
   const startRank = gridPage * PAGE_SIZE + 1;
   const endRank = Math.min((gridPage + 1) * PAGE_SIZE, results.length);
 
@@ -58,6 +59,13 @@ function HomeViewInner() {
 
   return (
     <div className="flex flex-col gap-8">
+      {error ? <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
+      {isLoading ? <p className="text-sm text-ink-secondary">Đang tải kết quả...</p> : null}
+      {!isLoading && !error && results.length === 0 ? (
+        <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          Chưa có video để hiển thị. Backend đang trả danh sách rỗng.
+        </p>
+      ) : null}
       <VideoGrid items={pageItems} />
 
       <div className="flex flex-wrap items-center justify-between gap-4 border-t border-surface-muted pt-6">
@@ -66,10 +74,17 @@ function HomeViewInner() {
         </p>
         <button
           type="button"
-          disabled={isLastPage}
-          onClick={() => {
-            if (!isLastPage) {
+          disabled={isLastPage || isLoading}
+          onClick={async () => {
+            if (!isLastLoadedPage) {
               setGridPage(gridPage + 1);
+              return;
+            }
+            if (hasMore) {
+              const added = await loadMore();
+              if (added) {
+                setGridPage(gridPage + 1);
+              }
             }
           }}
           className="rounded-xl bg-ink px-5 py-2.5 text-sm font-semibold text-white shadow-card transition hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"

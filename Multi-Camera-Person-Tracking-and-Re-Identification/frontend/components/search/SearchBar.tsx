@@ -7,14 +7,14 @@ type SearchBarProps = {
 };
 
 export function SearchBar({ className = "" }: SearchBarProps) {
-  const { query, setQuery, runSearch } = useSearch();
+  const { query, setQuery, runSearch, isLoading } = useSearch();
 
   return (
     <form
       className={["flex w-full gap-2", className].filter(Boolean).join(" ")}
       onSubmit={(e) => {
         e.preventDefault();
-        runSearch();
+        void runSearch();
       }}
     >
       <input
@@ -27,9 +27,10 @@ export function SearchBar({ className = "" }: SearchBarProps) {
       />
       <button
         type="submit"
+        disabled={isLoading}
         className="shrink-0 rounded-2xl bg-accent px-6 text-sm font-semibold text-white shadow-card transition hover:bg-accent-hover"
       >
-        Gửi
+        {isLoading ? "Đang tìm..." : "Gửi"}
       </button>
     </form>
   );

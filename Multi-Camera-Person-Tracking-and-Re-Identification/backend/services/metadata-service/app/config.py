@@ -100,11 +100,11 @@ class Settings(BaseSettings):
     google_drive_enabled: bool = False
     google_drive_oauth_credentials_file: str = str(default_oauth_credentials_file)
     google_drive_oauth_token_file: str = str(default_oauth_token_file)
-    google_drive_root_folder_id: str = ""
-    google_drive_vinuni_folder_id: str = ""
+    google_drive_root_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
+    google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_name: str = "VinUni"
-    google_drive_queue_folder_name: str = "Queue"
-    google_drive_import_folder_name: str = "Import_New"
+    google_drive_queue_folder_name: str = "Storage"
+    google_drive_import_folder_name: str = "Temp"
     google_drive_h265_folder_name: str = ".h265"
     google_drive_metadata_folder_name: str = "Metadata"
     google_drive_make_public: bool = True

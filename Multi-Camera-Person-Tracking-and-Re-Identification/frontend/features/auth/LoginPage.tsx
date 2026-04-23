@@ -3,21 +3,129 @@
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
+const TOKEN_STORAGE_KEY = "mcpt_access_token";
+
+function getApiBaseUrl(): string {
+  const envBase = (process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "").trim();
+  if (envBase) {
+    return envBase.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return "http://localhost:8000";
+}
+
+type AuthResponse = {
+  access_token: string;
+  token_type: string;
+  user: {
+    id: number;
+    email: string;
+    full_name: string;
+  };
+};
+
+async function readError(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = (await response.json()) as { detail?: unknown };
+      if (typeof payload.detail === "string") {
+        return payload.detail;
+      }
+      if (payload.detail !== undefined) {
+        return String(payload.detail);
+      }
+    } catch {
+      return `Request failed (${response.status})`;
+    }
+  }
+  const text = (await response.text()).trim();
+  return text || `Request failed (${response.status})`;
+}
+
+function normalizeEmail(username: string): string {
+  const trimmed = username.trim();
+  if (trimmed.includes("@")) {
+    return trimmed;
+  }
+  return `${trimmed}@mcpt-app.com`;
+}
+
 export function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  function handleLogin(event: FormEvent<HTMLFormElement>) {
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setMessage(null);
-    router.push("/home");
+    setError(null);
+
+    const identifier = username.trim();
+    if (!identifier || !password.trim()) {
+      setError("Vui lòng nhập username và password.");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier, password }),
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      const payload = (await response.json()) as AuthResponse;
+      localStorage.setItem(TOKEN_STORAGE_KEY, payload.access_token);
+      setMessage(`Đăng nhập thành công. Xin chào ${payload.user.full_name}!`);
+      router.push("/home");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Đăng nhập thất bại.");
+    } finally {
+      setIsLoading(false);
+    }
   }
 
-  function handleRegister() {
-    setMessage("Đăng ký chỉ là demo UI — chuyển tới trang chính.");
-    router.push("/home");
+  async function handleRegister() {
+    setMessage(null);
+    setError(null);
+
+    const rawUsername = username.trim();
+    if (!rawUsername || !password.trim()) {
+      setError("Nhập username và password trước khi đăng ký.");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: normalizeEmail(rawUsername),
+          full_name: rawUsername,
+          password,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      const payload = (await response.json()) as AuthResponse;
+      localStorage.setItem(TOKEN_STORAGE_KEY, payload.access_token);
+      setMessage(`Tạo tài khoản thành công: ${payload.user.email}`);
+      router.push("/home");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Đăng ký thất bại.");
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   return (
@@ -53,16 +161,19 @@ export function LoginPage() {
           </label>
 
           {message ? <p className="text-center text-sm text-ink-secondary">{message}</p> : null}
+          {error ? <p className="text-center text-sm text-red-600">{error}</p> : null}
 
           <button
             type="submit"
+            disabled={isLoading}
             className="mt-2 rounded-2xl bg-accent py-3 text-sm font-semibold text-white shadow-card transition hover:bg-accent-hover"
           >
-            Login
+            {isLoading ? "Đang xử lý..." : "Login"}
           </button>
           <button
             type="button"
             onClick={handleRegister}
+            disabled={isLoading}
             className="rounded-2xl border border-surface-muted bg-white py-3 text-sm font-semibold text-ink shadow-card transition hover:bg-surface"
           >
             Đăng ký

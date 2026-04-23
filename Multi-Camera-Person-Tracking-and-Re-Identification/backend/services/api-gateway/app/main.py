@@ -6,6 +6,7 @@ import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from .config import settings
 
@@ -17,6 +18,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=10, ge=1, le=50)
+    offset: int = Field(default=0, ge=0)
+
+
+class SearchResultItem(BaseModel):
+    id: str
+    thumbnail_url: str
+    description: str
+
+
+class SearchResponse(BaseModel):
+    results: list[SearchResultItem]
+
+
+class VideoSegmentItem(BaseModel):
+    id: str
+    video_url: str
+    title: str
+    description: str
+
+
+class VideoDetailResponse(BaseModel):
+    id: str
+    segments: list[VideoSegmentItem]
 
 
 def _forward_auth_headers(request: Request) -> dict[str, str]:
@@ -74,9 +103,231 @@ async def _get_bytes(url: str, headers: dict[str, str] | None = None) -> tuple[b
         return response.content, response.headers.get("content-type", "application/octet-stream")
 
 
+def _to_search_item(video: dict[str, Any]) -> SearchResultItem:
+    video_id = str(video.get("video_id") or video.get("id") or "").strip()
+    title = str(video.get("title") or f"Video {video_id or 'unknown'}").strip()
+    summary_parts = [
+        title,
+        str(video.get("source_filename") or "").strip(),
+        str(video.get("source_mode") or "").strip(),
+        str(video.get("storage_backend") or "").strip(),
+    ]
+    description = " · ".join([part for part in summary_parts if part]) or "Video result"
+
+    thumbnail_url = str(video.get("available_link_video") or "").strip()
+    if not thumbnail_url and video_id:
+        thumbnail_url = f"/api/v1/queue/videos/{video_id}/file"
+    if not thumbnail_url:
+        thumbnail_url = "https://picsum.photos/seed/mcpt-default/400/225"
+
+    return SearchResultItem(id=video_id or "unknown", thumbnail_url=thumbnail_url, description=description)
+
+
+def _to_candidate_search_item(candidate: dict[str, Any]) -> SearchResultItem:
+    candidate_id = str(candidate.get("candidate_id") or candidate.get("id") or "").strip()
+    video_id = str(candidate.get("video_id") or "").strip()
+    result_id = candidate_id or video_id or "unknown"
+
+    preview_url = str(candidate.get("preview_image_url") or "").strip()
+    if not preview_url and candidate_id:
+        preview_url = f"/api/v1/candidates/{candidate_id}/preview"
+    if not preview_url:
+        preview_url = "https://picsum.photos/seed/mcpt-default/400/225"
+
+    description_parts = [
+        str(candidate.get("appearance_summary") or "").strip(),
+        str(candidate.get("search_text") or "").strip(),
+        f"candidate={candidate_id}" if candidate_id else "",
+        f"video={video_id}" if video_id else "",
+        f"track={candidate.get('track_id')}" if candidate.get("track_id") else "",
+    ]
+    description = " · ".join([part for part in description_parts if part]) or "Candidate result"
+
+    return SearchResultItem(id=result_id, thumbnail_url=preview_url, description=description)
+
+
+def _score_video_for_query(video: dict[str, Any], query: str) -> int:
+    q = query.lower().strip()
+    if not q:
+        return 0
+    content = " ".join(
+        [
+            str(video.get("title") or ""),
+            str(video.get("source_filename") or ""),
+            str(video.get("source_mode") or ""),
+            str(video.get("video_id") or ""),
+        ]
+    ).lower()
+    return 1 if q in content else 0
+
+
+def _build_segment_description(segment_payload: dict[str, Any], fallback: str) -> str:
+    if not isinstance(segment_payload, dict):
+        return fallback
+    candidates = [
+        segment_payload.get("description"),
+        segment_payload.get("person_caption"),
+        segment_payload.get("appearance_summary"),
+        segment_payload.get("search_text"),
+    ]
+    for value in candidates:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return fallback
+
+
 @app.get("/health")
 async def healthcheck() -> dict:
     return {"status": "ok", "service": "api-gateway"}
+
+
+@app.post("/search", response_model=SearchResponse)
+async def search(payload: SearchRequest, request: Request) -> SearchResponse:
+    target_limit = min(max(payload.offset + payload.top_k, payload.top_k), 50)
+    headers = _forward_auth_headers(request)
+
+    # Preferred path: query-aware ranking from candidate search endpoint.
+    try:
+        ranked_payload = await _post_json(
+            f"{settings.metadata_service_url}/api/v1/candidates/search",
+            {"query_text": payload.query, "limit": target_limit},
+            headers=headers if headers else None,
+        )
+        ranked_items = ranked_payload.get("items") if isinstance(ranked_payload, dict) else []
+        candidates = [item for item in ranked_items if isinstance(item, dict)]
+        start = payload.offset
+        end = payload.offset + payload.top_k
+        mapped = [_to_candidate_search_item(item) for item in candidates[start:end]]
+        if mapped:
+            return SearchResponse(results=mapped)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in {401, 403}:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError:
+        pass
+
+    # Fallback path: local metadata candidate search (still sourced from person_candidates/raw_metadata).
+    try:
+        candidates_payload = await _get_json(
+            f"{settings.metadata_service_url}/api/v1/candidates",
+            params={"query": payload.query, "limit": target_limit},
+        )
+        candidate_items = candidates_payload.get("items") if isinstance(candidates_payload, dict) else []
+        candidates = [item for item in candidate_items if isinstance(item, dict)]
+        start = payload.offset
+        end = payload.offset + payload.top_k
+        mapped = [_to_candidate_search_item(item) for item in candidates[start:end]]
+        if mapped:
+            return SearchResponse(results=mapped)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError:
+        pass
+
+    # Last fallback: queue video list.
+    try:
+        queue_payload = await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+    items = queue_payload.get("items") if isinstance(queue_payload, dict) else []
+    videos = [item for item in items if isinstance(item, dict)]
+    videos.sort(key=lambda item: _score_video_for_query(item, payload.query), reverse=True)
+
+    start = payload.offset
+    end = payload.offset + payload.top_k
+    mapped = [_to_search_item(video) for video in videos[start:end]]
+    return SearchResponse(results=mapped)
+
+
+@app.get("/videos/{video_id}", response_model=VideoDetailResponse)
+async def videos_by_id(video_id: str) -> VideoDetailResponse:
+    try:
+        queue_payload = await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+    queue_items = queue_payload.get("items") if isinstance(queue_payload, dict) else []
+    requested_id = str(video_id or "").strip()
+    resolved_video_id = requested_id
+    candidate_payload: dict[str, Any] | None = None
+    queue_video = next(
+        (item for item in queue_items if isinstance(item, dict) and str(item.get("video_id")) == resolved_video_id),
+        None,
+    )
+    if queue_video is None and requested_id:
+        try:
+            candidate_raw = await _get_json(f"{settings.metadata_service_url}/api/v1/candidates/{requested_id}")
+            if isinstance(candidate_raw, dict):
+                candidate_payload = candidate_raw
+                resolved_video_id = str(candidate_raw.get("video_id") or "").strip() or requested_id
+                queue_video = next(
+                    (item for item in queue_items if isinstance(item, dict) and str(item.get("video_id")) == resolved_video_id),
+                    None,
+                )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+        except httpx.HTTPError:
+            pass
+    if queue_video is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    metadata_payload: dict[str, Any] = {}
+    try:
+        raw_metadata = await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos/{resolved_video_id}/metadata")
+        if isinstance(raw_metadata, dict):
+            metadata_payload = raw_metadata
+    except httpx.HTTPError:
+        metadata_payload = {}
+
+    people = metadata_payload.get("people") if isinstance(metadata_payload, dict) else []
+    people_items = [item for item in people if isinstance(item, dict)]
+
+    video_url = str(queue_video.get("available_link_video") or "").strip()
+    if not video_url:
+        video_url = f"/api/v1/queue/videos/{resolved_video_id}/file"
+
+    title_prefix = str(queue_video.get("title") or f"Video {resolved_video_id}").strip()
+    segments: list[VideoSegmentItem] = []
+
+    if candidate_payload is not None:
+        segments.append(
+            VideoSegmentItem(
+                id=str(candidate_payload.get("candidate_id") or requested_id or resolved_video_id),
+                video_url=video_url,
+                title=f"{title_prefix} · Candidate",
+                description=_build_segment_description(candidate_payload, fallback=f"Candidate from {title_prefix}"),
+            )
+        )
+
+    if people_items:
+        for index, person in enumerate(people_items[:10], start=1):
+            segments.append(
+                VideoSegmentItem(
+                    id=str(person.get("candidate_id") or person.get("track_id") or f"{resolved_video_id}-seg-{index}"),
+                    video_url=video_url,
+                    title=f"{title_prefix} · Segment {index}",
+                    description=_build_segment_description(person, fallback=f"Segment {index} from {title_prefix}"),
+                )
+            )
+    else:
+        for index in range(1, 6):
+            segments.append(
+                VideoSegmentItem(
+                    id=f"{resolved_video_id}-seg-{index}",
+                    video_url=video_url,
+                    title=f"{title_prefix} · Segment {index}",
+                    description=f"Segment {index} from {title_prefix}",
+                )
+            )
+
+    return VideoDetailResponse(id=requested_id or resolved_video_id, segments=segments)
 
 
 @app.get("/api/v1/overview")
