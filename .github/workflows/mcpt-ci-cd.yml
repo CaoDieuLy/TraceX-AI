@@ -5,22 +5,23 @@ on:
     branches:
       - main
     paths:
-      - "Multi-Camera-Person-Tracking-and-Re-Identification/**"
+      - "backend/**"
+      - "frontend/**"
+      - "ai_service/**"
+      - "infra/**"
+      - "shared_secret_runtime.py"
       - ".github/workflows/mcpt-ci-cd.yml"
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: Multi-Camera-Person-Tracking-and-Re-Identification
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Build Docker stack
-        run: docker compose build
+        run: docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env build
 
   deploy:
     needs: build
@@ -30,14 +31,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Copy project to VPS
+      - name: Copy project artifacts to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
-          source: "Multi-Camera-Person-Tracking-and-Re-Identification"
+          source: "backend,frontend,ai_service,infra,shared_secret_runtime.py"
           target: ${{ secrets.VPS_APP_DIR }}
           strip_components: 0
 
@@ -49,6 +50,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
           script: |
-            cd "${{ secrets.VPS_APP_DIR }}/Multi-Camera-Person-Tracking-and-Re-Identification"
+            cd "${{ secrets.VPS_APP_DIR }}"
+            sed -i 's/\r$//' infra/vps/deploy.sh 2>/dev/null || true
             chmod +x infra/vps/deploy.sh
             ./infra/vps/deploy.sh "$(pwd)"

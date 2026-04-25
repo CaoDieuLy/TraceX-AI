@@ -41,6 +41,11 @@ build/
 # OS
 .DS_Store
 
+# Node / Next.js (build local, không commit)
+**/node_modules/
+**/.next/
+out/
+
 # AI logs — tracked structure, ignored content
 .ai-log/*.jsonl
 videos/
