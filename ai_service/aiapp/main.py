@@ -36,6 +36,7 @@ class InternalSearchResponse(BaseModel):
 
 
 def _to_result_item(candidate: dict[str, Any]) -> SearchResultItem:
+    """Chuan hoa candidate tu metadata/tracking thanh schema response on dinh cho gateway."""
     candidate_id = str(candidate.get("candidate_id") or candidate.get("id") or "").strip()
     video_id = str(candidate.get("video_id") or "").strip()
     result_id = candidate_id or video_id or "unknown"
@@ -63,6 +64,7 @@ def health() -> dict:
 
 @app.post("/internal/search", response_model=InternalSearchResponse)
 def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
+    """Diem vao tim kiem noi bo: goi rank_candidates (metadata + tracking) va cat trang ket qua."""
     target_limit = min(max(payload.offset + payload.top_k, payload.top_k), 50)
     ranked_limit = min(target_limit, 50)
 
@@ -94,25 +96,30 @@ def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
 
 @app.get("/internal/tracking/v1/pipeline/config")
 async def internal_tracking_pipeline_config(request: Request) -> Any:
+    """Gateway goi endpoint nay de doc cau hinh pipeline tu tracking upstream."""
     return await proxy_get_json("api/v1/pipeline/config", request)
 
 
 @app.post("/internal/tracking/v1/ai/process")
 async def internal_tracking_ai_process(payload: dict[str, Any], request: Request) -> Any:
+    """Gateway uy quyen ai_service proxy request ai/process toi tracking upstream."""
     return await proxy_post_json("api/v1/ai/process", payload, request)
 
 
 @app.post("/internal/tracking/v1/tracking/run")
 async def internal_tracking_run(payload: dict[str, Any], request: Request) -> Any:
+    """Gateway uy quyen ai_service proxy request tracking/run toi tracking upstream."""
     return await proxy_post_json("api/v1/tracking/run", payload, request)
 
 
 @app.get("/internal/tracking/v1/artifacts/{artifact_id}")
 async def internal_tracking_artifact(artifact_id: str, request: Request) -> Response:
+    """Tai artifact nhi phan (video/zip/...) tu tracking upstream va tra nguoc ve gateway."""
     content, media_type = await proxy_get_bytes(f"api/v1/tracking-artifacts/{artifact_id}", request)
     return Response(content=content, media_type=media_type)
 
 
 @app.get("/internal/tracking/v1/artifacts/{artifact_id}/manifest")
 async def internal_tracking_artifact_manifest(artifact_id: str, request: Request) -> Any:
+    """Lay metadata manifest cua artifact tracking de frontend/backend doc thong tin bo sung."""
     return await proxy_get_json(f"api/v1/tracking-artifacts/{artifact_id}/manifest", request)

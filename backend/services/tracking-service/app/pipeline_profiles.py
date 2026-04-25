@@ -96,6 +96,7 @@ SINGLE_PIPELINE_PROFILE: dict = {
 
 
 def resolve_pipeline_profile(profile_name: str, overrides: dict | None = None) -> dict:
+    """Chi cho phep 1 pipeline duy nhat; cam profile khac va cam override hyperparameters."""
     resolved_name = (profile_name or "").strip().lower()
     if resolved_name and resolved_name != SINGLE_PIPELINE_PROFILE_NAME:
         raise ValueError(

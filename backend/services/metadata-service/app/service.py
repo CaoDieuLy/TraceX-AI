@@ -899,6 +899,13 @@ def build_candidate_preview_image(session: Session, candidate_id: str) -> Path:
 
 
 def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[dict]:
+    """
+    Rank candidate bang luong strict:
+    1) lay candidate moi nhat tu DB,
+    2) prefilter local de giam tap tim kiem,
+    3) goi tracking_service /api/v1/candidates/search de semantic rank.
+    Khong co fallback local khi upstream loi.
+    """
     cleaned_query = query_text.strip()
     if not cleaned_query:
         return []

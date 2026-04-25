@@ -50,7 +50,9 @@ function HomeViewInner() {
         <h2 className="text-lg font-semibold text-ink">{HOME_GUIDE_TITLE}</h2>
         <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-ink-secondary">
           {HOME_GUIDE_LINES.map((line) => (
-            <li key={line}>{line}</li>
+              <li key={line} className="whitespace-pre-line">
+                {line}
+              </li>
           ))}
         </ol>
       </div>
