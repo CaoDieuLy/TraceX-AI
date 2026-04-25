@@ -38,8 +38,7 @@ function getApiBaseUrl(): string {
     return envBase.replace(/\/$/, "");
   }
   if (typeof window !== "undefined") {
-    // Browser dùng relative path để luôn đi qua Next rewrites
-    // (tránh lệch host/port và lỗi CORS hoặc mixed-content).
+    // Browser dùng relative path qua Next rewrite để không phụ thuộc host networking.
     return "";
   }
   const internalApi = (process.env.INTERNAL_API_GATEWAY_URL ?? "").trim();

@@ -80,8 +80,6 @@ class LightningAIClient:
         video_id: str | None = None,
         video_title: str | None = None,
         metadata: dict[str, Any] | None = None,
-        pipeline_profile: str | None = None,
-        hyperparameters: dict[str, Any] | None = None,
         gpu_hardware_profile: dict[str, Any] | None = None,
         execution_plan: dict[str, Any] | None = None,
         acceleration_state: dict[str, Any] | None = None,
@@ -96,8 +94,6 @@ class LightningAIClient:
             video_id: Optional video ID
             video_title: Optional video title
             metadata: Additional metadata
-            pipeline_profile: Pipeline profile name
-            hyperparameters: Pipeline hyperparameters
             gpu_hardware_profile: GPU hardware configuration
             execution_plan: Execution plan details
             acceleration_state: Acceleration state info
@@ -128,10 +124,6 @@ class LightningAIClient:
         # Optional fields
         if video_title is not None:
             data["video_title"] = video_title
-        if pipeline_profile is not None:
-            data["pipeline_profile"] = pipeline_profile
-        if hyperparameters:
-            data["hyperparameters"] = json.dumps(hyperparameters)
         if gpu_hardware_profile:
             data["gpu_hardware_profile"] = json.dumps(gpu_hardware_profile)
         if execution_plan:

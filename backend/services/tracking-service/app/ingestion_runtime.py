@@ -90,8 +90,8 @@ class VideoIngestionRuntime:
 
     def _resolve_profile(self, metadata: dict | None = None) -> tuple[dict, dict, dict]:
         metadata = _dict_or_empty(metadata)
-        profile_name = str(metadata.get("pipeline_profile") or settings.pipeline_profile).strip() or settings.pipeline_profile
-        profile = resolve_pipeline_profile(profile_name, _dict_or_empty(metadata.get("hyperparameter_overrides")))
+        # Strict mode: ignore per-request pipeline or hyperparameter overrides.
+        profile = resolve_pipeline_profile(settings.pipeline_profile)
         gpu_count = max(0, _metadata_int(metadata, "gpu_count", settings.gpu_count))
         host_cpu_count = max(1, _metadata_int(metadata, "host_cpu_count", settings.host_cpu_count))
         host_ram_gb = max(1, _metadata_int(metadata, "host_ram_gb", settings.host_ram_gb))
@@ -286,13 +286,11 @@ class VideoIngestionRuntime:
             )
             metadata_path = Path(video_payload["metadata_path"])
 
-            video_payload["pipeline_profile"] = profile["profile"]
             video_payload["gpu_hardware_profile"] = hardware_profile
             video_payload["processing_backend"] = "tracking_service_local"
             if metadata.get("source_mode"):
                 video_payload["source_mode"] = metadata.get("source_mode")
             for person in people:
-                person.setdefault("pipeline_profile", profile["profile"])
                 person.setdefault("reid_profile", str(profile["components"].get("reid", {}).get("name") or ""))
                 person.setdefault("processing_backend", "tracking_service_local")
                 if metadata.get("source_mode"):
@@ -311,7 +309,6 @@ class VideoIngestionRuntime:
         return {
             "status": "completed",
             "processing_backend": "tracking_service_local",
-            "pipeline_profile": profile["profile"],
             "gpu_hardware_profile": hardware_profile,
             "execution_plan": execution_plan,
             "acceleration_state": acceleration_state,

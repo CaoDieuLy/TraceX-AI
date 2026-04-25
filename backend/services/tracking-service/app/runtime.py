@@ -33,10 +33,8 @@ class AccuracyFirstTrackerRuntime:
         self.profile = resolve_pipeline_profile(settings.pipeline_profile)
 
     def _resolve_profile(self, candidate_info: dict) -> dict:
-        candidate = dict(candidate_info or {})
-        selected_profile = str(candidate.get("pipeline_profile") or settings.pipeline_profile).strip() or settings.pipeline_profile
-        overrides = _dict_or_empty(candidate.get("hyperparameter_overrides"))
-        return resolve_pipeline_profile(selected_profile, overrides)
+        # Strict mode: always use the single configured pipeline.
+        return resolve_pipeline_profile(settings.pipeline_profile)
 
     def build_manifest(
         self,

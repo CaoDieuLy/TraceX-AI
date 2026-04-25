@@ -16,7 +16,6 @@ class TrackingResponse(BaseModel):
     manifest_path: str | None = None
     relative_manifest_path: str | None = None
     exists: bool
-    pipeline_profile: str | None = None
     gpu_hardware_profile: str | None = None
     runtime_mode: str | None = None
     acceleration_state: dict[str, Any] | None = None
@@ -35,7 +34,6 @@ class AiProcessResponse(BaseModel):
     status: str
     provider: str
     mode: str
-    pipeline_profile: str | None = None
     gpu_hardware_profile: dict[str, Any] | None = None
     acceleration_state: dict[str, Any] | None = None
     query_id: str | None = None
@@ -65,7 +63,6 @@ class VideoIngestionRequest(BaseModel):
 class VideoIngestionResponse(BaseModel):
     status: str
     processing_backend: str
-    pipeline_profile: str | None = None
     gpu_hardware_profile: dict[str, Any] | None = None
     acceleration_state: dict[str, Any] | None = None
     source_path: str

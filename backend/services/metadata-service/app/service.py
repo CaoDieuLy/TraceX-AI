@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,14 +82,32 @@ def _tracking_service_url(path: str) -> str:
 
 
 def _post_tracking_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
-        response = client.post(
-            _tracking_service_url(path),
-            json=payload,
-            headers=_tracking_service_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
+    max_attempts = 3
+    timeout_seconds = float(settings.tracking_request_timeout_seconds)
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with httpx.Client(timeout=timeout_seconds) as client:
+                response = client.post(
+                    _tracking_service_url(path),
+                    json=payload,
+                    headers=_tracking_service_headers(),
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            # Retry transient upstream/server-side failures, otherwise fail fast.
+            if exc.response.status_code < 500 or attempt >= max_attempts:
+                raise
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt >= max_attempts:
+                raise
+        time.sleep(0.8 * attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Unknown tracking upstream failure")
 
 
 def _tracking_slug(value: str) -> str:
@@ -899,39 +918,18 @@ def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[d
         shortlist_limit=shortlist_limit,
     )
 
-    try:
-        response = _post_tracking_json(
-            "/api/v1/candidates/search",
-            {
-                "query_text": cleaned_query,
-                "candidates": candidates,
-                "limit": bounded_limit,
-            },
-        )
-        items = response.get("items")
-        if isinstance(items, list) and items:
-            return items
-    except httpx.HTTPError:
-        # Tracking service can be unavailable or unauthorized. Fall back to local ranking
-        # so search still returns person_candidates-derived preview images.
-        pass
-
-    candidate_ids: list[str] = []
-    for payload in candidates:
-        candidate_id = str(payload.get("candidate_id") or "").strip()
-        if candidate_id and candidate_id not in candidate_ids:
-            candidate_ids.append(candidate_id)
-        if len(candidate_ids) >= bounded_limit:
-            break
-
-    row_map = {row.candidate_id: row for row in rows}
-    fallback_items: list[dict[str, Any]] = []
-    for candidate_id in candidate_ids:
-        row = row_map.get(candidate_id)
-        if row is None:
-            continue
-        fallback_items.append(candidate_to_payload(row, queue_map.get(str(row.video_id or ""))))
-    return fallback_items
+    response = _post_tracking_json(
+        "/api/v1/candidates/search",
+        {
+            "query_text": cleaned_query,
+            "candidates": candidates,
+            "limit": bounded_limit,
+        },
+    )
+    items = response.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("Tracking service did not return a valid items list.")
+    return items
 
 
 def get_overview(session: Session) -> dict:

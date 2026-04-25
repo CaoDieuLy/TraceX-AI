@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -68,6 +69,12 @@ def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
     session = SessionLocal()
     try:
         ranked = rank_candidates(session=session, query_text=payload.query.strip(), limit=ranked_limit)
+    except httpx.HTTPStatusError as exc:
+        upstream_detail = (exc.response.text or "").strip()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Tracking upstream returned {exc.response.status_code}: {upstream_detail}",
+        ) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:

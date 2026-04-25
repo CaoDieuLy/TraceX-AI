@@ -83,8 +83,8 @@ class Settings(BaseSettings):
     google_drive_metadata_folder_name: str = "Metadata"
 
     tracking_runtime_mode: str = "production_ready"
-    pipeline_profile: str = "accuracy_first"
-    tracking_hyperparameter_overrides_json: str = ""
+    pipeline_profile: str = "rfdetr_ocmctrack_solider_kpr_itself_hota"
+    tracking_hyperparameter_overrides_json: str = ""  # disabled in strict mode
     gpu_hardware_profile: str = "auto"
     gpu_hardware_overrides_json: str = ""
     gpu_count: int = 1

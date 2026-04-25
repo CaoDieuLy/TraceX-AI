@@ -172,12 +172,8 @@ async def healthcheck() -> dict:
 
 
 @app.post("/search", response_model=SearchResponse)
-async def search(payload: SearchRequest, request: Request) -> SearchResponse:
-    target_limit = min(max(payload.offset + payload.top_k, payload.top_k), 50)
-    ranked_limit = min(target_limit, 50)
-    headers = _forward_auth_headers(request)
-
-    # Primary path: dedicated AI service (HTTP only, no AI imports in gateway).
+async def search(payload: SearchRequest) -> SearchResponse:
+    # Strict mode: search must come from ai_service pipeline only.
     try:
         ai_payload = await search_internal(
             query=payload.query,
@@ -199,47 +195,16 @@ async def search(payload: SearchRequest, request: Request) -> SearchResponse:
             if mapped:
                 return SearchResponse(results=mapped)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code not in {401, 403}:
-            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-    except httpx.HTTPError:
-        pass
-
-    # Fallback: query-aware ranking via metadata (same DB pipeline) if AI service is unreachable.
-    try:
-        ranked_payload = await _post_json(
-            f"{settings.metadata_service_url}/api/v1/candidates/search",
-            {"query_text": payload.query, "limit": min(ranked_limit, 20)},
-            headers=headers if headers else None,
-        )
-        ranked_items = ranked_payload.get("items") if isinstance(ranked_payload, dict) else []
-        candidates = [item for item in ranked_items if isinstance(item, dict)]
-        start = payload.offset
-        end = payload.offset + payload.top_k
-        mapped = [_to_candidate_search_item(item) for item in candidates[start:end]]
-        if mapped:
-            return SearchResponse(results=mapped)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code not in {401, 403}:
-            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-    except httpx.HTTPError:
-        pass
-
-    try:
-        candidates_payload = await _get_json(
-            f"{settings.metadata_service_url}/api/v1/candidates",
-            params={"query": payload.query, "limit": target_limit},
-        )
-        candidate_items = candidates_payload.get("items") if isinstance(candidates_payload, dict) else []
-        candidates = [item for item in candidate_items if isinstance(item, dict)]
-        start = payload.offset
-        end = payload.offset + payload.top_k
-        mapped = [_to_candidate_search_item(item) for item in candidates[start:end]]
-        if mapped:
-            return SearchResponse(results=mapped)
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-    except httpx.HTTPError:
-        pass
+        detail = exc.response.text
+        try:
+            payload = exc.response.json()
+            if isinstance(payload, dict) and payload.get("detail") is not None:
+                detail = str(payload.get("detail"))
+        except Exception:
+            pass
+        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"AI service error: {exc}") from exc
 
     return SearchResponse(results=[])
 

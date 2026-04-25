@@ -40,7 +40,6 @@ def root() -> dict:
         "service": "tracking-service",
         "provider": config.get("provider"),
         "mode": config.get("mode"),
-        "pipeline_profile": config.get("pipeline_profile"),
     }
 
 
@@ -76,8 +75,6 @@ async def ai_worker(
     query_text: str = Form(default=""),
     video_title: str | None = Form(default=None),
     metadata: str | None = Form(default=None),
-    pipeline_profile: str | None = Form(default=None),
-    hyperparameters: str | None = Form(default=None),
     gpu_hardware_profile: str | None = Form(default=None),
     execution_plan: str | None = Form(default=None),
     acceleration_state: str | None = Form(default=None),
@@ -95,8 +92,6 @@ async def ai_worker(
             "query_text": query_text,
             "source_path": str(local_input_path),
             "metadata": metadata,
-            "pipeline_profile": pipeline_profile,
-            "hyperparameters": hyperparameters,
             "gpu_hardware_profile": gpu_hardware_profile,
             "execution_plan": execution_plan,
             "acceleration_state": acceleration_state,

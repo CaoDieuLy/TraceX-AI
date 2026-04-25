@@ -186,7 +186,7 @@ def _rank_candidate_itself(
 ) -> float:
     """
     ITSELF RANGE-style ensemble scoring.
-    Weights (accuracy_first profile):
+    Weights (strict single pipeline):
       - Embedding similarity: 0.58
       - Semantic overlap:    0.22
       - Visibility bonus:    0.12
@@ -551,14 +551,8 @@ def _cleanup_remote_query_files(*paths: Path | None) -> None:
 
 
 def _load_env_profile_overrides() -> dict:
-    raw = settings.tracking_hyperparameter_overrides_json.strip()
-    if not raw:
-        return {}
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    # Strict mode: hyperparameter overrides are disabled.
+    return {}
 
 
 def _load_env_hardware_overrides() -> dict:
@@ -573,14 +567,8 @@ def _load_env_hardware_overrides() -> dict:
 
 
 def _resolve_profile_from_payload(default_profile: str, metadata: dict | None = None, overrides: dict | None = None) -> dict:
-    metadata = _dict_or_empty(metadata)
-    payload_profile = str(metadata.get("pipeline_profile") or default_profile).strip() or default_profile
-    merged_overrides = _dict_or_empty(_load_env_profile_overrides())
-    if overrides:
-        merged_overrides.update(_dict_or_empty(overrides))
-    if metadata.get("hyperparameter_overrides"):
-        merged_overrides.update(_dict_or_empty(metadata.get("hyperparameter_overrides")))
-    return resolve_pipeline_profile(payload_profile, merged_overrides)
+    # Strict mode: ignore payload/env profile overrides and force the configured pipeline.
+    return resolve_pipeline_profile(default_profile)
 
 
 @lru_cache(maxsize=1)
@@ -701,44 +689,10 @@ def process_video_query(payload: dict) -> dict:
     file_exists = bool(storage_path)
 
     if not settings.lightning_api_base_url.strip():
-        logger.info("Using local accuracy-first worker mode for video processing")
-        input_path = _resolve_query_source_path(storage_path, video_id=video_id or None)
-        file_exists = input_path.exists()
-        local_result = process_video_query_worker(
-            {
-                "query_id": query_id,
-                "video_id": video_id,
-                "video_title": payload.get("video_title"),
-                "query_text": query_text,
-                "source_path": str(input_path),
-                "metadata": {
-                    **metadata,
-                    "pipeline_profile": profile["profile"],
-                    "gpu_hardware_profile": hardware_profile,
-                    "execution_plan": execution_plan,
-                    "acceleration_state": acceleration_state,
-                },
-                "pipeline_profile": profile["profile"],
-                "gpu_hardware_profile": json.dumps(hardware_profile),
-                "execution_plan": json.dumps(execution_plan),
-                "acceleration_state": json.dumps(acceleration_state),
-            }
+        raise RuntimeError(
+            "LIGHTNING_API_BASE_URL is required in strict pipeline mode. "
+            "Local fallback processing is disabled."
         )
-        return {
-            "status": local_result["status"],
-            "provider": "local",
-            "mode": "local",
-            "pipeline_profile": profile["profile"],
-            "gpu_hardware_profile": hardware_profile,
-            "acceleration_state": acceleration_state,
-            "query_id": query_id,
-            "video_id": video_id,
-            "job_id": local_result["job_id"],
-            "summary": local_result["summary"],
-            "file_exists": file_exists,
-            "processed_at": processed_at,
-            "raw_response": local_result,
-        }
 
     # Remote mode: use Lightning AI
     logger.info("Using Lightning AI remote mode")
@@ -761,8 +715,6 @@ def process_video_query(payload: dict) -> dict:
             video_id=video_id,
             video_title=payload.get("video_title"),
             metadata=metadata,
-            pipeline_profile=profile["profile"],
-            hyperparameters=profile.get("hyperparameters", {}),
             gpu_hardware_profile=hardware_profile,
             execution_plan=execution_plan,
             acceleration_state=acceleration_state,
@@ -799,7 +751,6 @@ def process_video_query(payload: dict) -> dict:
             "status": ai_response["status"],
             "provider": "lightningai",
             "mode": "remote",
-            "pipeline_profile": profile["profile"],
             "gpu_hardware_profile": hardware_profile,
             "acceleration_state": acceleration_state,
             "query_id": query_id,
@@ -827,7 +778,6 @@ def process_video_query(payload: dict) -> dict:
             "status": "failed",
             "provider": "lightningai",
             "mode": "remote_error",
-            "pipeline_profile": profile["profile"],
             "query_id": query_id,
             "video_id": video_id,
             "job_id": str(uuid4()),
@@ -859,9 +809,7 @@ def process_video_query_worker(payload: dict) -> dict:
     source_path = str(payload.get("source_path") or "").strip()
     metadata = _json_dict_or_empty(payload.get("metadata"))
     worker_metadata = dict(metadata)
-    pipeline_profile = str(payload.get("pipeline_profile") or worker_metadata.get("pipeline_profile") or settings.pipeline_profile).strip()
-    if pipeline_profile:
-        worker_metadata["pipeline_profile"] = pipeline_profile
+    worker_metadata["pipeline_profile"] = settings.pipeline_profile
 
     job_root = Path(settings.ingestion_work_root) / "query-workers" / query_id
     output_video_dir = job_root / "videos"
@@ -916,7 +864,6 @@ def process_video_query_worker(payload: dict) -> dict:
             "matched_segments": matched_segments,
             "video": ingestion_result.get("video"),
             "processing_backend": ingestion_result.get("processing_backend"),
-            "pipeline_profile": ingestion_result.get("pipeline_profile"),
             "gpu_hardware_profile": ingestion_result.get("gpu_hardware_profile"),
             "acceleration_state": ingestion_result.get("acceleration_state"),
         },

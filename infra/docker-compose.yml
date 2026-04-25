@@ -33,6 +33,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     volumes:
       - ../secrets:/workspace/a20-root/secrets:ro
       - ../secret:/workspace/a20-root/secret:ro
@@ -51,7 +62,18 @@ services:
       postgres:
         condition: service_healthy
       ai_service:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     volumes:
       - ../secrets:/workspace/a20-root/secrets:ro
       - ../secret:/workspace/a20-root/secret:ro
@@ -67,7 +89,8 @@ services:
     ports:
       - "${FRONTEND_BIND_PORT:-3000}:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   postgres_data:
