@@ -1,6 +1,27 @@
 /** @type {import('next').NextConfig} */
+const internalApiGatewayUrl =
+  process.env.INTERNAL_API_GATEWAY_URL ??
+  process.env.NEXT_PUBLIC_API_GATEWAY_URL ??
+  "http://api-gateway:8000";
+
 const nextConfig = {
   output: "standalone",
+  async rewrites() {
+    return [
+      {
+        source: "/search",
+        destination: `${internalApiGatewayUrl}/search`,
+      },
+      {
+        source: "/videos/:path*",
+        destination: `${internalApiGatewayUrl}/videos/:path*`,
+      },
+      {
+        source: "/api/v1/:path*",
+        destination: `${internalApiGatewayUrl}/api/v1/:path*`,
+      },
+    ];
+  },
   images: {
     remotePatterns: [
       {

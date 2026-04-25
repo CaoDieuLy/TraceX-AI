@@ -6,14 +6,11 @@ import { FormEvent, useState } from "react";
 const TOKEN_STORAGE_KEY = "mcpt_access_token";
 
 function getApiBaseUrl(): string {
-  const envBase = (process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "").trim();
-  if (envBase) {
+  const envBase = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
+  if (envBase.startsWith("/")) {
     return envBase.replace(/\/$/, "");
   }
-  if (typeof window !== "undefined") {
-    return `${window.location.protocol}//${window.location.hostname}:8000`;
-  }
-  return "http://localhost:8000";
+  return "";
 }
 
 type AuthResponse = {

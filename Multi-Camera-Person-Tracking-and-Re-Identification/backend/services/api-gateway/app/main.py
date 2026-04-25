@@ -185,13 +185,14 @@ async def healthcheck() -> dict:
 @app.post("/search", response_model=SearchResponse)
 async def search(payload: SearchRequest, request: Request) -> SearchResponse:
     target_limit = min(max(payload.offset + payload.top_k, payload.top_k), 50)
+    ranked_limit = min(target_limit, 50)
     headers = _forward_auth_headers(request)
 
     # Preferred path: query-aware ranking from candidate search endpoint.
     try:
         ranked_payload = await _post_json(
             f"{settings.metadata_service_url}/api/v1/candidates/search",
-            {"query_text": payload.query, "limit": target_limit},
+            {"query_text": payload.query, "limit": ranked_limit},
             headers=headers if headers else None,
         )
         ranked_items = ranked_payload.get("items") if isinstance(ranked_payload, dict) else []
@@ -225,22 +226,8 @@ async def search(payload: SearchRequest, request: Request) -> SearchResponse:
     except httpx.HTTPError:
         pass
 
-    # Last fallback: queue video list.
-    try:
-        queue_payload = await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos")
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
-
-    items = queue_payload.get("items") if isinstance(queue_payload, dict) else []
-    videos = [item for item in items if isinstance(item, dict)]
-    videos.sort(key=lambda item: _score_video_for_query(item, payload.query), reverse=True)
-
-    start = payload.offset
-    end = payload.offset + payload.top_k
-    mapped = [_to_search_item(video) for video in videos[start:end]]
-    return SearchResponse(results=mapped)
+    # Do not fall back to queue video list to avoid non-candidate/mock-like results.
+    return SearchResponse(results=[])
 
 
 @app.get("/videos/{video_id}", response_model=VideoDetailResponse)

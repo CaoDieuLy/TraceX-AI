@@ -12,10 +12,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: [ "CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB" ]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
 
   metadata-service:
     build:
@@ -48,7 +48,7 @@ services:
       dockerfile: ./backend/services/metadata-service/Dockerfile
     image: mcpt-metadata-service:latest
     container_name: mcpt-queue-worker
-    command: ["python", "-m", "app.queue_worker"]
+    command: [ "python", "-m", "app.queue_worker" ]
     env_file:
       - ../secrets/shared.env
     environment:
@@ -115,7 +115,8 @@ services:
       MCPT_SECRETS_ROOT: /workspace/a20-root/secrets
       PYTHONPATH: /workspace/a20-root
       TRACKING_SERVICE_URL: ${TRACKING_SERVICE_URL}
-      UVICORN_WORKERS: ${API_GATEWAY_UVICORN_WORKERS:-4}
+      # Keep the gateway single-worker by default to avoid intermittent host-port hangs.
+      UVICORN_WORKERS: ${API_GATEWAY_UVICORN_WORKERS:-1}
     depends_on:
       - metadata-service
     volumes:
@@ -132,6 +133,7 @@ services:
     env_file:
       - ../secrets/shared.env
     environment:
+      INTERNAL_API_GATEWAY_URL: http://api-gateway:8000
       NEXT_PUBLIC_API_GATEWAY_URL: ${NEXT_PUBLIC_API_GATEWAY_URL:-http://localhost:8000}
     depends_on:
       - api-gateway
