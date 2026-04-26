@@ -12,6 +12,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from .config import settings
 from .cuda_runtime import configure_torch_runtime
 from .execution_plan import resolve_execution_plan
+from .local_ingestion_pipeline import LocalVideoIngestionPipeline
 from .strict_pipeline import get_strict_pipeline
 
 
@@ -31,16 +32,6 @@ for candidate in [Path(os.getenv("A20_ROOT", "")).expanduser() if os.getenv("A20
 from shared_secret_runtime import build_google_drive_oauth_service  # noqa: E402
 
 
-def _metadata_int(metadata: dict[str, Any], key: str, default: int) -> int:
-    raw_value = metadata.get(key)
-    if raw_value in (None, ""):
-        return default
-    try:
-        return int(raw_value)
-    except (TypeError, ValueError):
-        return default
-
-
 class VideoIngestionRuntime:
     def __init__(self) -> None:
         self.work_root = Path(settings.ingestion_work_root)
@@ -58,7 +49,7 @@ class VideoIngestionRuntime:
         batching = execution_plan.get("batching", {})
         memory = execution_plan.get("memory", {})
         hardware = execution_plan.get("hardware", {})
-        host_cpu_count = max(1, int(hardware.get("host_cpu_count") or settings.host_cpu_count))
+        host_cpu_count = max(1, int(hardware.get("host_cpu_count") or 1))
         gpu_streams = max(1, int(parallelism.get("gpu_streams") or 1))
 
         os.environ["OMP_NUM_THREADS"] = str(host_cpu_count)
@@ -85,18 +76,8 @@ class VideoIngestionRuntime:
     def _resolve_pipeline(self, metadata: dict | None = None) -> tuple[dict, dict, dict]:
         metadata = _dict_or_empty(metadata)
         pipeline = get_strict_pipeline()
-        gpu_count = max(0, _metadata_int(metadata, "gpu_count", settings.gpu_count))
-        host_cpu_count = max(1, _metadata_int(metadata, "host_cpu_count", settings.host_cpu_count))
-        host_ram_gb = max(1, _metadata_int(metadata, "host_ram_gb", settings.host_ram_gb))
-        hardware_profile, execution_plan = resolve_execution_plan(
-            pipeline_spec=pipeline,
-            gpu_profile_name=str(metadata.get("gpu_hardware_profile") or settings.gpu_hardware_profile),
-            gpu_profile_overrides=_dict_or_empty(metadata.get("gpu_hardware_overrides")),
-            gpu_count=gpu_count,
-            host_cpu_count=host_cpu_count,
-            host_ram_gb=host_ram_gb,
-        )
-        return pipeline, hardware_profile, execution_plan
+        detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
+        return pipeline, detected_hardware, execution_plan
 
     def _build_drive_service(self):
         if not settings.google_drive_enabled:
@@ -221,20 +202,58 @@ class VideoIngestionRuntime:
         metadata: dict | None = None,
     ) -> dict:
         metadata = _dict_or_empty(metadata)
-        pipeline, hardware_profile, execution_plan = self._resolve_pipeline(metadata)
+        pipeline, detected_hardware, execution_plan = self._resolve_pipeline(metadata)
         self._apply_execution_environment(execution_plan)
         configure_torch_runtime(
-            allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
-            cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-            host_cpu_count=int(execution_plan.get("hardware", {}).get("host_cpu_count") or settings.host_cpu_count),
+            allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+            cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+            host_cpu_count=int(execution_plan.get("hardware", {}).get("host_cpu_count") or detected_hardware.get("host_cpu_count") or 1),
         )
 
-        self._resolve_source(
+        resolved_source_path = self._resolve_source(
             source_path=source_path,
             source_drive_file_id=source_drive_file_id,
             source_filename=source_filename,
         )
-        raise RuntimeError(
-            "Video ingestion requires the fixed strict pipeline runtime. "
-            "This repository no longer contains a local substitute implementation."
+        output_video_root = Path(output_video_dir) if output_video_dir else self.default_video_dir
+        output_metadata_root = Path(output_metadata_dir) if output_metadata_dir else self.default_metadata_dir
+        compressed_path = self._prepare_compressed_video(
+            source_path=resolved_source_path,
+            target_video_dir=output_video_root,
+            output_basename=output_basename,
         )
+        metadata_basename = compressed_path.stem if compressed_path.stem else resolved_source_path.stem
+        metadata_path = output_metadata_root / f"{metadata_basename}.json"
+
+        sample_fps = int(
+            metadata.get("ingestion_contract", {})
+            .get("decode_sampling", {})
+            .get("sample_fps")
+            or 5
+        )
+        pipeline_runner = LocalVideoIngestionPipeline(sample_fps=sample_fps)
+        output = pipeline_runner.run(
+            source_path=resolved_source_path,
+            compressed_path=compressed_path,
+            metadata_path=metadata_path,
+            camera_id=camera_id,
+            recorded_start=recorded_start,
+            metadata=metadata,
+        )
+        response = output.to_response()
+        response["detected_hardware"] = detected_hardware
+        response["acceleration_state"] = configure_torch_runtime(
+            allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+            cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+            host_cpu_count=int(execution_plan.get("hardware", {}).get("host_cpu_count") or detected_hardware.get("host_cpu_count") or 1),
+        )
+
+        if upload_outputs_to_drive and destination_video_folder_id and destination_metadata_folder_id:
+            uploaded_video = self._upload_to_drive(compressed_path, destination_video_folder_id, "video/mp4")
+            uploaded_metadata = self._upload_to_drive(metadata_path, destination_metadata_folder_id, "application/json")
+            response["drive_video_file_id"] = uploaded_video["file_id"]
+            response["drive_metadata_file_id"] = uploaded_metadata["file_id"]
+            response["drive_video_link"] = uploaded_video["view_link"]
+            response["drive_metadata_link"] = uploaded_metadata["view_link"]
+
+        return response

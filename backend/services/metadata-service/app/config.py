@@ -24,9 +24,18 @@ A20_ROOT = _detect_a20_root()
 if A20_ROOT and str(A20_ROOT) not in sys.path:
     sys.path.insert(0, str(A20_ROOT))
 
-PROJECT_ROOT = Path(
-    os.getenv("PROJECT_ROOT", str(_HERE.parent.parent.parent.parent.parent))
-).resolve()
+def _resolve_project_root() -> Path:
+    repo_root = _HERE.parent.parent.parent.parent.parent.resolve()
+    raw_value = os.getenv("PROJECT_ROOT", "").strip()
+    if raw_value:
+        candidate = Path(raw_value).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (repo_root / candidate).resolve()
+        if resolved.exists():
+            return resolved
+    return repo_root
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 loaded_envs: list[Path] = []
 
@@ -77,10 +86,7 @@ class Settings(BaseSettings):
     app_name: str = "mcpt-metadata-service"
     api_prefix: str = "/api/v1"
     database_url: str = _build_default_database_url()
-    legacy_metadata_dir: str = str(PROJECT_ROOT / "backend" / "legacy-engine" / "data" / "metadata")
     tracking_service_url: str = "http://tracking-service:8000"
-    tracking_service_local_url: str = "http://127.0.0.1:8000"
-    tracking_service_prefer_local: bool = False
     public_api_base_url: str = os.getenv("NEXT_PUBLIC_API_GATEWAY_URL", "").strip()
     lightning_api_token: str = ""
     lightning_api_auth_header: str = "Authorization"
@@ -120,3 +126,24 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _normalize_runtime_path(raw_value: str, fallback_relative_path: str) -> str:
+    raw_text = str(raw_value or "").strip()
+    candidate = Path(raw_text).expanduser()
+    if not str(candidate):
+        return str((PROJECT_ROOT / fallback_relative_path).resolve())
+    if candidate.is_absolute():
+        if candidate.exists():
+            return str(candidate.resolve())
+        if os.name != "nt":
+            return str(candidate)
+        resolved = candidate.resolve()
+        return str((PROJECT_ROOT / fallback_relative_path).resolve()) if raw_text.startswith(("/workspace", "\\workspace")) else str(resolved)
+    return str((PROJECT_ROOT / candidate).resolve())
+
+
+settings.video_storage_root = _normalize_runtime_path(settings.video_storage_root, "storage/videos")
+settings.tracking_output_root = _normalize_runtime_path(settings.tracking_output_root, "storage/tracking-output")
+settings.queue_local_root = _normalize_runtime_path(settings.queue_local_root, "storage/queue")
+settings.storage_ingest_root = _normalize_runtime_path(settings.storage_ingest_root, "storage")

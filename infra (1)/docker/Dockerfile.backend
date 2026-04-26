@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY backend/services/metadata-service/requirements.txt /tmp/metadata-req.txt
+COPY backend/services/api-gateway/requirements.txt /tmp/gateway-req.txt
+RUN pip install --no-cache-dir -r /tmp/metadata-req.txt -r /tmp/gateway-req.txt
+
+COPY backend/services/metadata-service/app /app/metadata_app
+COPY backend/services/api-gateway/app /app/gateway_app
+COPY backend/legacy-engine /workspace/backend/legacy-engine
+COPY shared_secret_runtime.py /workspace/a20-root/shared_secret_runtime.py
+
+COPY infra/docker/backend_entrypoint.sh /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+ENV PYTHONPATH=/app:/workspace/a20-root
+ENV A20_ROOT=/workspace/a20-root
+
+EXPOSE 8000
+
+ENTRYPOINT ["sh", "/app/entrypoint.sh"]

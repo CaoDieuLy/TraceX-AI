@@ -23,7 +23,6 @@ from .schemas import (
     CandidateTrackRequest,
     CandidateTrackResponse,
     CandidateResponse,
-    ImportResponse,
     OverviewResponse,
     QueueProcessResponse,
     QueueVideoListResponse,
@@ -48,7 +47,6 @@ from .service import (
     get_overview,
     get_video_by_public_id,
     get_video_query,
-    import_legacy_metadata,
     list_users,
     list_queue_videos,
     list_video_queries,
@@ -376,12 +374,6 @@ def candidate_track(
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/candidates/import-legacy", response_model=ImportResponse)
-def import_candidates(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)) -> dict:
-    return import_legacy_metadata(session)
-
 
 @app.get("/api/v1/queue/videos", response_model=QueueVideoListResponse)
 def queue_videos(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)) -> dict:

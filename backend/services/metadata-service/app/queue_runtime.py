@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .post_move_ingestion import (
-    LOCAL_STORAGE_SOURCE_MODE,
+    STORAGE_INGEST_SOURCE_MODE,
     PostMoveIngestionPolicy,
     StorageTrackingRequestFactory,
     StorageTrackingResultAssembler,
@@ -85,6 +84,17 @@ class QueueSyncService:
     def _is_remote_endpoint(endpoint_root: str) -> bool:
         host = (urlparse(endpoint_root).hostname or "").strip().lower()
         return host not in {"", "127.0.0.1", "localhost", "tracking-service"}
+
+    @staticmethod
+    def _build_tracking_headers() -> dict[str, str]:
+        token = str(settings.lightning_api_token or "").strip()
+        if not token:
+            return {}
+        header_name = str(settings.lightning_api_auth_header or "Authorization").strip() or "Authorization"
+        auth_prefix = str(settings.lightning_api_auth_prefix or "")
+        if auth_prefix and not auth_prefix.endswith(" "):
+            auth_prefix = f"{auth_prefix} "
+        return {header_name: f"{auth_prefix}{token}".strip()}
 
     def _build_drive_service(self):
         if not settings.google_drive_enabled:
@@ -183,7 +193,7 @@ class QueueSyncService:
             path.unlink(missing_ok=True)
 
     def _delete_queue_owned_video_file(self, row) -> None:
-        if str(getattr(row, "source_mode", "") or "") == LOCAL_STORAGE_SOURCE_MODE:
+        if str(getattr(row, "source_mode", "") or "") == STORAGE_INGEST_SOURCE_MODE:
             return
         self._delete_local_file(getattr(row, "local_video_path", None))
 
@@ -220,16 +230,6 @@ class QueueSyncService:
         metadata_extra: dict | None = None,
     ) -> dict:
         endpoint_root = settings.tracking_service_url.rstrip("/")
-        if settings.tracking_service_prefer_local and settings.tracking_service_local_url:
-            try:
-                local_url = settings.tracking_service_local_url.rstrip("/")
-                parsed_host = local_url.split("://", 1)[-1].split("/", 1)[0]
-                host, _, raw_port = parsed_host.partition(":")
-                port = int(raw_port or 80)
-                with socket.create_connection((host, port), timeout=1.5):
-                    endpoint_root = local_url
-            except Exception:
-                endpoint_root = settings.tracking_service_url.rstrip("/")
 
         if source_path is not None and self._is_remote_endpoint(endpoint_root):
             return self._request_tracking_processing_upload(
@@ -263,9 +263,7 @@ class QueueSyncService:
             "metadata": ingestion_metadata,
         }
         endpoint = f"{endpoint_root}/api/v1/ingestion/process"
-        headers: dict[str, str] = {}
-        if settings.lightning_api_token:
-            headers[settings.lightning_api_auth_header] = f"{settings.lightning_api_auth_prefix}{settings.lightning_api_token}"
+        headers = self._build_tracking_headers()
         with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
             response = client.post(endpoint, json=payload, headers=headers or None)
             response.raise_for_status()
@@ -284,9 +282,7 @@ class QueueSyncService:
     ) -> dict:
         endpoint_root = settings.tracking_service_url.rstrip("/")
         endpoint = f"{endpoint_root}/api/v1/ingestion/upload"
-        headers: dict[str, str] = {}
-        if settings.lightning_api_token:
-            headers[settings.lightning_api_auth_header] = f"{settings.lightning_api_auth_prefix}{settings.lightning_api_token}"
+        headers = self._build_tracking_headers()
 
         ingestion_metadata = {
             "source_mode": source_mode,
@@ -456,7 +452,7 @@ class QueueSyncService:
                     result,
                     source_filename=item["source_filename"],
                     source_mode=item["source_mode"],
-                    publish_to_drive=False,
+                    publish_to_drive=bool(settings.google_drive_enabled),
                 )
             )
             registry.mark_processed(item["source_item"], result)

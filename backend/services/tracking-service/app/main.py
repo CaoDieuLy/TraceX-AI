@@ -57,7 +57,7 @@ def runtime_config() -> dict:
 def runtime_config_hardware() -> dict:
     config = get_runtime_config()
     return {
-        "gpu_hardware_profile": config.get("gpu_hardware_profile"),
+        "detected_hardware": config.get("detected_hardware"),
         "execution_plan": config.get("execution_plan"),
     }
 
@@ -75,7 +75,7 @@ async def ai_worker(
     query_text: str = Form(default=""),
     video_title: str | None = Form(default=None),
     metadata: str | None = Form(default=None),
-    gpu_hardware_profile: str | None = Form(default=None),
+    detected_hardware: str | None = Form(default=None),
     execution_plan: str | None = Form(default=None),
     acceleration_state: str | None = Form(default=None),
 ) -> dict:
@@ -92,7 +92,7 @@ async def ai_worker(
             "query_text": query_text,
             "source_path": str(local_input_path),
             "metadata": metadata,
-            "gpu_hardware_profile": gpu_hardware_profile,
+            "detected_hardware": detected_hardware,
             "execution_plan": execution_plan,
             "acceleration_state": acceleration_state,
         }

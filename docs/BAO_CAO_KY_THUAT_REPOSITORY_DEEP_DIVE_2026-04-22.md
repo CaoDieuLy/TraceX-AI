@@ -33,7 +33,7 @@ Nhung endpoint can inference strict se fail-fast neu external strict runtime chu
 
 ## Viec nen lam tiep
 
-1. Cau hinh external runtime thuc thi dung profile strict.
+1. Cau hinh external runtime thuc thi dung stack strict.
 2. Bo sung healthcheck chi tiet cho runtime strict.
 3. Them integration test cho `/search` voi upstream strict da san sang.
 4. Neu can ingestion local, tao module moi dung dung stack strict thay vi khoi phuc runtime cu.

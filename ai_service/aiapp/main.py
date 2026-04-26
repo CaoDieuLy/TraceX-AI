@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from app.database import SessionLocal
 from app.service import rank_candidates
 
+from .runtime_contract import build_tracking_runtime_contract
 from .tracking_upstream import proxy_get_bytes, proxy_get_json, proxy_post_json
 
 app = FastAPI(title="MCPT AI Service", version="1.0.0")
@@ -96,8 +97,8 @@ def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
 
 @app.get("/internal/tracking/v1/runtime-config")
 async def internal_tracking_runtime_config(request: Request) -> Any:
-    """Gateway goi endpoint nay de doc cau hinh runtime co dinh tu tracking upstream."""
-    return await proxy_get_json("api/v1/runtime-config", request)
+    """Return the fixed deployed contract without depending on upstream support."""
+    return build_tracking_runtime_contract()
 
 
 @app.post("/internal/tracking/v1/ai/process")

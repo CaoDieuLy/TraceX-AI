@@ -25,7 +25,7 @@ Chi mot pipeline duoc chap nhan:
 - `ITSELF`
 - `TrackEval HOTA`
 
-Repo khong duoc them profile moi, khong mo override hyperparameter, va khong fallback sang runtime khac.
+Repo khong duoc them stack/model select moi, khong mo override hyperparameter, va khong fallback sang runtime khac.
 
 ## Rủi ro con lai
 

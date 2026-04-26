@@ -86,7 +86,7 @@ class LightningAIClient:
         video_id: str | None = None,
         video_title: str | None = None,
         metadata: dict[str, Any] | None = None,
-        gpu_hardware_profile: dict[str, Any] | None = None,
+        detected_hardware: dict[str, Any] | None = None,
         execution_plan: dict[str, Any] | None = None,
         acceleration_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -100,7 +100,7 @@ class LightningAIClient:
             video_id: Optional video ID
             video_title: Optional video title
             metadata: Additional metadata
-            gpu_hardware_profile: GPU hardware configuration
+            detected_hardware: Auto-detected hardware description
             execution_plan: Execution plan details
             acceleration_state: Acceleration state info
 
@@ -130,8 +130,8 @@ class LightningAIClient:
         # Optional fields
         if video_title is not None:
             data["video_title"] = video_title
-        if gpu_hardware_profile:
-            data["gpu_hardware_profile"] = json.dumps(gpu_hardware_profile)
+        if detected_hardware:
+            data["detected_hardware"] = json.dumps(detected_hardware)
         if execution_plan:
             data["execution_plan"] = json.dumps(execution_plan)
         if acceleration_state:

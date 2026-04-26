@@ -4,7 +4,7 @@ import os
 import sys
 
 _here = Path(__file__).parent
-REPO_ROOT = _here.parent.parent.parent.parent.parent
+REPO_ROOT = _here.parent.parent.parent.parent.resolve()
 A20_ROOT = REPO_ROOT
 if str(A20_ROOT) not in sys.path:
     sys.path.insert(0, str(A20_ROOT))
@@ -46,8 +46,17 @@ try:
 except ImportError:
     pass
 
-# Compute PROJECT_ROOT from env or file location
-PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", _here.parent.parent.parent.parent))
+def _resolve_project_root() -> Path:
+    raw_value = os.getenv("PROJECT_ROOT", "").strip()
+    if raw_value:
+        candidate = Path(raw_value).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (REPO_ROOT / candidate).resolve()
+        if resolved.exists():
+            return resolved
+    return REPO_ROOT
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 
 class Settings(BaseSettings):
@@ -82,11 +91,6 @@ class Settings(BaseSettings):
 
     tracking_runtime_mode: str = "production_ready"
     tracking_hyperparameter_overrides_json: str = ""  # disabled in strict mode
-    gpu_hardware_profile: str = "auto"
-    gpu_hardware_overrides_json: str = ""
-    gpu_count: int = 1
-    host_cpu_count: int = 16
-    host_ram_gb: int = 64
     uvicorn_workers: int = 1
 
     ffmpeg_crf: int = 28
@@ -114,3 +118,26 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _normalize_runtime_path(raw_value: str, fallback_relative_path: str) -> str:
+    raw_text = str(raw_value or "").strip()
+    candidate = Path(raw_text).expanduser()
+    if not str(candidate):
+        return str((PROJECT_ROOT / fallback_relative_path).resolve())
+    if candidate.is_absolute():
+        if candidate.exists():
+            return str(candidate.resolve())
+        if os.name != "nt":
+            return str(candidate)
+        resolved = candidate.resolve()
+        return str((PROJECT_ROOT / fallback_relative_path).resolve()) if raw_text.startswith(("/workspace", "\\workspace")) else str(resolved)
+    return str((PROJECT_ROOT / candidate).resolve())
+
+
+settings.legacy_root = _normalize_runtime_path(settings.legacy_root, "backend/legacy-engine")
+settings.ingestion_work_root = _normalize_runtime_path(settings.ingestion_work_root, "storage/tracking-ingestion")
+settings.video_conversion_output_dir = _normalize_runtime_path(settings.video_conversion_output_dir, "storage/video-conversion")
+settings.video_download_output_dir = _normalize_runtime_path(settings.video_download_output_dir, "storage/tracking-outputs")
+settings.tracking_artifact_root = _normalize_runtime_path(settings.tracking_artifact_root, "storage/tracking-artifacts")
+settings.camera_calibration_path = _normalize_runtime_path(settings.camera_calibration_path, "backend/config/camera_calibration.json")

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from .storage_ingest import StorageVideoItem
 
 
-LOCAL_STORAGE_SOURCE_MODE = "local_storage_ingest"
+STORAGE_INGEST_SOURCE_MODE = "storage_ingest"
 
 
 @dataclass(frozen=True)
@@ -62,7 +62,8 @@ class TrackletQualityPolicy:
     """Tracklet filtering contract for low-confidence / low-information tracks."""
 
     enabled: bool = True
-    minimum_confidence_score: float = 0.32
+    minimum_confidence_score: float = 0.3
+    minimum_tracklet_duration_seconds: float = 2.0
     reject_blurry_tracklets: bool = True
     reject_incomplete_tracklets: bool = True
 
@@ -70,47 +71,77 @@ class TrackletQualityPolicy:
         return {
             "enabled": self.enabled,
             "minimum_confidence_score": self.minimum_confidence_score,
+            "minimum_tracklet_duration_seconds": self.minimum_tracklet_duration_seconds,
             "reject_blurry_tracklets": self.reject_blurry_tracklets,
             "reject_incomplete_tracklets": self.reject_incomplete_tracklets,
         }
 
 
 @dataclass(frozen=True)
-class BasicFeatureBranchPolicy:
-    """Always-on branch for search metadata generation."""
+class TrackletFeaturePipelinePolicy:
+    """Unified tracklet feature pipeline for attribute, appearance, and action."""
 
+    selection_mode: str = "hybrid_track_mean_plus_topk"
     keyframe_selector: str = "laplacian_variance_with_bbox_area_rank"
+    selection_score_inputs: tuple[str, ...] = ("laplacian_variance", "bbox_area", "detection_confidence")
+    selected_frame_count: int = 5
+    max_selected_frame_count: int = 10
+    pooling_methods: tuple[str, ...] = (
+        "mean_pooling",
+        "max_pooling",
+        "quality_weighted_mean",
+    )
     static_attribute_extractor: str = "static_attribute_extraction"
+    static_attribute_fields: tuple[str, ...] = ("gender", "age_group")
+    static_attribute_embedding_fields: tuple[str, ...] = ("attribute_embedding_vector",)
+    appearance_attribute_extractor: str = "appearance_attribute_extraction"
+    appearance_attribute_fields: tuple[str, ...] = (
+        "head_accessory",
+        "hat",
+        "hair_color",
+        "skin_tone",
+        "shirt",
+        "pants",
+        "shoes",
+        "bag",
+    )
     appearance_embedding_extractor: str = "SOLIDER + KPR"
+    appearance_embedding_output_fields: tuple[str, ...] = (
+        "appearance_embedding_vector",
+        "embedding_vector",
+        "tracklet_vectors",
+    )
+    action_clip_builder: str = "tracklet_action_clip_builder"
+    action_clip_duration_seconds: float = 2.0
+    action_clip_stride_seconds: float = 1.5
+    action_behavior_analyzer: str = "action_behavior_analysis"
+    action_semantic_embedding_model: str = "ITSELF"
+    action_output_fields: tuple[str, ...] = ("timeline", "matched_segments", "action_semantic_embedding")
     aggregation_target_vectors: int = 3
 
     def to_metadata(self) -> dict[str, Any]:
         return {
             "always_run": True,
+            "selection_mode": self.selection_mode,
             "keyframe_selector": self.keyframe_selector,
+            "selection_score_inputs": list(self.selection_score_inputs),
+            "selected_frame_count": self.selected_frame_count,
+            "max_selected_frame_count": self.max_selected_frame_count,
+            "pooling_methods": list(self.pooling_methods),
             "static_attribute_extractor": self.static_attribute_extractor,
+            "static_attribute_fields": list(self.static_attribute_fields),
+            "static_attribute_embedding_fields": list(self.static_attribute_embedding_fields),
+            "appearance_attribute_extractor": self.appearance_attribute_extractor,
+            "appearance_attribute_fields": list(self.appearance_attribute_fields),
             "appearance_embedding_extractor": self.appearance_embedding_extractor,
+            "appearance_embedding_output_fields": list(self.appearance_embedding_output_fields),
+            "action_clip_builder": self.action_clip_builder,
+            "action_clip_duration_seconds": self.action_clip_duration_seconds,
+            "action_clip_stride_seconds": self.action_clip_stride_seconds,
+            "action_behavior_analyzer": self.action_behavior_analyzer,
+            "action_semantic_embedding_model": self.action_semantic_embedding_model,
+            "action_output_fields": list(self.action_output_fields),
             "aggregation_target_vectors": self.aggregation_target_vectors,
-        }
-
-
-@dataclass(frozen=True)
-class LazyActionBranchPolicy:
-    """Lazy branch for action semantics, triggered on demand or low confidence."""
-
-    enabled: bool = True
-    trigger_mode: str = "on_demand_or_low_confidence"
-    clip_builder: str = "action_clip_builder"
-    behavior_analyzer: str = "action_behavior_analysis"
-    semantic_embedding_model: str = "ITSELF"
-
-    def to_metadata(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "trigger_mode": self.trigger_mode,
-            "clip_builder": self.clip_builder,
-            "behavior_analyzer": self.behavior_analyzer,
-            "semantic_embedding_model": self.semantic_embedding_model,
         }
 
 
@@ -118,12 +149,11 @@ class LazyActionBranchPolicy:
 class PostMoveIngestionPolicy:
     """End-to-end contract for everything that happens after move.py finishes."""
 
-    source_mode: str = LOCAL_STORAGE_SOURCE_MODE
+    source_mode: str = STORAGE_INGEST_SOURCE_MODE
     decode_sampling: DecodeSamplingPolicy = field(default_factory=DecodeSamplingPolicy)
     tracking: TrackingPolicy = field(default_factory=TrackingPolicy)
     tracklet_quality: TrackletQualityPolicy = field(default_factory=TrackletQualityPolicy)
-    basic_feature_branch: BasicFeatureBranchPolicy = field(default_factory=BasicFeatureBranchPolicy)
-    lazy_action_branch: LazyActionBranchPolicy = field(default_factory=LazyActionBranchPolicy)
+    tracklet_feature_pipeline: TrackletFeaturePipelinePolicy = field(default_factory=TrackletFeaturePipelinePolicy)
 
     def build_metadata(self, item: "StorageVideoItem") -> dict[str, Any]:
         return {
@@ -135,8 +165,7 @@ class PostMoveIngestionPolicy:
                 "decode_sampling": self.decode_sampling.to_metadata(),
                 "tracking": self.tracking.to_metadata(),
                 "tracklet_quality": self.tracklet_quality.to_metadata(),
-                "basic_feature_branch": self.basic_feature_branch.to_metadata(),
-                "lazy_action_branch": self.lazy_action_branch.to_metadata(),
+                "tracklet_feature_pipeline": self.tracklet_feature_pipeline.to_metadata(),
             },
         }
 

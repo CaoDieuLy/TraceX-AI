@@ -136,12 +136,7 @@ def _public_api_url(path: str | None) -> str | None:
 
 def _candidate_search_document(person: dict) -> str:
     parts: list[str] = []
-    for key in (
-        "search_text",
-        "appearance_summary",
-        "person_caption",
-        "caption",
-    ):
+    for key in ("search_text", "appearance_summary"):
         text = str(person.get(key) or "").strip()
         if text:
             parts.append(text)
@@ -203,13 +198,19 @@ def candidate_to_payload(candidate: PersonCandidate, queue_video: QueueVideoAsse
         "bbox": bbox,
         "search_text": candidate.search_text,
         "metadata_path": candidate.metadata_path,
-        "appearance_summary": raw_metadata.get("appearance_summary") or raw_metadata.get("person_caption"),
+        "attribute_summary": raw_metadata.get("attribute_summary"),
+        "appearance_summary": raw_metadata.get("appearance_summary"),
+        "attribute_embedding_vector": raw_metadata.get("attribute_embedding_vector") if isinstance(raw_metadata.get("attribute_embedding_vector"), list) else [],
+        "appearance_embedding_vector": raw_metadata.get("appearance_embedding_vector") if isinstance(raw_metadata.get("appearance_embedding_vector"), list) else [],
         "semantic_attributes": _coerce_string_list(raw_metadata.get("semantic_attributes")),
+        "embedding_vector": raw_metadata.get("embedding_vector") if isinstance(raw_metadata.get("embedding_vector"), list) else [],
         "visibility_scores": _coerce_mapping(raw_metadata.get("visibility_scores")),
         "world_position": raw_metadata.get("world_position") or raw_metadata.get("top_point_projection"),
-        "reid_profile": raw_metadata.get("reid_profile"),
         "score": raw_metadata.get("score"),
+        "timeline": raw_metadata.get("timeline") if isinstance(raw_metadata.get("timeline"), list) else [],
         "matched_segments": raw_metadata.get("matched_segments") or [],
+        "action_semantic_embedding": _coerce_mapping(raw_metadata.get("action_semantic_embedding")),
+        "tracklet_feature_pipeline": _coerce_mapping(raw_metadata.get("tracklet_feature_pipeline")),
         "available_link_video": queue_video.available_link_video if queue_video else None,
         "available_link_metadata": queue_video.available_link_metadata if queue_video else None,
         "drive_video_file_id": queue_video.drive_video_file_id if queue_video else None,
@@ -246,14 +247,19 @@ def _candidate_raw_metadata_subset(raw_metadata: object) -> dict[str, Any]:
     reduced: dict[str, Any] = {}
 
     for key in (
+        "attribute_summary",
         "appearance_summary",
-        "person_caption",
-        "caption",
-        "reid_profile",
         "score",
+        "action_semantic_embedding",
+        "tracklet_feature_pipeline",
     ):
         value = payload.get(key)
         if value not in (None, "", [], {}):
+            reduced[key] = value
+
+    for key in ("attribute_embedding_vector", "appearance_embedding_vector"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
             reduced[key] = value
 
     semantic_attributes = _coerce_string_list(payload.get("semantic_attributes"))
@@ -300,15 +306,19 @@ def candidate_to_ranking_payload(candidate: PersonCandidate, queue_video: QueueV
         "bbox": bbox,
         "search_text": candidate.search_text,
         "metadata_path": candidate.metadata_path,
-        "appearance_summary": reduced_raw_metadata.get("appearance_summary") or reduced_raw_metadata.get("person_caption"),
+        "attribute_summary": reduced_raw_metadata.get("attribute_summary"),
+        "appearance_summary": reduced_raw_metadata.get("appearance_summary"),
+        "attribute_embedding_vector": reduced_raw_metadata.get("attribute_embedding_vector") if isinstance(reduced_raw_metadata.get("attribute_embedding_vector"), list) else [],
+        "appearance_embedding_vector": reduced_raw_metadata.get("appearance_embedding_vector") if isinstance(reduced_raw_metadata.get("appearance_embedding_vector"), list) else [],
         "semantic_attributes": _coerce_string_list(reduced_raw_metadata.get("semantic_attributes")),
         "visibility_scores": _coerce_mapping(reduced_raw_metadata.get("visibility_scores")),
         "world_position": reduced_raw_metadata.get("world_position"),
-        "reid_profile": reduced_raw_metadata.get("reid_profile"),
         "score": reduced_raw_metadata.get("score"),
-        "embedding_vector": raw_metadata.get("embedding_vector"),
-        "candidate_vector": raw_metadata.get("candidate_vector"),
+        "embedding_vector": raw_metadata.get("embedding_vector") if isinstance(raw_metadata.get("embedding_vector"), list) else [],
+        "timeline": reduced_raw_metadata.get("timeline") if isinstance(reduced_raw_metadata.get("timeline"), list) else [],
         "matched_segments": reduced_raw_metadata.get("matched_segments") or [],
+        "action_semantic_embedding": _coerce_mapping(reduced_raw_metadata.get("action_semantic_embedding")),
+        "tracklet_feature_pipeline": _coerce_mapping(reduced_raw_metadata.get("tracklet_feature_pipeline")),
         "available_link_video": queue_video.available_link_video if queue_video else None,
         "available_link_metadata": queue_video.available_link_metadata if queue_video else None,
         "drive_video_file_id": queue_video.drive_video_file_id if queue_video else None,
@@ -329,18 +339,17 @@ def _remote_ranking_shortlist_limit(limit: int) -> int:
 
 
 def _candidate_embedding_values(candidate: dict[str, Any]) -> list[float]:
-    for key in ("embedding_vector", "candidate_vector"):
-        values = candidate.get(key)
-        if not isinstance(values, list) or not values:
-            continue
-        vector: list[float] = []
-        try:
-            for value in values:
-                vector.append(float(value))
-        except (TypeError, ValueError):
-            continue
-        if vector:
-            return vector
+    values = candidate.get("embedding_vector")
+    if not isinstance(values, list) or not values:
+        return []
+    vector: list[float] = []
+    try:
+        for value in values:
+            vector.append(float(value))
+    except (TypeError, ValueError):
+        return []
+    if vector:
+        return vector
     return []
 
 
@@ -1034,125 +1043,6 @@ def get_overview(session: Session) -> dict:
     }
 
 
-def import_legacy_metadata(session: Session) -> dict:
-    """
-    Import person candidates từ Google Drive Metadata folder (Queue) vào PostgreSQL.
-    Trong production, metadata được sinh bởi ingestion pipeline và đã có trong DB qua queue worker.
-    Endpoint này chỉ dùng để migrate/restore từ Drive nếu cần.
-    """
-    if settings.google_drive_enabled:
-        # Đọc từ Google Drive Metadata folder
-        from .queue_runtime import QueueSyncService
-
-        qs = QueueSyncService()
-        drive_service = qs._build_drive_service()
-        layout = qs.ensure_drive_layout()
-        metadata_folder_id = layout["queue_metadata_id"]
-
-        # Query tất cả JSON files trong Metadata folder
-        query = f"'{metadata_folder_id}' in parents and trashed = false and mimeType='application/json'"
-        files = drive_service.files().list(q=query, fields="files(id, name)").execute().get("files", [])
-
-        imported_count = 0
-        updated_count = 0
-        file_count = len(files)
-
-        for file_meta in files:
-            file_id = file_meta["id"]
-            filename = file_meta["name"]
-            # Download file content
-            import io
-            request = drive_service.files().get_media(fileId=file_id)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            content = fh.getvalue().decode("utf-8")
-            payload = json.loads(content)
-            # Import persons from this metadata file
-            for person in payload.get("people") or []:
-                if not isinstance(person, dict):
-                    continue
-                candidate_id = str(person.get("candidate_id") or "").strip()
-                if not candidate_id:
-                    continue
-
-                existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
-                values = {
-                    "candidate_id": candidate_id,
-                    "camera_id": person.get("camera_id"),
-                    "video_id": person.get("video_id"),
-                    "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
-                    "human_key": person.get("human_key"),
-                    "frame_idx": int(person.get("frame_idx") or 0),
-                    "search_text": _candidate_search_document(person),
-                    "metadata_path": f"drive://{file_id}/{filename}",
-                    "raw_metadata": person,
-                }
-
-                if existing:
-                    for key, value in values.items():
-                        setattr(existing, key, value)
-                    updated_count += 1
-                else:
-                    session.add(PersonCandidate(**values))
-                    imported_count += 1
-
-        session.commit()
-        return {
-            "imported_count": imported_count,
-            "updated_count": updated_count,
-            "file_count": file_count,
-        }
-    else:
-        # Fallback: đọc từ local LEGACY_METADATA_DIR (development only)
-        metadata_root = Path(settings.legacy_metadata_dir)
-        metadata_root.mkdir(parents=True, exist_ok=True)
-
-        imported_count = 0
-        updated_count = 0
-        file_count = 0
-
-        for metadata_path in sorted(metadata_root.glob("*.json")):
-            file_count += 1
-            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-            for person in payload.get("people") or []:
-                if not isinstance(person, dict):
-                    continue
-                candidate_id = str(person.get("candidate_id") or "").strip()
-                if not candidate_id:
-                    continue
-
-                existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
-                values = {
-                    "candidate_id": candidate_id,
-                    "camera_id": person.get("camera_id"),
-                    "video_id": person.get("video_id"),
-                    "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
-                    "human_key": person.get("human_key"),
-                    "frame_idx": int(person.get("frame_idx") or 0),
-                    "search_text": _candidate_search_document(person),
-                    "metadata_path": str(metadata_path),
-                    "raw_metadata": person,
-                }
-
-                if existing:
-                    for key, value in values.items():
-                        setattr(existing, key, value)
-                    updated_count += 1
-                else:
-                    session.add(PersonCandidate(**values))
-                    imported_count += 1
-
-        session.commit()
-        return {
-            "imported_count": imported_count,
-            "updated_count": updated_count,
-            "file_count": file_count,
-        }
-
-
 def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> dict[str, int]:
     existing_candidates = int(session.scalar(select(func.count()).select_from(PersonCandidate)) or 0)
     existing_queue_videos = int(session.scalar(select(func.count()).select_from(QueueVideoAsset)) or 0)
@@ -1684,3 +1574,4 @@ def upsert_person_candidates(session: Session, people: list[dict], metadata_path
 
     session.flush()
     return {"imported_count": imported_count, "updated_count": updated_count}
+

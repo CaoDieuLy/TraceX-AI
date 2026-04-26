@@ -10,7 +10,7 @@ fine-grained person retrieval.
 
 ## Verified external references used for the redesign
 
-- RF-DETR was selected as the primary detector profile because it is presented as a real-time
+- RF-DETR was selected as the primary detector because it is presented as a real-time
   DETR family model with strong COCO accuracy and NMS-free inference.
   Source: `https://iclr.cc/virtual/2026/poster/10007257`
 - For strict detector naming, this repo now targets the upstream RF-DETR API contract from
@@ -33,18 +33,18 @@ fine-grained person retrieval.
 
 ## Important scope note
 
-This repository now exposes a single strict pipeline profile and emits manifests that describe
+This repository now exposes a single strict pipeline contract and emits manifests that describe
 the intended stack. The repo does not bundle RF-DETR, SOLIDER, KPR, ITSELF, or TrackEval
 weights/runtimes. Those must be supplied by the external strict runtime before production
-inference can match the declared profile.
+inference can match the declared contract.
 
 ## What changed in code
 
-- `tracking-service` now exposes a structured pipeline configuration instead of a generic mock flag.
+- `tracking-service` now exposes a structured runtime configuration instead of a generic mock flag.
 - Tracking runs emit a `strict_tracking_manifest_v1` JSON artifact beside the output clip.
-- The active profile defaults to `rfdetr_ocmctrack_solider_kpr_itself_hota`; alternate profiles
-  and hyperparameter overrides are disabled.
-- The profile registry now carries tuned hyperparameters for:
+- The active stack is fixed to `RF-DETR 2x-large + OCMCTrack-style corrective cascade + SOLIDER + KPR + ITSELF + TrackEval HOTA`;
+  alternate stacks and hyperparameter overrides are disabled.
+- The strict contract now carries tuned hyperparameters for:
   - detector confidence and query budget
   - tracker association gates, occlusion handling, corrective buffer, and world-speed gate
   - Re-ID weighting and rerank parameters
@@ -55,7 +55,7 @@ inference can match the declared profile.
   - decode + sampling at `5 fps`
   - person detection with `RFDETR2XLarge`
   - local tracking per video, where each 10-minute clip is independent
-  - tracklet quality scoring before metadata / feature branches
+  - tracklet quality scoring before the unified tracklet feature pipeline
 - The tracking service now resolves hardware plans for `L4`, `T4`, `A100`, and `H100`.
 - Each hardware plan declares:
   - GPU stream count
@@ -78,7 +78,6 @@ inference can match the declared profile.
   - `semantic_attributes`
   - `visibility_scores`
   - `world_position`
-  - `reid_profile`
 - Legacy vector search now reranks candidates with a lightweight multi-signal ensemble:
   cosine similarity + semantic token overlap + visibility confidence.
 

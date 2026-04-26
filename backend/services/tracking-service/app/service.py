@@ -77,9 +77,11 @@ def _candidate_payload_view(candidate: dict) -> dict:
         "semantic_attributes",
         "visibility_scores",
         "world_position",
+        "timeline",
         "matched_segments",
+        "action_semantic_embedding",
+        "tracklet_feature_pipeline",
         "embedding_vector",
-        "candidate_vector",
     ):
         if payload.get(key) not in (None, "", []):
             merged[key] = payload.get(key)
@@ -196,7 +198,7 @@ def _coerce_string_list(values: object) -> list[str]:
 
 def _candidate_search_document(person: dict) -> str:
     parts: list[str] = []
-    for key in ("search_text", "appearance_summary", "person_caption", "caption"):
+    for key in ("search_text", "appearance_summary"):
         text = str(person.get(key) or "").strip()
         if text:
             parts.append(text)
@@ -296,16 +298,15 @@ def _precompute_candidate_embedding_scores(query_embedding: np.ndarray | None, c
 
 
 def _candidate_embedding_values(candidate: dict) -> list[float]:
-    for key in ("embedding_vector", "candidate_vector"):
-        values = candidate.get(key)
-        if not isinstance(values, list) or not values:
-            continue
-        try:
-            vector = [float(value) for value in values]
-        except (TypeError, ValueError):
-            continue
-        if vector:
-            return vector
+    values = candidate.get("embedding_vector")
+    if not isinstance(values, list) or not values:
+        return []
+    try:
+        vector = [float(value) for value in values]
+    except (TypeError, ValueError):
+        return []
+    if vector:
+        return vector
     return []
 
 
@@ -451,19 +452,6 @@ def _build_worker_match(
     return match
 
 
-def _summarize_matches(query_text: str, video_id: str, matches: list[dict], person_count: int) -> str:
-    if not matches:
-        return f"Processed video '{video_id}' and generated metadata for {person_count} people, but no strong match was found for '{query_text}'."
-    best = matches[0]
-    camera_id = str(best.get("camera_id") or video_id or "unknown-camera")
-    track_id = str(best.get("track_id") or "?")
-    score = float(best.get("score") or 0.0)
-    return (
-        f"Processed video '{video_id}' and found {len(matches)} likely matches for '{query_text}'. "
-        f"Best match: camera {camera_id}, track {track_id}, score {score:.3f}."
-    )
-
-
 def _resolve_query_source_path(storage_path: str, video_id: str | None = None) -> Path:
     source = str(storage_path or "").strip()
     if not source:
@@ -508,22 +496,6 @@ def _cleanup_remote_query_files(*paths: Path | None) -> None:
             logger.debug("Skipped cleanup for %s: %s", path, exc)
 
 
-def _load_env_profile_overrides() -> dict:
-    # Strict mode: hyperparameter overrides are disabled.
-    return {}
-
-
-def _load_env_hardware_overrides() -> dict:
-    raw = settings.gpu_hardware_overrides_json.strip()
-    if not raw:
-        return {}
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def _strict_pipeline_spec() -> dict:
     return get_strict_pipeline()
 
@@ -532,18 +504,11 @@ def _strict_pipeline_spec() -> dict:
 def get_runtime_config() -> dict:
     mode = "remote" if settings.lightning_api_base_url else "local"
     pipeline = _strict_pipeline_spec()
-    hardware_profile, execution_plan = resolve_execution_plan(
-        pipeline_spec=pipeline,
-        gpu_profile_name=settings.gpu_hardware_profile,
-        gpu_profile_overrides=_load_env_hardware_overrides(),
-        gpu_count=settings.gpu_count,
-        host_cpu_count=settings.host_cpu_count,
-        host_ram_gb=settings.host_ram_gb,
-    )
+    detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
     acceleration_state = configure_torch_runtime(
-        allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
-        cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-        host_cpu_count=settings.host_cpu_count,
+        allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+        cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+        host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
     )
     return {
         "provider": "lightningai",
@@ -554,7 +519,7 @@ def get_runtime_config() -> dict:
         "components": pipeline["components"],
         "hyperparameters": pipeline.get("hyperparameters", {}),
         "runtime_defaults": pipeline.get("runtime_defaults", {}),
-        "gpu_hardware_profile": hardware_profile,
+        "detected_hardware": detected_hardware,
         "execution_plan": execution_plan,
         "acceleration_state": acceleration_state,
         "enable_trackeval": settings.enable_trackeval,
@@ -629,18 +594,11 @@ def process_video_query(payload: dict) -> dict:
     query_id = payload.get("query_id")
     metadata = _json_dict_or_empty(payload.get("metadata"))
     pipeline = _strict_pipeline_spec()
-    hardware_profile, execution_plan = resolve_execution_plan(
-        pipeline_spec=pipeline,
-        gpu_profile_name=str(metadata.get("gpu_hardware_profile") or settings.gpu_hardware_profile),
-        gpu_profile_overrides=_dict_or_empty(metadata.get("gpu_hardware_overrides")) or _load_env_hardware_overrides(),
-        gpu_count=settings.gpu_count,
-        host_cpu_count=settings.host_cpu_count,
-        host_ram_gb=settings.host_ram_gb,
-    )
+    detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
     acceleration_state = configure_torch_runtime(
-        allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
-        cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-        host_cpu_count=settings.host_cpu_count,
+        allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+        cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+        host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
     )
     file_exists = bool(storage_path)
 
@@ -671,7 +629,7 @@ def process_video_query(payload: dict) -> dict:
             video_id=video_id,
             video_title=payload.get("video_title"),
             metadata=metadata,
-            gpu_hardware_profile=hardware_profile,
+            detected_hardware=detected_hardware,
             execution_plan=execution_plan,
             acceleration_state=acceleration_state,
         )
@@ -707,7 +665,7 @@ def process_video_query(payload: dict) -> dict:
             "status": ai_response["status"],
             "provider": "lightningai",
             "mode": "remote",
-            "gpu_hardware_profile": hardware_profile,
+            "detected_hardware": detected_hardware,
             "acceleration_state": acceleration_state,
             "query_id": query_id,
             "video_id": video_id,
@@ -740,7 +698,7 @@ def process_video_query(payload: dict) -> dict:
             "summary": f"Error processing video: {str(e)}",
             "file_exists": file_exists,
             "processed_at": processed_at,
-            "gpu_hardware_profile": hardware_profile,
+            "detected_hardware": detected_hardware,
             "acceleration_state": acceleration_state,
             "raw_response": {"error": str(e)},
         }
@@ -766,7 +724,34 @@ def search_candidates_remote(query_text: str, candidates: list[dict], limit: int
     if not cleaned_query:
         return {"query_text": cleaned_query, "count": 0, "items": []}
 
-    raise _strict_runtime_unavailable("Candidate semantic search")
+    bounded_limit = max(1, min(int(limit or 5), 50))
+    normalized_candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
+    if not normalized_candidates:
+        return {"query_text": cleaned_query, "count": 0, "items": []}
+
+    ranked_items: list[dict[str, object]] = []
+    for candidate in normalized_candidates:
+        candidate_view = _candidate_payload_view(candidate)
+        enriched = dict(candidate)
+        enriched["search_text"] = _candidate_search_document(candidate_view)
+        enriched["semantic_overlap"] = round(_semantic_overlap_itself(cleaned_query, candidate_view), 6)
+        enriched["score"] = _rank_candidate_itself(cleaned_query, None, candidate_view)
+        if not isinstance(enriched.get("matched_segments"), list) or not enriched.get("matched_segments"):
+            enriched["matched_segments"] = _normalize_tracking_segments(candidate_view, limit=3)
+        if not isinstance(enriched.get("timeline"), list) and isinstance(candidate_view.get("timeline"), list):
+            enriched["timeline"] = candidate_view.get("timeline")
+        ranked_items.append(enriched)
+
+    ranked_items.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -float(item.get("semantic_overlap") or 0.0),
+            str(item.get("video_id") or ""),
+            str(item.get("candidate_id") or ""),
+        )
+    )
+    items = ranked_items[:bounded_limit]
+    return {"query_text": cleaned_query, "count": len(items), "items": items}
 
 
 def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> Path:

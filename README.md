@@ -30,7 +30,7 @@ Hệ thống hướng tới bài toán `tracklet-centric person search`: video �
 
 ## 2. Hiện tại đã làm được đến đâu
 
-Pipeline hiện tại được chốt theo luồng ingest sau `move.py`: `storage/*.mp4 -> decode + sampling 5 fps -> detection + tracking per-video -> local tracklets -> tracklet quality scoring -> basic feature branch / lazy action branch`.
+Pipeline hiện tại được chốt theo luồng ingest sau `move.py`: `storage/*.mp4 -> decode + sampling 5 fps -> detection + tracking per-video -> local tracklets -> tracklet quality scoring -> unified tracklet feature pipeline`.
 
 ### Đã có
 
@@ -39,7 +39,7 @@ Pipeline hiện tại được chốt theo luồng ingest sau `move.py`: `storag
 - `SOLIDER + KPR` là ReID stack duy nhất được phép dùng.
 - `ITSELF` là semantic search stack duy nhất được phép dùng.
 - `TrackEval HOTA` là chuẩn đánh giá tracking chính.
-- Metadata output dạng JSON, gồm tối thiểu `video_id`, `camera_id`, `track_id`, `bbox`, `embedding_vector`, `person_caption`, và contract ingest đã áp dụng.
+- Metadata output dạng JSON, gồm tối thiểu `video_id`, `camera_id`, `track_id`, `bbox`, `embedding_vector`, `appearance_summary`, `timeline`, `action_semantic_embedding`, và contract ingest đã áp dụng.
 
 ### Chưa hoàn thiện
 
@@ -88,8 +88,8 @@ flowchart TB
 2. Runtime strict decode video và sample cố định về `5 fps`.
 3. `RFDETR2XLarge` detect người, sau đó tracker chạy theo từng video 10 phút độc lập.
 4. Hệ thống sinh local tracklets và chạy `tracklet quality scoring` để loại tracklet mờ, thiếu thông tin, hoặc confidence thấp.
-5. Nhánh cơ bản luôn chạy để sinh keyframe, thuộc tính tĩnh, embedding, và feature aggregation cho tracklet.
-6. Nhánh action chỉ chạy lazy khi có trigger hoặc khi truy vấn yêu cầu hành vi.
+5. Sau quality scoring, một pipeline feature thống nhất chạy cho cả `attribute`, `appearance`, và `action`.
+6. Pipeline này dùng cùng một quyết định frame selection, sau đó sinh thuộc tính tĩnh, đặc trưng ngoại hình, action clip, action analysis, semantic embedding, rồi feature aggregation cho tracklet.
 7. Các tracklet hợp lệ được lưu vào tracklet index.
 8. Người dùng nhập query, hệ thống search tracklet index, chọn candidate, rồi truy hồi sâu hơn qua nhiều camera.
 
@@ -107,24 +107,22 @@ flowchart TD
     Quality[Tracklet quality scoring]
     Keyframe[Smart keyframe selection]
     StaticAttr[Static attribute extraction]
+    Appearance[Appearance extraction]
     ReID[SOLIDER + KPR appearance embedding]
-    Aggregate[Feature aggregation 1-3 vectors per tracklet]
-    ActionTrigger[Lazy action trigger]
     ActionClip[Action clip builder]
     ActionAnalysis[Action or behavior analysis]
     ActionEmbedding[Action semantic embedding]
+    Aggregate[Feature aggregation 1-3 vectors per tracklet]
     Meta[Per-video metadata JSON]
 
     Video --> Sample --> Detect --> Track --> Tracklets --> Quality
     Quality --> Keyframe --> StaticAttr --> Aggregate
-    Quality --> ReID --> Aggregate
-    Quality --> ActionTrigger
-    ActionTrigger --> ActionClip --> ActionAnalysis --> ActionEmbedding
+    Keyframe --> Appearance --> ReID --> Aggregate
+    Keyframe --> ActionClip --> ActionAnalysis --> ActionEmbedding --> Aggregate
     Aggregate --> Meta
-    ActionEmbedding --> Meta
 ```
 
-Điểm quan trọng: pipeline active chỉ có một luồng hậu `storage/`. Video luôn được sample về `5 fps`, tracking chạy độc lập theo từng video 10 phút, và chỉ tracklet vượt qua quality scoring mới đi tiếp vào các nhánh metadata/search.
+Điểm quan trọng: pipeline active chỉ có một luồng hậu `storage/`. Video luôn được sample về `5 fps`, tracking chạy độc lập theo từng video 10 phút, và chỉ tracklet vượt qua quality scoring mới đi tiếp vào pipeline feature thống nhất cho metadata/search.
 
 ---
 

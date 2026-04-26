@@ -161,7 +161,6 @@ def _build_segment_description(segment_payload: dict[str, Any], fallback: str) -
         return fallback
     candidates = [
         segment_payload.get("description"),
-        segment_payload.get("person_caption"),
         segment_payload.get("appearance_summary"),
         segment_payload.get("search_text"),
     ]
@@ -511,14 +510,6 @@ async def ai_process(payload: dict[str, Any], request: Request) -> dict:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Tracking service error: {exc}") from exc
-
-
-@app.post("/api/v1/candidates/import-legacy")
-async def import_legacy() -> dict:
-    try:
-        return await _post_json(f"{settings.metadata_service_url}/api/v1/candidates/import-legacy")
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
 @app.get("/api/v1/candidates")

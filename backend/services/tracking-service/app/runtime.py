@@ -24,10 +24,6 @@ from .execution_plan import resolve_execution_plan
 from .strict_pipeline import get_strict_pipeline
 
 
-def _dict_or_empty(value: object) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
 class StrictTrackerRuntime:
     def __init__(self) -> None:
         self.pipeline = get_strict_pipeline()
@@ -41,7 +37,7 @@ class StrictTrackerRuntime:
         source_video: str | None,
         output_video_path: Path,
         pipeline: dict,
-        hardware_profile: dict,
+        detected_hardware: dict,
         execution_plan: dict,
     ) -> dict:
         candidate = dict(candidate_info or {})
@@ -55,7 +51,7 @@ class StrictTrackerRuntime:
             "selected_components": pipeline["components"],
             "runtime_defaults": pipeline.get("runtime_defaults", {}),
             "hyperparameters": pipeline.get("hyperparameters", {}),
-            "gpu_hardware_profile": hardware_profile,
+            "detected_hardware": detected_hardware,
             "execution_plan": execution_plan,
             "candidate": {
                 "candidate_id": candidate.get("candidate_id"),
@@ -68,8 +64,8 @@ class StrictTrackerRuntime:
                 "world_position": candidate.get("world_position"),
                 "top_point_projection": candidate.get("top_point_projection"),
             },
-            "execution_plan": {
-                "detector": "Use RF-DETR profile when model artifacts are available. Avoid NMS post-processing in accuracy-first mode.",
+            "stage_instructions": {
+                "detector": "Use RF-DETR when model artifacts are available. Avoid NMS post-processing in accuracy-first mode.",
                 "tracker": "Apply geometry-aware association, then corrective cascade to revisit ambiguous links.",
                 "reid": "Use SOLIDER global embeddings and KPR part embeddings when keypoints are available.",
                 "semantic_search": "Index fine-grained attributes and rerank with multi-signal ranking ensemble.",
@@ -157,18 +153,11 @@ class StrictTrackerRuntime:
     def run(self, candidate_info: dict, video_database_path: str, output_dir: str) -> dict:
         candidate = dict(candidate_info or {})
         pipeline = self._resolve_pipeline(candidate)
-        hardware_profile, execution_plan = resolve_execution_plan(
-            pipeline_spec=pipeline,
-            gpu_profile_name=str(candidate.get("gpu_hardware_profile") or settings.gpu_hardware_profile),
-            gpu_profile_overrides=_dict_or_empty(candidate.get("gpu_hardware_overrides")),
-            gpu_count=settings.gpu_count,
-            host_cpu_count=settings.host_cpu_count,
-            host_ram_gb=settings.host_ram_gb,
-        )
+        detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
         acceleration_state = configure_torch_runtime(
-            allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
-            cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-            host_cpu_count=settings.host_cpu_count,
+            allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+            cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+            host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
         )
         source_video = self._resolve_source_video(candidate, video_database_path)
         video_id = str(candidate.get("video_id") or "candidate").strip() or "candidate"
@@ -185,7 +174,7 @@ class StrictTrackerRuntime:
             str(source_video) if source_video else None,
             output_path,
             pipeline,
-            hardware_profile,
+            detected_hardware,
             execution_plan,
         )
         manifest["acceleration_state"] = acceleration_state
@@ -198,7 +187,7 @@ class StrictTrackerRuntime:
             "manifest_path": str(manifest_path.resolve()),
             "relative_manifest_path": str(manifest_path),
             "exists": output_path.exists(),
-            "gpu_hardware_profile": hardware_profile.get("gpu_model"),
+            "detected_hardware": detected_hardware,
             "runtime_mode": settings.tracking_runtime_mode,
             "acceleration_state": acceleration_state,
         }
