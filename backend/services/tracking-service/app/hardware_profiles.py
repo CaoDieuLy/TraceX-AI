@@ -30,7 +30,7 @@ HARDWARE_PROFILES: dict[str, dict] = {
         "exchange_max_workers": 1,
         "torch_thread_cap": 16,
         "execution_notes": [
-            "CPU fallback only. Keep batches small and prioritize deterministic progress over throughput.",
+            "CPU execution profile only. Keep batches small and prioritize deterministic progress over throughput.",
         ],
     },
     "generic_gpu": {

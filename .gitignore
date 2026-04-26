@@ -50,6 +50,10 @@ out/
 .ai-log/*.jsonl
 videos/
 .h265
+temp/
+storage/
+tests/.tmp_*/
+move_test_*/
 
 # large generated/data files
 Multi-Camera-Person-Tracking-and-Re-Identification/videos/

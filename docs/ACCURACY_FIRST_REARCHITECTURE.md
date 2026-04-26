@@ -13,9 +13,10 @@ fine-grained person retrieval.
 - RF-DETR was selected as the primary detector profile because it is presented as a real-time
   DETR family model with strong COCO accuracy and NMS-free inference.
   Source: `https://iclr.cc/virtual/2026/poster/10007257`
-- YOLO26 remains the edge-oriented fallback because Ultralytics positions it as the current
-  end-to-end deployment-oriented line.
-  Source: `https://www.ultralytics.com/news/ultralytics-redefines-state-of-the-art-vision-ai-with-yolo26`
+- For strict detector naming, this repo now targets the upstream RF-DETR API contract from
+  `roboflow/rf-detr`, specifically `RFDETR2XLarge` / `rfdetr-2xlarge`, which upstream documents
+  behind the `rfdetr[plus]` extra and the standard `model.predict(image, threshold=...)` API.
+  Source: `https://github.com/roboflow/rf-detr`
 - HOTA remains the primary tracking metric through TrackEval.
   Source: `https://github.com/JonathonLuiten/TrackEval`
 - SOLIDER is kept as the main global Re-ID backbone candidate because its public benchmark table
@@ -32,23 +33,29 @@ fine-grained person retrieval.
 
 ## Important scope note
 
-This repository now exposes an `accuracy_first` pipeline profile and emits manifests that describe
-the intended SOTA stack. The repo does not yet bundle RF-DETR, SOLIDER, KPR, ITSELF, or TrackEval
-weights/runtimes. Those still need separate model artifacts, GPU serving, and calibration before
-production inference can fully match the declared profile.
+This repository now exposes a single strict pipeline profile and emits manifests that describe
+the intended stack. The repo does not bundle RF-DETR, SOLIDER, KPR, ITSELF, or TrackEval
+weights/runtimes. Those must be supplied by the external strict runtime before production
+inference can match the declared profile.
 
 ## What changed in code
 
 - `tracking-service` now exposes a structured pipeline configuration instead of a generic mock flag.
-- Tracking runs emit an `accuracy_first_tracking_manifest_v1` JSON artifact beside the output clip.
-- The active profile defaults to `accuracy_first`; `legacy_compat` is retained only as an explicit
-  fallback profile.
+- Tracking runs emit a `strict_tracking_manifest_v1` JSON artifact beside the output clip.
+- The active profile defaults to `rfdetr_ocmctrack_solider_kpr_itself_hota`; alternate profiles
+  and hyperparameter overrides are disabled.
 - The profile registry now carries tuned hyperparameters for:
   - detector confidence and query budget
   - tracker association gates, occlusion handling, corrective buffer, and world-speed gate
   - Re-ID weighting and rerank parameters
   - semantic retrieval fetch depth and ranking weights
   - ingest FPS, minimum track length, minimum person area, and track IoU
+- The active ingest contract after `move.py` is fixed to:
+  - `.mp4` container with H.265 video payload
+  - decode + sampling at `5 fps`
+  - person detection with `RFDETR2XLarge`
+  - local tracking per video, where each 10-minute clip is independent
+  - tracklet quality scoring before metadata / feature branches
 - The tracking service now resolves hardware plans for `L4`, `T4`, `A100`, and `H100`.
 - Each hardware plan declares:
   - GPU stream count
@@ -72,7 +79,6 @@ production inference can fully match the declared profile.
   - `visibility_scores`
   - `world_position`
   - `reid_profile`
-  - `pipeline_profile`
 - Legacy vector search now reranks candidates with a lightweight multi-signal ensemble:
   cosine similarity + semantic token overlap + visibility confidence.
 

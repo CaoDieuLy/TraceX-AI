@@ -208,7 +208,6 @@ def candidate_to_payload(candidate: PersonCandidate, queue_video: QueueVideoAsse
         "visibility_scores": _coerce_mapping(raw_metadata.get("visibility_scores")),
         "world_position": raw_metadata.get("world_position") or raw_metadata.get("top_point_projection"),
         "reid_profile": raw_metadata.get("reid_profile"),
-        "pipeline_profile": raw_metadata.get("pipeline_profile"),
         "score": raw_metadata.get("score"),
         "matched_segments": raw_metadata.get("matched_segments") or [],
         "available_link_video": queue_video.available_link_video if queue_video else None,
@@ -251,7 +250,6 @@ def _candidate_raw_metadata_subset(raw_metadata: object) -> dict[str, Any]:
         "person_caption",
         "caption",
         "reid_profile",
-        "pipeline_profile",
         "score",
     ):
         value = payload.get(key)
@@ -307,11 +305,9 @@ def candidate_to_ranking_payload(candidate: PersonCandidate, queue_video: QueueV
         "visibility_scores": _coerce_mapping(reduced_raw_metadata.get("visibility_scores")),
         "world_position": reduced_raw_metadata.get("world_position"),
         "reid_profile": reduced_raw_metadata.get("reid_profile"),
-        "pipeline_profile": reduced_raw_metadata.get("pipeline_profile"),
         "score": reduced_raw_metadata.get("score"),
         "embedding_vector": raw_metadata.get("embedding_vector"),
         "candidate_vector": raw_metadata.get("candidate_vector"),
-        "itself_features": raw_metadata.get("itself_features"),
         "matched_segments": reduced_raw_metadata.get("matched_segments") or [],
         "available_link_video": queue_video.available_link_video if queue_video else None,
         "available_link_metadata": queue_video.available_link_metadata if queue_video else None,
@@ -333,7 +329,7 @@ def _remote_ranking_shortlist_limit(limit: int) -> int:
 
 
 def _candidate_embedding_values(candidate: dict[str, Any]) -> list[float]:
-    for key in ("embedding_vector", "candidate_vector", "itself_features"):
+    for key in ("embedding_vector", "candidate_vector"):
         values = candidate.get(key)
         if not isinstance(values, list) or not values:
             continue
@@ -1171,7 +1167,7 @@ def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> 
     local_root = Path(settings.queue_local_root)
     queue_root = local_root / "local" / settings.google_drive_queue_folder_name
     metadata_root = queue_root / settings.google_drive_metadata_folder_name
-    video_root = queue_root / settings.google_drive_h265_folder_name
+    video_root = queue_root / settings.queue_video_folder_name
     metadata_root.mkdir(parents=True, exist_ok=True)
     video_root.mkdir(parents=True, exist_ok=True)
 
@@ -1196,7 +1192,7 @@ def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> 
         if not local_video_path.is_absolute():
             local_video_path = (PROJECT_ROOT / local_video_path).resolve()
         if not local_video_path.exists():
-            fallback_video_path = video_root / f"{metadata_path.stem}.h265"
+            fallback_video_path = video_root / f"{metadata_path.stem}.mp4"
             if fallback_video_path.exists():
                 local_video_path = fallback_video_path
 
@@ -1205,7 +1201,7 @@ def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> 
             or video_payload.get("camera_id")
             or metadata_path.stem
         ).strip()
-        source_filename = Path(title).name if title else f"{metadata_path.stem}.h265"
+        source_filename = Path(title).name if title else f"{metadata_path.stem}.mp4"
         available_link_video = f"/api/v1/queue/videos/{video_id}/file"
         available_link_metadata = f"/api/v1/queue/videos/{video_id}/metadata"
 
@@ -1315,10 +1311,10 @@ def _queue_video_path_candidates(row: QueueVideoAsset) -> list[Path]:
                     pass
 
     if source_filename:
-        push(PROJECT_ROOT / "storage" / "queue" / "local" / "Queue" / ".h265" / source_filename)
-        push(Path("/workspace/storage/queue/local/Queue/.h265") / source_filename)
+        push(PROJECT_ROOT / "storage" / "queue" / "local" / "Queue" / settings.queue_video_folder_name / source_filename)
+        push(Path("/workspace/storage/queue/local/Queue") / settings.queue_video_folder_name / source_filename)
         if A20_ROOT:
-            push(A20_ROOT / "storage" / "queue" / "local" / "Queue" / ".h265" / source_filename)
+            push(A20_ROOT / "storage" / "queue" / "local" / "Queue" / settings.queue_video_folder_name / source_filename)
 
     return candidates
 
@@ -1328,7 +1324,7 @@ def _download_drive_video_to_cache(row: QueueVideoAsset) -> Path | None:
     if not drive_file_id:
         return None
 
-    suffix = Path(str(row.source_filename or row.video_id or drive_file_id)).suffix or ".h265"
+    suffix = Path(str(row.source_filename or row.video_id or drive_file_id)).suffix or ".mp4"
     target_path = _preview_source_cache_root() / f"{_slugify(drive_file_id)}{suffix}"
     if target_path.exists() and target_path.stat().st_size > 0:
         return target_path

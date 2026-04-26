@@ -1,13 +1,2 @@
-streamlit
-ffmpeg-python
-torch
-torchvision
-transformers
-chromadb
-opencv-python
-numpy
-pillow
-qdrant-client
-accelerate
-einops
-sentence-transformers
+# Legacy local metadata runtime has been removed.
+# Use backend/services/tracking-service/requirements.txt for the active service runtime.

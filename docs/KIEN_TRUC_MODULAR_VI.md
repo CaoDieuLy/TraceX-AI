@@ -13,7 +13,7 @@ Mã nguồn ứng dụng nằm ở **gốc repo**:
 
 1. Trình duyệt → **gateway** `POST /search`.
 2. Gateway → **`ai_service` `POST /internal/search`**.
-3. Nếu AI service lỗi, gateway fallback sang metadata `POST /api/v1/candidates/search` (vẫn có thể gọi tracking từ *bên trong* metadata — xem mục dưới).
+3. Nếu AI service lỗi, gateway trả lỗi từ `ai_service`; không quay lại luồng metadata/tracking cũ.
 
 ## Tách BE vs AI (đã làm / còn lại)
 

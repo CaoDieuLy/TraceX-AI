@@ -14,7 +14,7 @@ from .services.ai_client import (
     tracking_ai_process as ai_tracking_process,
     tracking_artifact_bytes,
     tracking_artifact_manifest as ai_tracking_artifact_manifest,
-    tracking_pipeline_config,
+    tracking_runtime_config,
     tracking_run as ai_tracking_run,
 )
 
@@ -315,7 +315,7 @@ async def videos_by_id(video_id: str, request: Request, _auth: None = Depends(re
 async def overview() -> dict:
     try:
         metadata = await _get_json(f"{settings.metadata_service_url}/api/v1/overview")
-        ai = await tracking_pipeline_config(request_headers=None)
+        ai = await tracking_runtime_config(request_headers=None)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Downstream service error: {exc}") from exc
     return {"metadata": metadata, "ai": ai}
@@ -612,20 +612,10 @@ async def queue_video_file(video_id: str) -> Response:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
-@app.post("/api/v1/queue/bootstrap")
-async def queue_bootstrap(payload: dict[str, Any]) -> dict:
+@app.post("/api/v1/queue/process-storage")
+async def queue_process_storage(payload: dict[str, Any] | None = None) -> dict:
     try:
-        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/bootstrap", payload)
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
-
-
-@app.post("/api/v1/queue/process-imports")
-async def queue_process_imports(payload: dict[str, Any] | None = None) -> dict:
-    try:
-        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/process-imports", payload or {})
+        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/process-storage", payload or {})
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:

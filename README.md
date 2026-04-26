@@ -30,16 +30,16 @@ Hệ thống hướng tới bài toán `tracklet-centric person search`: video �
 
 ## 2. Hiện tại đã làm được đến đâu
 
-Pipeline hiện tại đã xây được phần nền cho xử lý video và tạo tracklet/metadata. Phần này tương ứng với nửa trái của pipeline dự tính: `Video -> Detection + Tracking -> Tracklets -> Embedding + Metadata`.
+Pipeline hiện tại được chốt theo luồng ingest sau `move.py`: `storage/*.mp4 -> decode + sampling 5 fps -> detection + tracking per-video -> local tracklets -> tracklet quality scoring -> basic feature branch / lazy action branch`.
 
 ### Đã có
 
-- `YOLO26-X` để detect người trong từng frame.
-- `ByteTrack-style tracker` để nối detection thành tracklet trong từng video.
-- `CLIP-ReID embedding` cho crop người, sau đó lấy embedding trung bình theo tracklet.
-- `BLIP` nhận đầu vào là **tracklet crops** để sinh caption / appearance summary.
-- `ITSELF-Lite features` cho crop đại diện.
-- Metadata output dạng JSON, gồm `video_id`, `camera_id`, `track_id`, `bbox`, `content_frames`, `embedding_vector`, `person_caption`.
+- `RF-DETR 2x-large` là detector duy nhất được phép dùng.
+- `OCMCTrack-style corrective cascade` là tracker duy nhất được phép dùng.
+- `SOLIDER + KPR` là ReID stack duy nhất được phép dùng.
+- `ITSELF` là semantic search stack duy nhất được phép dùng.
+- `TrackEval HOTA` là chuẩn đánh giá tracking chính.
+- Metadata output dạng JSON, gồm tối thiểu `video_id`, `camera_id`, `track_id`, `bbox`, `embedding_vector`, `person_caption`, và contract ingest đã áp dụng.
 
 ### Chưa hoàn thiện
 
@@ -84,14 +84,14 @@ flowchart TB
 
 ### Diễn giải
 
-1. Video từ hệ thống camera bệnh viện được xử lý để detect và track người.
-2. Mỗi tracklet có crop đại diện, embedding, caption và metadata.
-3. Các tracklet được lưu vào tracklet index.
-4. Người dùng nhập query, hệ thống encode query thành text embedding.
-5. Search tracklet index trả về `top-k candidates`.
-6. Người dùng chọn candidate đúng.
-7. Hệ thống dùng candidate đã chọn để truy hồi qua các camera/video khác.
-8. Các kết quả được stitch thành trajectory và xuất final video / evidence timeline.
+1. Video `.mp4` sau `move.py` được phát hiện trong `storage/cam_xx/yyyy-mm-dd/`.
+2. Runtime strict decode video và sample cố định về `5 fps`.
+3. `RFDETR2XLarge` detect người, sau đó tracker chạy theo từng video 10 phút độc lập.
+4. Hệ thống sinh local tracklets và chạy `tracklet quality scoring` để loại tracklet mờ, thiếu thông tin, hoặc confidence thấp.
+5. Nhánh cơ bản luôn chạy để sinh keyframe, thuộc tính tĩnh, embedding, và feature aggregation cho tracklet.
+6. Nhánh action chỉ chạy lazy khi có trigger hoặc khi truy vấn yêu cầu hành vi.
+7. Các tracklet hợp lệ được lưu vào tracklet index.
+8. Người dùng nhập query, hệ thống search tracklet index, chọn candidate, rồi truy hồi sâu hơn qua nhiều camera.
 
 ---
 
@@ -99,28 +99,32 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-    Video[Input video .h265/.hevc]
-    Detect[YOLO26-X person detection]
-    Embed[CLIP-ReID embedding per detection crop]
-    Track[ByteTrack-style association]
-    Candidate[Build candidates from confirmed tracks]
-    Crop[Representative tracklet crops]
-    Caption[BLIP captioning]
-    Feature[ITSELF-Lite feature extraction]
+    Video[Input video .mp4 in storage]
+    Sample[Decode plus sampling 5 fps]
+    Detect[RFDETR2XLarge person detection]
+    Track[OCMCTrack-style corrective cascade per video]
+    Tracklets[Local tracklets]
+    Quality[Tracklet quality scoring]
+    Keyframe[Smart keyframe selection]
+    StaticAttr[Static attribute extraction]
+    ReID[SOLIDER + KPR appearance embedding]
+    Aggregate[Feature aggregation 1-3 vectors per tracklet]
+    ActionTrigger[Lazy action trigger]
+    ActionClip[Action clip builder]
+    ActionAnalysis[Action or behavior analysis]
+    ActionEmbedding[Action semantic embedding]
     Meta[Per-video metadata JSON]
-    Aggregate[Load / aggregate people metadata]
 
-    Video --> Detect --> Embed --> Track --> Candidate
-    Candidate --> Crop
-    Crop --> Caption
-    Crop --> Feature
-    Caption --> Meta
-    Feature --> Meta
-    Candidate --> Meta
-    Meta --> Aggregate
+    Video --> Sample --> Detect --> Track --> Tracklets --> Quality
+    Quality --> Keyframe --> StaticAttr --> Aggregate
+    Quality --> ReID --> Aggregate
+    Quality --> ActionTrigger
+    ActionTrigger --> ActionClip --> ActionAnalysis --> ActionEmbedding
+    Aggregate --> Meta
+    ActionEmbedding --> Meta
 ```
 
-Điểm quan trọng: VLM không nhận toàn bộ video và cũng không nhận frame thô. VLM nhận **ảnh crop người từ tracklet đã confirm**, giúp caption tập trung vào appearance của đối tượng.
+Điểm quan trọng: pipeline active chỉ có một luồng hậu `storage/`. Video luôn được sample về `5 fps`, tracking chạy độc lập theo từng video 10 phút, và chỉ tracklet vượt qua quality scoring mới đi tiếp vào các nhánh metadata/search.
 
 ---
 
@@ -141,11 +145,11 @@ flowchart TD
 
 ### AI / CV Pipeline
 
-- `YOLO26-X` cho person detection
-- `ByteTrack-style tracker` cho tracking per-video
-- `CLIP-ReID` cho embedding crop người
-- `BLIP` cho caption / appearance summary từ tracklet crops
-- `ITSELF-Lite` cho feature bổ sung
+- `RFDETR2XLarge` (`rfdetr-2xlarge`) cho person detection
+- `OCMCTrack-style corrective cascade` cho tracking per-video
+- `SOLIDER + KPR` cho embedding crop người
+- `ITSELF` cho semantic search / fine-grained retrieval
+- `TrackEval HOTA` cho evaluation
 
 ### Storage / Indexing
 

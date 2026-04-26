@@ -78,6 +78,7 @@ services:
       - ../secrets:/workspace/a20-root/secrets:ro
       - ../secret:/workspace/a20-root/secret:ro
       - mcpt_storage:/workspace/storage
+      - ../storage:/workspace/storage/storage
 
   frontend:
     build:

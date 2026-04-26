@@ -234,7 +234,7 @@ Final output có thể là:
 ```json
 {
   "tracklet_id": "cam01_20260419_000001",
-  "video_id": "cam01_20260419_080000.hevc",
+  "video_id": "cam01_20260419_080000.mp4",
   "camera_id": "cam01",
   "camera_location": "ER corridor",
   "local_track_id": "1",

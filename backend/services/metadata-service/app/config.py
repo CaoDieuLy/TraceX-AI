@@ -96,10 +96,16 @@ class Settings(BaseSettings):
     tracking_output_root: str = str(PROJECT_ROOT / "storage" / "tracking-output")
     default_storage_backend: str = "local_volume"
     queue_local_root: str = str(PROJECT_ROOT / "storage" / "queue")
+    queue_video_folder_name: str = "Videos"
     queue_max_size: int = 32
     queue_poll_interval_seconds: int = 30
     queue_parallel_jobs: int = 4
     queue_download_workers: int = 4
+    storage_ingest_enabled: bool = True
+    storage_ingest_root: str = str(PROJECT_ROOT / "storage")
+    storage_ingest_batch_size: int = 50
+    storage_ingest_min_file_age_seconds: int = 2
+    storage_ingest_processed_dir_name: str = "ProcessedStorage"
     google_drive_enabled: bool = False
     google_drive_oauth_credentials_file: str = str(default_oauth_credentials_file)
     google_drive_oauth_token_file: str = str(default_oauth_token_file)
@@ -107,8 +113,6 @@ class Settings(BaseSettings):
     google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_name: str = "VinUni"
     google_drive_queue_folder_name: str = "Storage"
-    google_drive_import_folder_name: str = "Temp"
-    google_drive_h265_folder_name: str = ".h265"
     google_drive_metadata_folder_name: str = "Metadata"
     google_drive_make_public: bool = True
 

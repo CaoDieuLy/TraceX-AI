@@ -78,12 +78,9 @@ class Settings(BaseSettings):
     google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_name: str = "VinUni"
     google_drive_queue_folder_name: str = "Storage"
-    google_drive_import_folder_name: str = "Temp"
-    google_drive_h265_folder_name: str = ".h265"
     google_drive_metadata_folder_name: str = "Metadata"
 
     tracking_runtime_mode: str = "production_ready"
-    pipeline_profile: str = "rfdetr_ocmctrack_solider_kpr_itself_hota"
     tracking_hyperparameter_overrides_json: str = ""  # disabled in strict mode
     gpu_hardware_profile: str = "auto"
     gpu_hardware_overrides_json: str = ""

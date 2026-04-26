@@ -25,8 +25,6 @@ from .schemas import (
     CandidateResponse,
     ImportResponse,
     OverviewResponse,
-    QueueBootstrapRequest,
-    QueueBootstrapResponse,
     QueueProcessResponse,
     QueueVideoListResponse,
     UserLoginRequest,
@@ -413,32 +411,17 @@ def queue_video_file(
         video_path = load_queue_video_file_path(session, video_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return FileResponse(video_path, media_type="video/h265", filename=video_path.name)
+    media_type = "video/mp4" if video_path.suffix.lower() == ".mp4" else "application/octet-stream"
+    return FileResponse(video_path, media_type=media_type, filename=video_path.name)
 
 
-@app.post("/api/v1/queue/bootstrap", response_model=QueueBootstrapResponse)
-def bootstrap_queue(
-    payload: QueueBootstrapRequest,
+@app.post("/api/v1/queue/process-storage", response_model=QueueProcessResponse)
+def process_storage(
     session: Session = Depends(get_session),
     current_user: User = Depends(require_admin),
 ) -> dict:
     try:
-        return QueueSyncService().bootstrap_from_source_dir(
-            session,
-            source_dir=payload.source_dir,
-            limit=payload.limit,
-            reset_remote_queue=payload.reset_remote_queue,
-            delete_source_after_import=payload.delete_source_after_import,
-        )
-    except Exception as exc:
-        session.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/queue/process-imports", response_model=QueueProcessResponse)
-def process_imports(session: Session = Depends(get_session), current_user: User = Depends(require_admin)) -> dict:
-    try:
-        return QueueSyncService().process_import_queue(session)
+        return QueueSyncService().process_storage_queue(session)
     except Exception as exc:
         session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc

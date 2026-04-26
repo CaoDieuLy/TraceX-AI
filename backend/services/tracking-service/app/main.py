@@ -20,7 +20,7 @@ from .schemas import (
 from .config import settings
 from .service import (
     build_tracking_video_remote,
-    get_pipeline_config,
+    get_runtime_config,
     process_video_ingestion,
     process_video_query,
     process_video_query_worker,
@@ -34,7 +34,7 @@ app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
 
 @app.get("/")
 def root() -> dict:
-    config = get_pipeline_config()
+    config = get_runtime_config()
     return {
         "status": "ok",
         "service": "tracking-service",
@@ -48,14 +48,14 @@ def healthcheck() -> dict:
     return {"status": "ok", "service": "tracking-service"}
 
 
-@app.get("/api/v1/pipeline/config")
-def pipeline_config() -> dict:
-    return get_pipeline_config()
+@app.get("/api/v1/runtime-config")
+def runtime_config() -> dict:
+    return get_runtime_config()
 
 
-@app.get("/api/v1/pipeline/hardware")
-def pipeline_hardware() -> dict:
-    config = get_pipeline_config()
+@app.get("/api/v1/runtime-config/hardware")
+def runtime_config_hardware() -> dict:
+    config = get_runtime_config()
     return {
         "gpu_hardware_profile": config.get("gpu_hardware_profile"),
         "execution_plan": config.get("execution_plan"),
@@ -120,7 +120,7 @@ async def ingestion_upload(
 ) -> dict:
     upload_root = Path(settings.ingestion_work_root) / "uploaded-ingestion-inputs"
     upload_root.mkdir(parents=True, exist_ok=True)
-    filename = source_filename or file.filename or "upload.h265"
+    filename = source_filename or file.filename or "upload.mp4"
     local_input_path = upload_root / filename
     local_input_path.write_bytes(await file.read())
 

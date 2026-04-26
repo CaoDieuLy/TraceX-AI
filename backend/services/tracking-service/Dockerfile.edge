@@ -32,12 +32,6 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download YOLO26 model to speed up startup
-RUN python3 -c "from ultralytics import YOLO; YOLO('yolo26x.pt')" 2>/dev/null || true
-
-# Pre-download CLIP model
-RUN python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')" 2>/dev/null || true
-
 # Copy application source
 COPY . /workspace
 WORKDIR /workspace

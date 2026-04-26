@@ -94,10 +94,10 @@ def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
 # --- Proxy nội bộ: gateway gọi, ai_service gọi tiếp tới Lightning/tracking ---
 
 
-@app.get("/internal/tracking/v1/pipeline/config")
-async def internal_tracking_pipeline_config(request: Request) -> Any:
-    """Gateway goi endpoint nay de doc cau hinh pipeline tu tracking upstream."""
-    return await proxy_get_json("api/v1/pipeline/config", request)
+@app.get("/internal/tracking/v1/runtime-config")
+async def internal_tracking_runtime_config(request: Request) -> Any:
+    """Gateway goi endpoint nay de doc cau hinh runtime co dinh tu tracking upstream."""
+    return await proxy_get_json("api/v1/runtime-config", request)
 
 
 @app.post("/internal/tracking/v1/ai/process")

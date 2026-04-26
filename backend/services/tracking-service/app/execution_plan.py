@@ -3,7 +3,7 @@ from __future__ import annotations
 from .hardware_profiles import resolve_hardware_profile
 
 
-def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_count: int, host_cpu_count: int, host_ram_gb: int) -> dict:
+def build_execution_plan(*, pipeline_spec: dict, hardware_profile: dict, gpu_count: int, host_cpu_count: int, host_ram_gb: int) -> dict:
     physical_gpu_count = max(int(gpu_count), 0)
     service_processes = int(hardware_profile.get("service_processes", 1))
     if physical_gpu_count > 1:
@@ -70,7 +70,7 @@ def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_
             "Batch crops before ReID and VLM inference instead of per-frame calls.",
             "Keep vector search post-processing on CPU to preserve GPU time for detector/ReID/VLM.",
             "Use one GPU process per physical GPU unless you have measured a better replication strategy.",
-            f"Primary profile selected: {pipeline_profile['profile']}.",
+            "Fixed strict pipeline selected.",
         ],
         "notes": hardware_profile.get("execution_notes", []),
     }
@@ -78,7 +78,7 @@ def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_
 
 def resolve_execution_plan(
     *,
-    pipeline_profile: dict,
+    pipeline_spec: dict,
     gpu_profile_name: str,
     gpu_profile_overrides: dict | None,
     gpu_count: int,
@@ -93,7 +93,7 @@ def resolve_execution_plan(
         host_ram_gb=host_ram_gb,
     )
     plan = build_execution_plan(
-        pipeline_profile=pipeline_profile,
+        pipeline_spec=pipeline_spec,
         hardware_profile=hardware_profile,
         gpu_count=gpu_count,
         host_cpu_count=host_cpu_count,

@@ -124,7 +124,6 @@ class CandidateResponse(BaseModel):
     visibility_scores: dict[str, Any] = Field(default_factory=dict)
     world_position: dict[str, Any] | None = None
     reid_profile: str | None = None
-    pipeline_profile: str | None = None
     score: float | None = None
     matched_segments: list[dict[str, Any]] = Field(default_factory=list)
     available_link_video: str | None = None
@@ -172,20 +171,6 @@ class QueueVideoResponse(BaseModel):
 class QueueVideoListResponse(BaseModel):
     count: int
     items: list[QueueVideoResponse]
-
-
-class QueueBootstrapRequest(BaseModel):
-    source_dir: str = Field(min_length=1, max_length=4096)
-    limit: int = Field(default=31, ge=1, le=500)
-    reset_remote_queue: bool = True
-    delete_source_after_import: bool = False
-
-
-class QueueBootstrapResponse(BaseModel):
-    processed_videos: int
-    queue_size: int
-    people_indexed: int
-    evicted_video_ids: list[str] = Field(default_factory=list)
 
 
 class QueueProcessResponse(BaseModel):

@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 SAFE_SELF_CALL_ENDPOINT = "/api/v1/ai/worker"
 
 
+def _video_media_type(path: Path) -> str:
+    if path.suffix.lower() == ".mp4":
+        return "video/mp4"
+    return "application/octet-stream"
+
+
 class LightningAIError(Exception):
     """Base exception for Lightning AI API errors."""
 
@@ -103,7 +109,7 @@ class LightningAIClient:
                 - status: "completed", "failed", etc.
                 - job_id: Lightning AI job ID
                 - summary: Processing summary
-                - compressed_video_path: Path to output .h265 file (may be URL)
+                - compressed_video_path: Path to output .mp4 file (may be URL)
                 - metadata: Additional metadata from AI
                 - raw_response: Full raw response
 
@@ -146,7 +152,7 @@ class LightningAIClient:
                     "file": (
                         Path(video_path).name,
                         video_handle,
-                        "video/h265",
+                        _video_media_type(Path(video_path)),
                     )
                 }
                 with httpx.Client(timeout=self.timeout) as client:

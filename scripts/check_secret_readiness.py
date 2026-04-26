@@ -92,9 +92,7 @@ LEFTOVER_ARTIFACT_PATTERNS = [
     "backend/legacy-engine/demo.py",
     "backend/legacy-engine/torchreid/metrics/rank_cylib/test_cython.py",
     "test_videos/test_sample.mp4",
-    "test_videos/test_sample.h265",
     "test_videos/test_sample_long.mp4",
-    "test_videos/test_sample_long.h265",
 ]
 
 

@@ -29,10 +29,10 @@ async def search_internal(*, query: str, top_k: int, offset: int) -> dict[str, A
         return response.json()
 
 
-async def tracking_pipeline_config(*, request_headers: dict[str, str] | None = None) -> Any:
+async def tracking_runtime_config(*, request_headers: dict[str, str] | None = None) -> Any:
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.get(
-            f"{_ai_base()}/internal/tracking/v1/pipeline/config",
+            f"{_ai_base()}/internal/tracking/v1/runtime-config",
             headers=_auth_headers_from_request_headers(request_headers) or None,
         )
         response.raise_for_status()

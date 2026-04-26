@@ -88,7 +88,7 @@ You can try out your own videos by running tracking_and_reid.py.
 You should specify the path of the videos and the version of YOLO you would like to use (v3 or v4)
 
 ```python
-python tracking_and_reid.py --videos videos\init\Double1.h265 videos\init\Single1.h265 --version v3
+python tracking_and_reid.py --videos videos\init\Double1.mp4 videos\init\Single1.mp4 --version v3
 ```
 
 # # Acknowledgement

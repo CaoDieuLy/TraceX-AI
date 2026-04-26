@@ -2,20 +2,24 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-SINGLE_PIPELINE_PROFILE_NAME = "rfdetr_ocmctrack_solider_kpr_itself_hota"
 
-SINGLE_PIPELINE_PROFILE: dict = {
-    "profile": SINGLE_PIPELINE_PROFILE_NAME,
+STRICT_PIPELINE: dict = {
     "summary": "Strict single pipeline: RF-DETR + OCMCTrack + SOLIDER+KPR + ITSELF + TrackEval HOTA.",
     "validated_on": "2026-04-25",
     "components": {
         "detector": {
             "name": "RF-DETR 2x-large",
+            "official_class_name": "RFDETR2XLarge",
+            "official_inference_alias": "rfdetr-2xlarge",
+            "official_package": "rfdetr[plus]",
             "family": "detection_transformer",
             "nms_free": True,
+            "predict_api": "model.predict(image, threshold=...)",
             "deployment": "TensorRT FP16",
+            "resolution": "880x880",
             "sources": [
-                {"label": "ICLR 2026 poster", "url": "https://iclr.cc/virtual/2026/poster/10007257"}
+                {"label": "ICLR 2026 poster", "url": "https://iclr.cc/virtual/2026/poster/10007257"},
+                {"label": "roboflow/rf-detr", "url": "https://github.com/roboflow/rf-detr"},
             ],
         },
         "tracker": {
@@ -95,13 +99,5 @@ SINGLE_PIPELINE_PROFILE: dict = {
 }
 
 
-def resolve_pipeline_profile(profile_name: str, overrides: dict | None = None) -> dict:
-    """Chi cho phep 1 pipeline duy nhat; cam profile khac va cam override hyperparameters."""
-    resolved_name = (profile_name or "").strip().lower()
-    if resolved_name and resolved_name != SINGLE_PIPELINE_PROFILE_NAME:
-        raise ValueError(
-            f"Unsupported pipeline_profile='{profile_name}'. Only '{SINGLE_PIPELINE_PROFILE_NAME}' is allowed."
-        )
-    if overrides:
-        raise ValueError("Hyperparameter overrides are disabled in strict single-pipeline mode.")
-    return deepcopy(SINGLE_PIPELINE_PROFILE)
+def get_strict_pipeline() -> dict:
+    return deepcopy(STRICT_PIPELINE)
