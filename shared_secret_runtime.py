@@ -48,6 +48,7 @@ def oauth2_credentials_candidates() -> list[Path]:
     if configured:
         candidates.append(_resolve_secret_path(configured, "oauth/oauth2_credentials.json"))
     candidates.append(canonical_secrets_root() / "oauth" / "oauth2_credentials.json")
+    candidates.append(REPO_ROOT / "secret" / "oauth" / "oauth2_credentials.json")
     return candidates
 
 
@@ -57,6 +58,7 @@ def oauth2_token_candidates() -> list[Path]:
     if configured:
         candidates.append(_resolve_secret_path(configured, "oauth/oauth2_token.pickle"))
     candidates.append(canonical_secrets_root() / "oauth" / "oauth2_token.pickle")
+    candidates.append(REPO_ROOT / "secret" / "oauth" / "oauth2_token.pickle")
     return candidates
 
 

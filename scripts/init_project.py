@@ -46,7 +46,7 @@ def main() -> int:
     print("Project secret initialization completed.")
     print("Suggested next steps:")
     print("  - Root scripts: python upload_oauth2.py")
-    print("  - Compose stack: cd Multi-Camera-Person-Tracking-and-Re-Identification && docker compose --env-file ../secrets/shared.env up --build")
+    print("  - Compose stack: docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env up --build")
     return 0
 
 

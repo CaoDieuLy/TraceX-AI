@@ -55,13 +55,13 @@ SENSITIVE_FILE_FINDINGS = [
     ("oauth2_credentials.json", "Legacy OAuth client secret still exists outside canonical secrets folder", "OAuth", "high"),
     ("oauth2_token.pickle", "Legacy OAuth refresh token still exists outside canonical secrets folder", "Token", "high"),
     (
-        "Multi-Camera-Person-Tracking-and-Re-Identification/backend/services/tracking-service/.env",
+        "backend/services/tracking-service/.env",
         "Legacy service env still exists outside canonical secrets folder",
         "Hardcoded config",
         "high",
     ),
     (
-        "Multi-Camera-Person-Tracking-and-Re-Identification/backend/services/tracking-service/credentials/mcpt-tracker-sa.json",
+        "backend/services/tracking-service/credentials/mcpt-tracker-sa.json",
         "Legacy Google Drive auth file still exists outside canonical secrets folder",
         "OAuth",
         "high",
@@ -73,7 +73,7 @@ LINE_PATTERNS = [
     (re.compile(r"^\s*POSTGRES_PASSWORD\s*=\s*(?!\s*$)(?!your_|change-|example)", re.IGNORECASE), "Database password", "DB config", "high"),
     (re.compile(r"^\s*JWT_SECRET_KEY\s*=\s*(?!\s*$)(?!your_|change-)", re.IGNORECASE), "JWT secret", "Token", "high"),
     (re.compile(r"^\s*GOOGLE_DRIVE_(ROOT|VINUNI)_FOLDER_ID\s*=\s*(?!\s*$)", re.IGNORECASE), "Drive folder identifier", "Hardcoded URL / endpoint", "medium"),
-    (re.compile(r"/teamspace/studios/this_studio|/workspace/project/Multi-Camera-Person-Tracking-and-Re-Identification"), "Machine-specific absolute path", "Hardcoded config", "medium"),
+    (re.compile(r"/teamspace/studios/this_studio|/workspace/project/"), "Machine-specific absolute path", "Hardcoded config", "medium"),
     (re.compile(r"mcpt_password|change-me-postgres-password|change-me-in-production|change-this-jwt-secret"), "Unsafe default secret placeholder", "Hardcoded config", "medium"),
     (re.compile(r"google-drive/drive-sa\.json"), "Deprecated service-account path reference", "OAuth", "medium"),
 ]
@@ -87,14 +87,14 @@ TRACKED_SECRET_PATTERNS = [
 ]
 
 LEFTOVER_ARTIFACT_PATTERNS = [
-    "Multi-Camera-Person-Tracking-and-Re-Identification/create_test_video.py",
-    "Multi-Camera-Person-Tracking-and-Re-Identification/create_long_test_video.py",
-    "Multi-Camera-Person-Tracking-and-Re-Identification/backend/legacy-engine/demo.py",
-    "Multi-Camera-Person-Tracking-and-Re-Identification/backend/legacy-engine/torchreid/metrics/rank_cylib/test_cython.py",
-    "Multi-Camera-Person-Tracking-and-Re-Identification/test_videos/test_sample.mp4",
-    "Multi-Camera-Person-Tracking-and-Re-Identification/test_videos/test_sample.h265",
-    "Multi-Camera-Person-Tracking-and-Re-Identification/test_videos/test_sample_long.mp4",
-    "Multi-Camera-Person-Tracking-and-Re-Identification/test_videos/test_sample_long.h265",
+    "create_test_video.py",
+    "create_long_test_video.py",
+    "backend/legacy-engine/demo.py",
+    "backend/legacy-engine/torchreid/metrics/rank_cylib/test_cython.py",
+    "test_videos/test_sample.mp4",
+    "test_videos/test_sample.h265",
+    "test_videos/test_sample_long.mp4",
+    "test_videos/test_sample_long.h265",
 ]
 
 

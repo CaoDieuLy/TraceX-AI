@@ -2,6 +2,16 @@
 
 **Tagline:** Tìm người trong hệ thống camera bệnh viện bằng mô tả tự nhiên, dựa trên tracklet, metadata và xác nhận của người vận hành.
 
+## Docker (stack modular)
+
+Từ thư mục gốc của repository:
+
+```bash
+docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env up --build
+```
+
+Chi tiết: [infra/README.md](infra/README.md) · kiến trúc module: [docs/KIEN_TRUC_MODULAR_VI.md](docs/KIEN_TRUC_MODULAR_VI.md). Trước khi đưa lên môi trường production, hãy cấu hình `infra/env/backend.env`, `infra/env/ai.env`, và `infra/env/frontend.env` cho phù hợp.
+
 ---
 
 ## 1. Tổng quan bài toán
