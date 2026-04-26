@@ -18,6 +18,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="USER", server_default="USER")
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

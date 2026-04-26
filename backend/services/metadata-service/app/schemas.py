@@ -30,6 +30,9 @@ class UserResponse(BaseModel):
     id: int
     email: EmailStr
     full_name: str
+    role: str
+    is_active: bool
+    last_login: datetime | None = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -39,6 +42,24 @@ class AuthTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+class AdminUserCreateRequest(BaseModel):
+    email: EmailStr
+    full_name: str = Field(min_length=2, max_length=255)
+    password: str = Field(min_length=8, max_length=255)
+    role: str = Field(default="USER", pattern="^(SUPER_ADMIN|ADMIN|USER)$")
+    is_active: bool = True
+
+
+class AdminUserPatchRequest(BaseModel):
+    role: str | None = Field(default=None, pattern="^(SUPER_ADMIN|ADMIN|USER)$")
+    is_active: bool | None = None
+
+
+class UserListResponse(BaseModel):
+    count: int
+    items: list[UserResponse]
 
 
 class VideoResponse(BaseModel):

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
+from sqlalchemy import text
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from .auth import create_access_token
+from .config import settings
 from .database import Base, SessionLocal, engine, get_session
-from .deps import get_current_user
+from .dependencies import get_current_user, require_admin
 from .models import User
 from .queue_runtime import QueueSyncService
 from .schemas import (
     AuthTokenResponse,
+    AdminUserCreateRequest,
+    AdminUserPatchRequest,
     CandidateListResponse,
     CandidateSearchRequest,
     CandidateSearchResponse,
@@ -26,7 +30,7 @@ from .schemas import (
     QueueProcessResponse,
     QueueVideoListResponse,
     UserLoginRequest,
-    UserRegisterRequest,
+    UserListResponse,
     UserResponse,
     VideoListResponse,
     VideoQueryCreateRequest,
@@ -47,6 +51,7 @@ from .service import (
     get_video_by_public_id,
     get_video_query,
     import_legacy_metadata,
+    list_users,
     list_queue_videos,
     list_video_queries,
     list_videos,
@@ -57,6 +62,11 @@ from .service import (
     save_uploaded_video_bytes,
     search_candidates,
     sync_local_queue_state,
+    update_user_access,
+    get_user_by_id,
+    ensure_bootstrap_admin,
+    normalize_role,
+    role_rank,
     update_video_query,
     video_to_payload,
     query_to_payload,
@@ -70,6 +80,18 @@ def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     session = SessionLocal()
     try:
+        session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'USER'"))
+        session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"))
+        session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ NULL"))
+        session.execute(text("UPDATE users SET role = 'USER' WHERE role IS NULL"))
+        session.execute(text("UPDATE users SET is_active = TRUE WHERE is_active IS NULL"))
+        session.commit()
+        ensure_bootstrap_admin(
+            session,
+            email=settings.bootstrap_admin_email,
+            password=settings.bootstrap_admin_password,
+            full_name=settings.bootstrap_admin_full_name,
+        )
         sync_local_queue_state(session, only_if_empty=True)
     except Exception:
         session.rollback()
@@ -82,14 +104,9 @@ def healthcheck() -> dict:
     return {"status": "ok", "service": "metadata-service"}
 
 
-@app.post("/api/v1/auth/register", response_model=AuthTokenResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: UserRegisterRequest, session: Session = Depends(get_session)) -> dict:
-    try:
-        user = create_user(session, email=payload.email, full_name=payload.full_name, password=payload.password)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    token = create_access_token(user.email)
-    return {"access_token": token, "user": user}
+@app.post("/api/v1/auth/register")
+def register() -> dict:
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Public registration is disabled")
 
 
 @app.post("/api/v1/auth/login", response_model=AuthTokenResponse)
@@ -97,7 +114,16 @@ def login(payload: UserLoginRequest, session: Session = Depends(get_session)) ->
     user = authenticate_user(session, identifier=payload.identifier, password=payload.password)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username, email, or password")
-    token = create_access_token(user.email)
+    token = create_access_token(user_id=user.id, email=user.email, role=user.role)
+    return {"access_token": token, "user": user}
+
+
+@app.post("/auth/login", response_model=AuthTokenResponse)
+def auth_login(payload: UserLoginRequest, session: Session = Depends(get_session)) -> dict:
+    user = authenticate_user(session, identifier=payload.identifier, password=payload.password)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username, email, or password")
+    token = create_access_token(user_id=user.id, email=user.email, role=user.role)
     return {"access_token": token, "user": user}
 
 
@@ -106,8 +132,93 @@ def me(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+@app.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def admin_create_user(
+    payload: AdminUserCreateRequest,
+    session: Session = Depends(get_session),
+    _admin: User = Depends(require_admin),
+) -> User:
+    try:
+        creator_rank = role_rank(_admin.role)
+        requested_role = normalize_role(payload.role)
+        requested_rank = role_rank(requested_role)
+        if requested_rank >= creator_rank:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You cannot create account with equal or higher role.",
+            )
+        if requested_role == "ADMIN" and normalize_role(_admin.role) != "SUPER_ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only SUPER_ADMIN can create ADMIN accounts.",
+            )
+        return create_user(
+            session,
+            email=payload.email,
+            full_name=payload.full_name,
+            password=payload.password,
+            role=requested_role,
+            is_active=payload.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/users", response_model=UserListResponse)
+def admin_list_users(session: Session = Depends(get_session), _admin: User = Depends(require_admin)) -> dict:
+    items = list_users(session)
+    return {"count": len(items), "items": items}
+
+
+@app.patch("/users/{user_id}", response_model=UserResponse)
+def admin_patch_user(
+    user_id: int,
+    payload: AdminUserPatchRequest,
+    session: Session = Depends(get_session),
+    _admin: User = Depends(require_admin),
+) -> User:
+    target = get_user_by_id(session, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if payload.role is None and payload.is_active is None:
+        return target
+    if target.id == _admin.id and (payload.role is not None or payload.is_active is not None):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot change your own role or active status.",
+        )
+    actor_role = normalize_role(_admin.role)
+    actor_rank = role_rank(actor_role)
+    target_role = normalize_role(target.role)
+    target_rank = role_rank(target_role)
+    if target_rank >= actor_rank:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot modify users with equal or higher role.",
+        )
+    if payload.role is not None:
+        next_role = normalize_role(payload.role)
+        next_rank = role_rank(next_role)
+        if next_rank >= actor_rank:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You cannot assign equal or higher role.",
+            )
+        if next_role == "ADMIN" and actor_role != "SUPER_ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only SUPER_ADMIN can modify ADMIN accounts.",
+            )
+    if target_role == "ADMIN" and actor_role != "SUPER_ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only SUPER_ADMIN can modify ADMIN accounts.",
+        )
+    return update_user_access(session, target, role=payload.role, is_active=payload.is_active)
+
+
 @app.get("/api/v1/overview", response_model=OverviewResponse)
-def overview(session: Session = Depends(get_session)) -> dict:
+def overview(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)) -> dict:
     return get_overview(session)
 
 
@@ -208,13 +319,18 @@ def list_candidates(
     query: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> dict:
     items = search_candidates(session=session, query=query, limit=limit)
     return {"count": len(items), "items": items}
 
 
 @app.get("/api/v1/candidates/{candidate_id}", response_model=CandidateResponse)
-def candidate_detail(candidate_id: str, session: Session = Depends(get_session)) -> dict:
+def candidate_detail(
+    candidate_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict:
     candidate = get_candidate(session, candidate_id)
     if candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
@@ -222,7 +338,11 @@ def candidate_detail(candidate_id: str, session: Session = Depends(get_session))
 
 
 @app.get("/api/v1/candidates/{candidate_id}/preview")
-def candidate_preview(candidate_id: str, session: Session = Depends(get_session)) -> FileResponse:
+def candidate_preview(
+    candidate_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> FileResponse:
     try:
         preview_path = build_candidate_preview_image(session, candidate_id)
     except FileNotFoundError as exc:
@@ -261,18 +381,22 @@ def candidate_track(
 
 
 @app.post("/api/v1/candidates/import-legacy", response_model=ImportResponse)
-def import_candidates(session: Session = Depends(get_session)) -> dict:
+def import_candidates(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)) -> dict:
     return import_legacy_metadata(session)
 
 
 @app.get("/api/v1/queue/videos", response_model=QueueVideoListResponse)
-def queue_videos(session: Session = Depends(get_session)) -> dict:
+def queue_videos(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)) -> dict:
     items = list_queue_videos(session)
     return {"count": len(items), "items": items}
 
 
 @app.get("/api/v1/queue/videos/{video_id}/metadata")
-def queue_video_metadata(video_id: str, session: Session = Depends(get_session)) -> dict:
+def queue_video_metadata(
+    video_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict:
     try:
         return load_queue_video_metadata(session, video_id)
     except FileNotFoundError as exc:
@@ -280,7 +404,11 @@ def queue_video_metadata(video_id: str, session: Session = Depends(get_session))
 
 
 @app.get("/api/v1/queue/videos/{video_id}/file")
-def queue_video_file(video_id: str, session: Session = Depends(get_session)) -> FileResponse:
+def queue_video_file(
+    video_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> FileResponse:
     try:
         video_path = load_queue_video_file_path(session, video_id)
     except FileNotFoundError as exc:
@@ -289,7 +417,11 @@ def queue_video_file(video_id: str, session: Session = Depends(get_session)) -> 
 
 
 @app.post("/api/v1/queue/bootstrap", response_model=QueueBootstrapResponse)
-def bootstrap_queue(payload: QueueBootstrapRequest, session: Session = Depends(get_session)) -> dict:
+def bootstrap_queue(
+    payload: QueueBootstrapRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(require_admin),
+) -> dict:
     try:
         return QueueSyncService().bootstrap_from_source_dir(
             session,
@@ -304,7 +436,7 @@ def bootstrap_queue(payload: QueueBootstrapRequest, session: Session = Depends(g
 
 
 @app.post("/api/v1/queue/process-imports", response_model=QueueProcessResponse)
-def process_imports(session: Session = Depends(get_session)) -> dict:
+def process_imports(session: Session = Depends(get_session), current_user: User = Depends(require_admin)) -> dict:
     try:
         return QueueSyncService().process_import_queue(session)
     except Exception as exc:
@@ -313,7 +445,7 @@ def process_imports(session: Session = Depends(get_session)) -> dict:
 
 
 @app.get("/api/v1/tracking-artifacts/{artifact_id}")
-def tracking_artifact_video(artifact_id: str) -> FileResponse:
+def tracking_artifact_video(artifact_id: str, current_user: User = Depends(get_current_user)) -> FileResponse:
     video_path, _manifest_path = resolve_tracking_artifact_paths(artifact_id)
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Tracking artifact not found")
@@ -321,7 +453,7 @@ def tracking_artifact_video(artifact_id: str) -> FileResponse:
 
 
 @app.get("/api/v1/tracking-artifacts/{artifact_id}/manifest")
-def tracking_artifact_manifest(artifact_id: str) -> JSONResponse:
+def tracking_artifact_manifest(artifact_id: str, current_user: User = Depends(get_current_user)) -> JSONResponse:
     _video_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="Tracking manifest not found")

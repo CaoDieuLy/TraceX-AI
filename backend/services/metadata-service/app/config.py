@@ -88,7 +88,10 @@ class Settings(BaseSettings):
     tracking_request_timeout_seconds: int = 1800
     jwt_secret_key: str = os.getenv("JWT_SECRET_KEY", "")
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60 * 24
+    access_token_expire_minutes: int = 1440
+    bootstrap_admin_email: str = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+    bootstrap_admin_password: str = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "").strip()
+    bootstrap_admin_full_name: str = os.getenv("BOOTSTRAP_ADMIN_FULL_NAME", "Administrator").strip()
     video_storage_root: str = str(PROJECT_ROOT / "storage" / "videos")
     tracking_output_root: str = str(PROJECT_ROOT / "storage" / "tracking-output")
     default_storage_backend: str = "local_volume"

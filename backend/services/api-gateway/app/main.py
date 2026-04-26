@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -62,6 +62,12 @@ def _forward_auth_headers(request: Request) -> dict[str, str]:
     if authorization:
         headers["Authorization"] = authorization
     return headers
+
+
+def require_auth_header(request: Request) -> None:
+    authorization = str(request.headers.get("authorization") or "").strip()
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
 
 async def _get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
@@ -172,7 +178,7 @@ async def healthcheck() -> dict:
 
 
 @app.post("/search", response_model=SearchResponse)
-async def search(payload: SearchRequest) -> SearchResponse:
+async def search(payload: SearchRequest, request: Request, _auth: None = Depends(require_auth_header)) -> SearchResponse:
     # Strict mode: search must come from ai_service pipeline only.
     try:
         ai_payload = await search_internal(
@@ -210,9 +216,12 @@ async def search(payload: SearchRequest) -> SearchResponse:
 
 
 @app.get("/videos/{video_id}", response_model=VideoDetailResponse)
-async def videos_by_id(video_id: str) -> VideoDetailResponse:
+async def videos_by_id(video_id: str, request: Request, _auth: None = Depends(require_auth_header)) -> VideoDetailResponse:
     try:
-        queue_payload = await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos")
+        queue_payload = await _get_json(
+            f"{settings.metadata_service_url}/api/v1/queue/videos",
+            headers=_forward_auth_headers(request),
+        )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:
@@ -228,7 +237,10 @@ async def videos_by_id(video_id: str) -> VideoDetailResponse:
     )
     if queue_video is None and requested_id:
         try:
-            candidate_raw = await _get_json(f"{settings.metadata_service_url}/api/v1/candidates/{requested_id}")
+            candidate_raw = await _get_json(
+                f"{settings.metadata_service_url}/api/v1/candidates/{requested_id}",
+                headers=_forward_auth_headers(request),
+            )
             if isinstance(candidate_raw, dict):
                 candidate_payload = candidate_raw
                 resolved_video_id = str(candidate_raw.get("video_id") or "").strip() or requested_id
@@ -246,7 +258,10 @@ async def videos_by_id(video_id: str) -> VideoDetailResponse:
 
     metadata_payload: dict[str, Any] = {}
     try:
-        raw_metadata = await _get_json(f"{settings.metadata_service_url}/api/v1/queue/videos/{resolved_video_id}/metadata")
+        raw_metadata = await _get_json(
+            f"{settings.metadata_service_url}/api/v1/queue/videos/{resolved_video_id}/metadata",
+            headers=_forward_auth_headers(request),
+        )
         if isinstance(raw_metadata, dict):
             metadata_payload = raw_metadata
     except httpx.HTTPError:
@@ -326,10 +341,55 @@ async def login(payload: dict[str, Any]) -> dict:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
+@app.post("/auth/login")
+async def auth_login(payload: dict[str, Any]) -> dict:
+    try:
+        return await _post_json(f"{settings.metadata_service_url}/auth/login", payload)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
 @app.get("/api/v1/auth/me")
 async def me(request: Request) -> dict:
     try:
         return await _get_json(f"{settings.metadata_service_url}/api/v1/auth/me", headers=_forward_auth_headers(request))
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.post("/users")
+async def create_user(payload: dict[str, Any], request: Request, _auth: None = Depends(require_auth_header)) -> dict:
+    try:
+        return await _post_json(f"{settings.metadata_service_url}/users", payload, headers=_forward_auth_headers(request))
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.get("/users")
+async def users(request: Request, _auth: None = Depends(require_auth_header)) -> dict:
+    try:
+        return await _get_json(f"{settings.metadata_service_url}/users", headers=_forward_auth_headers(request))
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.patch("/users/{user_id}")
+async def patch_user(
+    user_id: int,
+    payload: dict[str, Any],
+    request: Request,
+    _auth: None = Depends(require_auth_header),
+) -> dict:
+    try:
+        return await _patch_json(f"{settings.metadata_service_url}/users/{user_id}", payload, headers=_forward_auth_headers(request))
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:

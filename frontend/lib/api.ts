@@ -1,4 +1,6 @@
 import type { VideoClip, VideoItem } from "@/lib/types/video";
+import { loadAccessToken } from "@/lib/auth";
+import { parseJsonOrThrow, readApiErrorMessage } from "@/lib/apiError";
 
 type SearchApiResponse = {
   results: Array<{
@@ -32,7 +34,8 @@ function placeholderThumbnail(seed: string): string {
   return `https://picsum.photos/seed/${safe}/400/225`;
 }
 
-function getApiBaseUrl(): string {
+/** Base URL cho fetch từ browser (ưu tiên same-origin + rewrite) hoặc SSR/server. */
+export function getApiBaseUrl(): string {
   const envBase = (process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "").trim();
   if (envBase.startsWith("/")) {
     return envBase.replace(/\/$/, "");
@@ -69,7 +72,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const apiBaseUrl = getApiBaseUrl();
   const authHeaders: Record<string, string> = {};
   if (typeof window !== "undefined") {
-    const token = localStorage.getItem("mcpt_access_token");
+    const token = loadAccessToken();
     if (token) {
       authHeaders.Authorization = `Bearer ${token}`;
     }
@@ -86,10 +89,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed (${response.status})`);
+    throw new Error(await readApiErrorMessage(response));
   }
-  return (await response.json()) as T;
+  return parseJsonOrThrow<T>(response);
 }
 
 export async function searchVideos(query: string, topK: number, offset = 0): Promise<VideoItem[]> {

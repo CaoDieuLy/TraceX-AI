@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
+
+import { loadSessionUser, type AuthUser } from "@/lib/auth";
 
 const linkClass = (active: boolean) =>
   [
@@ -15,11 +18,18 @@ export function Sidebar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const view = searchParams.get("view");
+  const [sessionUser, setSessionUser] = useState<AuthUser | null>(null);
+
+  useEffect(() => {
+    setSessionUser(loadSessionUser());
+  }, []);
 
   const isHome = pathname === "/home";
   const isNew = isHome && view !== "history";
   const isHistory = isHome && view === "history";
   const isDetail = pathname.startsWith("/detail/");
+  const isUsers = pathname === "/admin/users";
+  const isSettings = pathname === "/settings";
 
   return (
     <aside className="flex h-screen w-[240px] shrink-0 flex-col border-r border-surface-muted bg-surface-card px-3 py-6 shadow-card">
@@ -37,21 +47,27 @@ export function Sidebar() {
           <span className="text-lg leading-none">⟲</span>
           History
         </Link>
+        {["ADMIN", "SUPER_ADMIN"].includes(sessionUser?.role ?? "") ? (
+          <Link href="/admin/users" className={linkClass(isUsers)}>
+            <span className="text-lg leading-none">👥</span>
+            Users
+          </Link>
+        ) : null}
         {isDetail ? (
           <p className="mt-4 px-3 text-xs text-ink-subtle">Đang xem chi tiết video</p>
         ) : null}
       </nav>
 
-      <button
-        type="button"
-        className="mt-auto flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-ink-secondary transition-colors hover:bg-white/60 hover:text-ink"
+      <Link
+        href="/settings"
+        className={["mt-auto", linkClass(isSettings)].join(" ")}
         aria-label="Cài đặt"
       >
         <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-surface-muted bg-surface text-base">
           ⚙
         </span>
         Settings
-      </button>
+      </Link>
     </aside>
   );
 }

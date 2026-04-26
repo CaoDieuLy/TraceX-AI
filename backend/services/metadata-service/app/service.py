@@ -19,6 +19,12 @@ from .auth import hash_password, verify_password
 from .config import A20_ROOT, PROJECT_ROOT, settings
 from .models import PersonCandidate, QueueVideoAsset, User, VideoAsset, VideoQuery
 
+ROLE_HIERARCHY: dict[str, int] = {
+    "USER": 1,
+    "ADMIN": 2,
+    "SUPER_ADMIN": 3,
+}
+
 
 def _slugify(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-._") or "video"
@@ -514,6 +520,17 @@ def get_user_by_email(session: Session, email: str) -> User | None:
     return session.scalar(select(User).where(User.email == email.lower().strip()))
 
 
+def normalize_role(role: str | None) -> str:
+    normalized = str(role or "USER").strip().upper()
+    if normalized not in ROLE_HIERARCHY:
+        return "USER"
+    return normalized
+
+
+def role_rank(role: str | None) -> int:
+    return ROLE_HIERARCHY.get(normalize_role(role), 0)
+
+
 def get_user_by_identifier(session: Session, identifier: str) -> User | None:
     normalized = str(identifier or "").strip().lower()
     if not normalized:
@@ -529,7 +546,15 @@ def get_user_by_identifier(session: Session, identifier: str) -> User | None:
     return session.scalar(statement)
 
 
-def create_user(session: Session, email: str, full_name: str, password: str) -> User:
+def create_user(
+    session: Session,
+    email: str,
+    full_name: str,
+    password: str,
+    *,
+    role: str = "USER",
+    is_active: bool = True,
+) -> User:
     existing = get_user_by_email(session, email)
     if existing is not None:
         raise ValueError("Email already registered")
@@ -538,6 +563,8 @@ def create_user(session: Session, email: str, full_name: str, password: str) -> 
         email=email.lower().strip(),
         full_name=full_name.strip(),
         hashed_password=hash_password(password),
+        role=normalize_role(role),
+        is_active=bool(is_active),
     )
     session.add(user)
     session.commit()
@@ -547,9 +574,60 @@ def create_user(session: Session, email: str, full_name: str, password: str) -> 
 
 def authenticate_user(session: Session, identifier: str, password: str) -> User | None:
     user = get_user_by_identifier(session, identifier)
-    if user is None or not verify_password(password, user.hashed_password):
+    if user is None or not bool(user.is_active) or not verify_password(password, user.hashed_password):
         return None
+    user.last_login = datetime.now(timezone.utc)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
     return user
+
+
+def list_users(session: Session) -> list[User]:
+    statement = select(User).order_by(User.created_at.desc(), User.id.desc())
+    return list(session.scalars(statement).all())
+
+
+def get_user_by_id(session: Session, user_id: int) -> User | None:
+    return session.scalar(select(User).where(User.id == user_id))
+
+
+def update_user_access(session: Session, user: User, *, role: str | None = None, is_active: bool | None = None) -> User:
+    if role is not None:
+        user.role = normalize_role(role)
+    if is_active is not None:
+        user.is_active = bool(is_active)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def ensure_bootstrap_admin(session: Session, *, email: str, password: str, full_name: str) -> User | None:
+    normalized_email = str(email or "").strip().lower()
+    normalized_password = str(password or "").strip()
+    if not normalized_email or not normalized_password:
+        return None
+    existing = get_user_by_email(session, normalized_email)
+    if existing is not None:
+        if str(existing.role or "").upper() != "SUPER_ADMIN":
+            existing.role = "SUPER_ADMIN"
+            existing.is_active = True
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+        return existing
+    admin = User(
+        email=normalized_email,
+        full_name=(full_name or "Administrator").strip() or "Administrator",
+        hashed_password=hash_password(normalized_password),
+        role="SUPER_ADMIN",
+        is_active=True,
+    )
+    session.add(admin)
+    session.commit()
+    session.refresh(admin)
+    return admin
 
 
 def create_video_asset(

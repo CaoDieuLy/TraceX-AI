@@ -20,6 +20,27 @@ const nextConfig = {
         source: "/api/v1/:path*",
         destination: `${internalApiGatewayUrl}/api/v1/:path*`,
       },
+      // API user (tranh GET /users bi middleware redirect sang trang HTML /admin/users)
+      {
+        source: "/api/users",
+        destination: `${internalApiGatewayUrl}/users`,
+      },
+      {
+        source: "/api/users/:path*",
+        destination: `${internalApiGatewayUrl}/users/:path*`,
+      },
+      {
+        source: "/auth/:path*",
+        destination: `${internalApiGatewayUrl}/auth/:path*`,
+      },
+      {
+        source: "/users",
+        destination: `${internalApiGatewayUrl}/users`,
+      },
+      {
+        source: "/users/:path*",
+        destination: `${internalApiGatewayUrl}/users/:path*`,
+      },
     ];
   },
   images: {

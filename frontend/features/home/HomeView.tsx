@@ -1,20 +1,23 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { Suspense, useMemo } from "react";
+import { Suspense, useEffect, useMemo, useRef } from "react";
 
 import { VideoGrid } from "@/components/video/VideoGrid";
 import { GRID_BATCH_SIZE } from "@/lib/constants";
 import { HOME_GUIDE_LINES, HOME_GUIDE_TITLE } from "@/lib/content/homeGuide";
 import { MOCK_SEARCH_HISTORY } from "@/lib/mock/history";
 import { useSearch } from "@/features/search/SearchContext";
+import { useToast } from "@/components/ui/ToastProvider";
 
 const PAGE_SIZE = GRID_BATCH_SIZE;
 
 function HomeViewInner() {
+  const { showToast } = useToast();
   const searchParams = useSearchParams();
   const view = searchParams.get("view");
   const { hasSearched, isLoading, error, hasMore, results, gridPage, setGridPage, topK, loadMore } = useSearch();
+  const lastErrorRef = useRef<string | null>(null);
 
   const pageItems = useMemo(
     () => results.slice(gridPage * PAGE_SIZE, gridPage * PAGE_SIZE + PAGE_SIZE),
@@ -26,6 +29,13 @@ function HomeViewInner() {
   const isLastPage = isLastLoadedPage && !hasMore;
   const startRank = gridPage * PAGE_SIZE + 1;
   const endRank = Math.min((gridPage + 1) * PAGE_SIZE, results.length);
+
+  useEffect(() => {
+    if (error && error !== lastErrorRef.current) {
+      showToast(error, "error");
+      lastErrorRef.current = error;
+    }
+  }, [error, showToast]);
 
   if (view === "history") {
     return (
@@ -61,7 +71,6 @@ function HomeViewInner() {
 
   return (
     <div className="flex flex-col gap-8">
-      {error ? <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
       {isLoading ? <p className="text-sm text-ink-secondary">Đang tải kết quả...</p> : null}
       {!isLoading && !error && results.length === 0 ? (
         <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">

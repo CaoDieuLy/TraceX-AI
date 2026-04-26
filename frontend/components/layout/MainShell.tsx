@@ -6,6 +6,7 @@ import { SearchBar } from "@/components/search/SearchBar";
 import { TopKSelect } from "@/components/search/TopKSelect";
 import { useSearch } from "@/features/search/SearchContext";
 
+import { AccountMenu } from "./AccountMenu";
 import { Sidebar } from "./Sidebar";
 
 function SidebarFallback() {
@@ -33,11 +34,12 @@ export function MainShell({ children }: { children: ReactNode }) {
           <div className="mx-auto flex max-w-6xl flex-col gap-4">
             <div className="flex flex-wrap items-start gap-4">
               <SearchBar className="min-w-[min(100%,280px)] flex-1" />
-              {hasSearched ? (
-                <div className="ml-auto shrink-0 pt-1">
+              <div className="ml-auto flex shrink-0 items-start gap-3 pt-1">
+                {hasSearched ? (
                   <TopKSelect />
-                </div>
-              ) : null}
+                ) : null}
+                <AccountMenu />
+              </div>
             </div>
           </div>
         </header>
