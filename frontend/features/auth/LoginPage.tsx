@@ -110,40 +110,79 @@ export function LoginPage() {
     <div
       className="relative min-h-screen overflow-hidden"
       style={{
-        backgroundImage: "url('/images/auth/img_login.png')",
+        backgroundImage: "url('/images/auth/img_backgroud5.png')",
         backgroundSize: "cover",
-        backgroundPosition: "center",
+        backgroundPosition: "center top",
         backgroundRepeat: "no-repeat",
       }}
     >
-      <div className="absolute inset-0 bg-slate-950/50" />
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_22%,rgba(59,130,246,0.28),transparent_42%),radial-gradient(circle_at_80%_18%,rgba(14,165,233,0.18),transparent_40%)]" />
+      <div className="absolute inset-0 bg-slate-900/12" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_22%_30%,rgba(255,255,255,0.34),transparent_48%),radial-gradient(circle_at_82%_20%,rgba(174,213,255,0.26),transparent_45%)]" />
 
-      <div className="relative mx-auto grid min-h-screen w-full max-w-7xl items-center gap-8 px-4 py-10 md:grid-cols-[1.2fr_0.8fr] md:px-10">
-        <section className="rounded-3xl border border-white/15 bg-white/5 p-7 text-white shadow-elevated backdrop-blur-[1px] md:p-10">
-          <p className="inline-flex rounded-full border border-white/25 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-100">
-            MCPT Intelligence
-          </p>
-          <h1 className="mt-5 text-4xl font-bold leading-tight text-white md:text-6xl">
-            Tim nhanh hon.
+
+      <div className="relative mx-auto grid min-h-screen w-full max-w-7xl items-center gap-8 px-4 py-8 md:grid-cols-[1.22fr_0.78fr] md:px-10">
+        <section className="rounded-3xl bg-slate-900/12 p-6 pt-20 text-white backdrop-blur-[2px] md:p-10 md:pt-36">
+          <div className="flex items-center gap-3">
+            <img src="/images/auth/img_icon_se.png" alt="logo" className="h-11 w-11 rounded-xl object-contain" />
+            <div>
+              <p className="text-3xl font-bold leading-tight text-[#F6FAFF] drop-shadow-[0_2px_6px_rgba(10,30,60,0.42)]">
+                VLyMVision
+              </p>
+              <p className="text-sm text-[#E8F2FF]/90">AI-Powered CCTV Platform</p>
+            </div>
+          </div>
+
+          <h1 className="mt-7 max-w-3xl text-4xl font-bold leading-tight md:text-6xl">
+            <span className="text-[#F6FAFF] drop-shadow-[0_2px_6px_rgba(10,30,60,0.42)]">Giam sat thong minh,</span>
             <br />
-            Nhin ro hon.
+            <span className="text-[#5DD4FF] drop-shadow-[0_2px_10px_rgba(34,200,255,0.45)]">an toàn vượt trội.</span>
           </h1>
-          <p className="mt-6 max-w-2xl text-base leading-relaxed text-slate-100/90 md:text-lg">
-            Nen tang quan ly va truy van video thong minh, toi uu cho van hanh noi bo va phan quyen an toan theo vai tro.
-            Tat ca du lieu duoc tap trung trong mot giao dien hien dai, de su dung.
+          <p className="mt-4 max-w-2xl text-base leading-relaxed text-[#E8F2FF] md:text-lg">
+            Nen tang CCTV tich hop AI giup ban giam sat, phat hien va phan ung tuc thi moi su kien.
           </p>
 
-          <div className="mt-8 grid gap-3 text-sm text-slate-100/95 sm:grid-cols-2">
-            <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3">Tra cuu video theo text theo ngu canh.</div>
-            <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3">Quan ly user voi RBAC ro rang, an toan.</div>
-            <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3">Theo doi ket qua tap trung, thao tac nhanh.</div>
-            <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3">San sang mo rong cho he thong AI service.</div>
+          <div className="mt-8 max-w-xl space-y-3">
+            <div className="flex items-start gap-3">
+              <img src="/images/auth/img_icon_Ai.png" alt="AI" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
+              <div>
+                <p className="text-xl font-semibold text-[#F5FAFF]">AI Thong minh</p>
+                <p className="text-sm text-[#DFECFF]">Phat hien khuon mat, hanh vi bat thuong va canh bao theo thoi gian thuc.</p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3">
+              <img src="/images/auth/img_icon_cam.png" alt="Camera" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
+              <div>
+                <p className="text-xl font-semibold text-[#F5FAFF]">Giam sat toan dien</p>
+                <p className="text-sm text-[#DFECFF]">Xem live, xem lai, quan ly nhieu camera moi luc moi noi.</p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3">
+              <img src="/images/auth/img_icon_se2.png" alt="Search" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
+              <div>
+                <p className="text-xl font-semibold text-[#F5FAFF]">Tim nguoi theo mo ta</p>
+                <p className="text-sm text-[#DFECFF]">Tim kiem nguoi qua dac diem hoac trang phuc.</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-7 flex flex-wrap items-center gap-6 text-sm text-[#EAF3FF]">
+            <div className="flex items-center gap-2">
+              <img src="/images/auth/img_icon_se2.png" alt="safe" className="h-5 w-5 rounded-md border border-white/70 bg-white/90 p-0.5 shadow-sm object-contain" />
+              <span>Bao mat cao</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <img src="/images/auth/img_icon_cloud.png" alt="cloud" className="h-5 w-5 rounded-md border border-white/70 bg-white/90 p-0.5 shadow-sm object-contain" />
+              <span>Luu tru linh hoat</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <img src="/images/auth/img_icon_thunder.png" alt="realtime" className="h-5 w-5 rounded-md border border-white/70 bg-white/90 p-0.5 shadow-sm object-contain" />
+              <span>Xu ly real-time</span>
+            </div>
           </div>
         </section>
 
         <section className="flex items-center justify-center md:justify-end">
-          <div className="w-full max-w-md rounded-3xl border border-white/40 bg-white/92 p-8 shadow-elevated backdrop-blur-md md:p-9">
+          <div className="w-full max-w-md rounded-3xl border border-white/45 bg-white/78 p-8 shadow-elevated backdrop-blur-xl md:p-9">
             <div className="mb-8 text-center">
               <h2 className="text-2xl font-semibold text-ink">Log in</h2>
               <p className="mt-2 text-sm text-ink-secondary">Su dung email va password de tiep tuc</p>
@@ -200,7 +239,7 @@ export function LoginPage() {
               <button
                 type="submit"
                 disabled={isLoading}
-                className="mt-2 rounded-2xl bg-accent py-3 text-sm font-semibold text-white shadow-card transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                className="mt-2 rounded-2xl bg-blue-600 py-3 text-sm font-semibold text-white shadow-card transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isLoading ? "Dang xu ly..." : "Log in"}
               </button>

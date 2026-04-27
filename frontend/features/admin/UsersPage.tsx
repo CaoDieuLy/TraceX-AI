@@ -152,23 +152,50 @@ export function UsersPage() {
       </section>
 
       <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">
-        <form className="grid grid-cols-1 gap-3 md:grid-cols-5" onSubmit={handleCreateUser}>
-          <input className="rounded-xl border border-surface-muted px-3 py-2" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          <input className="rounded-xl border border-surface-muted px-3 py-2" placeholder="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
-          <input className="rounded-xl border border-surface-muted px-3 py-2" placeholder="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
-          <select className="rounded-xl border border-surface-muted px-3 py-2" value={isActive ? "active" : "inactive"} onChange={(e) => setIsActive(e.target.value === "active")}>
+        <form className="grid grid-cols-1 gap-3 md:grid-cols-12" onSubmit={handleCreateUser}>
+          <input
+            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-3"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+          <input
+            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-3"
+            placeholder="Full name"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            required
+          />
+          <input
+            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-2"
+            placeholder="Password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+          <select
+            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-2"
+            value={isActive ? "active" : "inactive"}
+            onChange={(e) => setIsActive(e.target.value === "active")}
+          >
             <option value="active">Active</option>
             <option value="inactive">Inactive</option>
           </select>
-          <div className="flex gap-2">
-            <select className="flex-1 rounded-xl border border-surface-muted px-3 py-2" value={role} onChange={(e) => setRole(e.target.value as UserItem["role"])}>
+          <div className="flex min-w-0 gap-2 md:col-span-2">
+            <select
+              className="min-w-0 flex-1 rounded-xl border border-surface-muted px-3 py-2"
+              value={role}
+              onChange={(e) => setRole(e.target.value as UserItem["role"])}
+            >
               {ROLE_OPTIONS.map((item) => (
                 <option key={item} value={item}>
                   {item}
                 </option>
               ))}
             </select>
-            <button className="rounded-xl bg-accent px-4 py-2 text-white" type="submit">
+            <button className="shrink-0 rounded-xl bg-accent px-4 py-2 text-white" type="submit">
               Create
             </button>
           </div>
