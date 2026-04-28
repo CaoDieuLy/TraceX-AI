@@ -416,8 +416,9 @@ def queue_video_file(
 @app.post("/api/v1/queue/process-storage", response_model=QueueProcessResponse)
 def process_storage(
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_admin),
 ) -> dict:
+    # Internal endpoint — only reachable via the gateway on 127.0.0.1:8001.
+    # Gateway-level auth (require_admin on the public API) protects external access.
     try:
         return QueueSyncService().process_storage_queue(session)
     except Exception as exc:

@@ -276,10 +276,11 @@ class QueueSyncService:
     def _drive_public_download_url(file_id: str) -> str:
         """Return the public direct-download URL for a Google Drive file.
 
+        Uses drive.usercontent.google.com — Google's current recommended
+        endpoint for large public file downloads (no confirmation page).
         Works when the file is shared as 'Anyone with the link can view'.
-        The query parameter confirm=t bypasses the large-file virus-scan page.
         """
-        return f"https://drive.google.com/uc?id={file_id}&export=download&confirm=t"
+        return f"https://drive.usercontent.google.com/download?id={file_id}&export=download&authuser=0"
 
     def _process_storage_video_item(self, item: StorageVideoItem) -> dict:
         """Send one storage/camera/date MP4 to tracking and persist local queue artifacts."""
