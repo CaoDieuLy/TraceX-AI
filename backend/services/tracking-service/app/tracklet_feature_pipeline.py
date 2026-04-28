@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import cv2
 from dataclasses import dataclass, field
 import math
+import numpy as np
 from statistics import mean
 from typing import Protocol
 
@@ -57,6 +60,7 @@ class TrackletFrameObservation:
     bbox: BoundingBox
     detection_confidence: float
     laplacian_score: float
+    crop_bgr: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,13 @@ class FrameSelectionOutput:
     selected_frames: tuple[FrameQualityScore, ...]
     ranked_frames: tuple[FrameQualityScore, ...]
     pooling_scores: dict[str, float]
+
+
+@dataclass(frozen=True)
+class TrackletStageExecutionConfig:
+    """Execution settings for independent stages inside one tracklet pipeline."""
+
+    max_workers: int = 3
 
 
 @dataclass(frozen=True)
@@ -270,14 +281,14 @@ class TrackletFeatureAggregationOutput:
 class StaticAttributeExtractor(Protocol):
     """Model adapter for gender + age-group extraction."""
 
-    def extract(self, tracklet: TrackletFeatureInput, representative_frame: FrameQualityScore) -> StaticAttributeResult:
+    def extract(self, tracklet: TrackletFeatureInput, selection: FrameSelectionOutput) -> StaticAttributeResult:
         ...
 
 
 class AppearanceAttributeExtractor(Protocol):
     """Model adapter for appearance extraction."""
 
-    def extract(self, tracklet: TrackletFeatureInput, representative_frame: FrameQualityScore) -> AppearanceAttributeResult:
+    def extract(self, tracklet: TrackletFeatureInput, selection: FrameSelectionOutput) -> AppearanceAttributeResult:
         ...
 
 
@@ -287,7 +298,7 @@ class AttributeEmbeddingExtractor(Protocol):
     def extract(
         self,
         tracklet: TrackletFeatureInput,
-        representative_frame: FrameQualityScore,
+        selection: FrameSelectionOutput,
         static_attributes: StaticAttributeResult,
     ) -> AttributeEmbeddingResult:
         ...
@@ -322,7 +333,7 @@ class AppearanceEmbeddingExtractor(Protocol):
     def extract(
         self,
         tracklet: TrackletFeatureInput,
-        representative_frame: FrameQualityScore,
+        selection: FrameSelectionOutput,
         static_attributes: StaticAttributeResult,
         appearance_attributes: AppearanceAttributeResult,
     ) -> AppearanceEmbeddingResult:
@@ -337,29 +348,185 @@ class NullStaticAttributeExtractor:
     Returning explicit null fields is safer than fabricating labels.
     """
 
-    def extract(self, tracklet: TrackletFeatureInput, representative_frame: FrameQualityScore) -> StaticAttributeResult:
+    def extract(self, tracklet: TrackletFeatureInput, selection: FrameSelectionOutput) -> StaticAttributeResult:
         return StaticAttributeResult(gender=None, age_group=None, confidence=0.0)
 
 
 @dataclass
-class NullAppearanceAttributeExtractor:
-    """Safe placeholder extractor until the strict runtime wires a real appearance model."""
+class RuleBasedStaticAttributeExtractor:
+    """Conservative visual extractor for static attributes from selected crops."""
 
-    def extract(self, tracklet: TrackletFeatureInput, representative_frame: FrameQualityScore) -> AppearanceAttributeResult:
-        return AppearanceAttributeResult()
+    adult_height_threshold: int = 110
+    confidence_floor: float = 0.15
+
+    def extract(self, tracklet: TrackletFeatureInput, selection: FrameSelectionOutput) -> StaticAttributeResult:
+        selected_frames = self._selected_observations(tracklet, selection)
+        heights = [frame.bbox.height for frame in selected_frames]
+        median_height = float(np.median(heights)) if heights else 0.0
+        age_group = "adult_like" if median_height >= self.adult_height_threshold else "unknown"
+        confidence = self.confidence_floor if age_group == "adult_like" else 0.05
+        return StaticAttributeResult(gender=None, age_group=age_group, confidence=round(confidence, 6))
+
+    @staticmethod
+    def _selected_observations(
+        tracklet: TrackletFeatureInput,
+        selection: FrameSelectionOutput,
+    ) -> tuple[TrackletFrameObservation, ...]:
+        frame_map = {frame.frame_index: frame for frame in tracklet.frames}
+        return tuple(
+            frame_map[item.frame_index]
+            for item in selection.selected_frames
+            if item.frame_index in frame_map
+        )
 
 
 @dataclass
-class DeterministicAttributeEmbeddingExtractor:
-    """Stable attribute embedding from gender + age metadata."""
+class ColorAppearanceAttributeExtractor:
+    """Extract coarse appearance metadata from selected frame crops."""
 
-    embedding_model: str = "deterministic_attribute_embedding_v1"
+    def extract(self, tracklet: TrackletFeatureInput, selection: FrameSelectionOutput) -> AppearanceAttributeResult:
+        selected_frames = self._selected_observations(tracklet, selection)
+        crops = [frame.crop_bgr for frame in selected_frames if frame.crop_bgr is not None and frame.crop_bgr.size > 0]
+        if not crops:
+            return AppearanceAttributeResult()
+
+        upper_colors: list[str] = []
+        lower_colors: list[str] = []
+        hair_colors: list[str] = []
+        shoe_colors: list[str] = []
+        hat_votes: list[str] = []
+        bag_votes: list[str] = []
+        head_accessory_votes: list[str] = []
+        skin_tones: list[str] = []
+
+        for crop in crops:
+            h, w = crop.shape[:2]
+            if h < 12 or w < 8:
+                continue
+            upper = crop[max(0, int(h * 0.18)): max(1, int(h * 0.55)), :]
+            lower = crop[max(0, int(h * 0.55)): max(1, int(h * 0.85)), :]
+            head = crop[: max(1, int(h * 0.18)), :]
+            shoes = crop[max(0, int(h * 0.85)):h, :]
+            side_band = crop[max(0, int(h * 0.25)): max(1, int(h * 0.75)), max(0, int(w * 0.75)):w]
+            face_band = crop[max(0, int(h * 0.12)): max(1, int(h * 0.28)), int(w * 0.3): int(w * 0.7) or 1]
+
+            upper_colors.append(self._dominant_color_name(upper))
+            lower_colors.append(self._dominant_color_name(lower))
+            hair_colors.append(self._dominant_color_name(head))
+            shoe_colors.append(self._dominant_color_name(shoes))
+            hat_votes.append(self._hat_label(head))
+            bag_votes.append(self._bag_label(side_band, w))
+            head_accessory_votes.append(self._head_accessory_label(head))
+            skin_tones.append(self._skin_tone_label(face_band))
+
+        return AppearanceAttributeResult(
+            head_accessory=self._majority_non_unknown(head_accessory_votes),
+            hat=self._majority_non_unknown(hat_votes),
+            hair_color=self._majority_non_unknown(hair_colors),
+            skin_tone=self._majority_non_unknown(skin_tones),
+            shirt=self._majority_non_unknown(upper_colors),
+            pants=self._majority_non_unknown(lower_colors),
+            shoes=self._majority_non_unknown(shoe_colors),
+            bag=self._majority_non_unknown(bag_votes),
+        )
+
+    @staticmethod
+    def _selected_observations(
+        tracklet: TrackletFeatureInput,
+        selection: FrameSelectionOutput,
+    ) -> tuple[TrackletFrameObservation, ...]:
+        frame_map = {frame.frame_index: frame for frame in tracklet.frames}
+        return tuple(
+            frame_map[item.frame_index]
+            for item in selection.selected_frames
+            if item.frame_index in frame_map
+        )
+
+    @staticmethod
+    def _majority_non_unknown(values: list[str]) -> str | None:
+        filtered = [value for value in values if value and value != "unknown"]
+        if not filtered:
+            return None
+        counts: dict[str, int] = {}
+        for value in filtered:
+            counts[value] = counts.get(value, 0) + 1
+        return max(counts.items(), key=lambda item: item[1])[0]
+
+    @staticmethod
+    def _dominant_color_name(region: np.ndarray) -> str:
+        if region.size == 0:
+            return "unknown"
+        hsv = np.asarray(region, dtype=np.uint8)
+        hsv = cv2.cvtColor(hsv, cv2.COLOR_BGR2HSV)
+        hue = float(np.mean(hsv[:, :, 0]))
+        sat = float(np.mean(hsv[:, :, 1]))
+        val = float(np.mean(hsv[:, :, 2]))
+        if val < 45:
+            return "black"
+        if sat < 35 and val > 185:
+            return "white"
+        if sat < 40:
+            return "gray"
+        if hue < 10 or hue >= 170:
+            return "red"
+        if hue < 20:
+            return "orange"
+        if hue < 34:
+            return "yellow"
+        if hue < 85:
+            return "green"
+        if hue < 130:
+            return "blue"
+        if hue < 160:
+            return "purple"
+        return "brown"
+
+    def _hat_label(self, head_region: np.ndarray) -> str:
+        if head_region.size == 0:
+            return "unknown"
+        h, _ = head_region.shape[:2]
+        top_strip = head_region[: max(1, int(h * 0.45)), :]
+        full_brightness = float(np.mean(head_region))
+        top_brightness = float(np.mean(top_strip))
+        return "present" if top_brightness + 18 < full_brightness else "unknown"
+
+    def _head_accessory_label(self, head_region: np.ndarray) -> str:
+        if head_region.size == 0:
+            return "unknown"
+        hsv = cv2.cvtColor(np.asarray(head_region, dtype=np.uint8), cv2.COLOR_BGR2HSV)
+        sat = float(np.mean(hsv[:, :, 1]))
+        return "present" if sat > 75 else "unknown"
+
+    def _bag_label(self, side_region: np.ndarray, body_width: int) -> str:
+        if side_region.size == 0 or body_width <= 0:
+            return "unknown"
+        mask = cv2.Canny(side_region, 40, 120)
+        active_ratio = float(np.count_nonzero(mask)) / float(mask.size or 1)
+        return "present" if active_ratio > 0.08 else "unknown"
+
+    def _skin_tone_label(self, face_region: np.ndarray) -> str:
+        if face_region.size == 0:
+            return "unknown"
+        hsv = cv2.cvtColor(np.asarray(face_region, dtype=np.uint8), cv2.COLOR_BGR2HSV)
+        value = float(np.mean(hsv[:, :, 2]))
+        if value < 85:
+            return "dark"
+        if value < 155:
+            return "medium"
+        return "light"
+
+
+@dataclass
+class VisualAttributeEmbeddingExtractor:
+    """Attribute embedding derived from static attribute metadata and selection quality."""
+
+    embedding_model: str = "visual_attribute_embedding_v1"
     target_dimensions: int = 8
 
     def extract(
         self,
         tracklet: TrackletFeatureInput,
-        representative_frame: FrameQualityScore,
+        selection: FrameSelectionOutput,
         static_attributes: StaticAttributeResult,
     ) -> AttributeEmbeddingResult:
         seed_tokens = [
@@ -367,7 +534,8 @@ class DeterministicAttributeEmbeddingExtractor:
             tracklet.object_id,
             static_attributes.gender or "",
             static_attributes.age_group or "",
-            str(representative_frame.detection_confidence),
+            str(selection.representative_frame.detection_confidence),
+            ",".join(str(item.frame_index) for item in selection.selected_frames),
         ]
         values = [0.0 for _ in range(self.target_dimensions)]
         for token_index, token in enumerate(seed_tokens):
@@ -376,6 +544,10 @@ class DeterministicAttributeEmbeddingExtractor:
             for char_index, char in enumerate(token):
                 bucket = (token_index + char_index) % self.target_dimensions
                 values[bucket] += (ord(char) % 89) / 89.0
+
+        values[0] += selection.average_tracklet_score
+        values[1] += selection.pooling_scores.get("quality_weighted_mean_selected_frames", 0.0)
+        values[2] += float(len(selection.selected_frames)) / 10.0
 
         norm = math.sqrt(sum(value * value for value in values)) or 1.0
         vector = tuple(round(value / norm, 6) for value in values)
@@ -386,27 +558,54 @@ class DeterministicAttributeEmbeddingExtractor:
 
 
 @dataclass
-class DeterministicAppearanceEmbeddingExtractor:
-    """
-    Deterministic placeholder embedding extractor.
+class VisualAppearanceEmbeddingExtractor:
+    """Quality-weighted visual embedding from selected crops."""
 
-    The vector is derived from stable visual metadata so the local end-to-end
-    flow can rank candidates without inventing a second metadata format.
-    """
-
-    embedding_model: str = "deterministic_tracklet_embedding_v1"
-    target_dimensions: int = 16
+    embedding_model: str = "visual_tracklet_embedding_v2"
+    histogram_bins: int = 8
 
     def extract(
         self,
         tracklet: TrackletFeatureInput,
-        representative_frame: FrameQualityScore,
+        selection: FrameSelectionOutput,
         static_attributes: StaticAttributeResult,
         appearance_attributes: AppearanceAttributeResult,
     ) -> AppearanceEmbeddingResult:
+        selected_map = {item.frame_index: item for item in selection.selected_frames}
+        per_frame_vectors: list[tuple[float, ...]] = []
+        per_frame_weights: list[float] = []
+        for frame in tracklet.frames:
+            selected = selected_map.get(frame.frame_index)
+            if selected is None or frame.crop_bgr is None or frame.crop_bgr.size == 0:
+                continue
+            vector = self._extract_crop_vector(frame.crop_bgr, selected, static_attributes, appearance_attributes)
+            per_frame_vectors.append(vector)
+            per_frame_weights.append(max(selected.quality_score, 1e-6))
+
+        if not per_frame_vectors:
+            fallback_vector = self._fallback_semantic_vector(selection, static_attributes, appearance_attributes)
+            return AppearanceEmbeddingResult(
+                embedding_model=self.embedding_model,
+                embedding_vector=fallback_vector,
+                tracklet_vectors=(fallback_vector,),
+            )
+
+        fused = np.average(np.asarray(per_frame_vectors, dtype=np.float32), axis=0, weights=np.asarray(per_frame_weights))
+        norm = float(np.linalg.norm(fused)) or 1.0
+        vector = tuple(round(float(value / norm), 6) for value in fused.tolist())
+        return AppearanceEmbeddingResult(
+            embedding_model=self.embedding_model,
+            embedding_vector=vector,
+            tracklet_vectors=tuple(per_frame_vectors),
+        )
+
+    def _fallback_semantic_vector(
+        self,
+        selection: FrameSelectionOutput,
+        static_attributes: StaticAttributeResult,
+        appearance_attributes: AppearanceAttributeResult,
+    ) -> tuple[float, ...]:
         seed_tokens = [
-            tracklet.video_id,
-            tracklet.object_id,
             static_attributes.gender or "",
             static_attributes.age_group or "",
             appearance_attributes.head_accessory or "",
@@ -417,24 +616,62 @@ class DeterministicAppearanceEmbeddingExtractor:
             appearance_attributes.pants or "",
             appearance_attributes.shoes or "",
             appearance_attributes.bag or "",
-            str(representative_frame.bbox_area),
-            str(representative_frame.detection_confidence),
+            str(selection.representative_frame.quality_score),
         ]
-        values = [0.0 for _ in range(self.target_dimensions)]
+        values = [0.0 for _ in range(32)]
         for token_index, token in enumerate(seed_tokens):
             if not token:
                 continue
             for char_index, char in enumerate(token):
-                bucket = (token_index + char_index) % self.target_dimensions
+                bucket = (token_index + char_index) % len(values)
                 values[bucket] += (ord(char) % 97) / 97.0
-
         norm = math.sqrt(sum(value * value for value in values)) or 1.0
-        vector = tuple(round(value / norm, 6) for value in values)
-        return AppearanceEmbeddingResult(
-            embedding_model=self.embedding_model,
-            embedding_vector=vector,
-            tracklet_vectors=(vector,),
+        return tuple(round(value / norm, 6) for value in values)
+
+    def _extract_crop_vector(
+        self,
+        crop_bgr: np.ndarray,
+        selected_frame: FrameQualityScore,
+        static_attributes: StaticAttributeResult,
+        appearance_attributes: AppearanceAttributeResult,
+    ) -> tuple[float, ...]:
+        hsv = cv2.cvtColor(np.asarray(crop_bgr, dtype=np.uint8), cv2.COLOR_BGR2HSV)
+        hist_features: list[float] = []
+        for channel_index, bins in ((0, self.histogram_bins), (1, self.histogram_bins), (2, self.histogram_bins)):
+            hist = cv2.calcHist([hsv], [channel_index], None, [bins], [0, 256]).flatten()
+            hist_sum = float(hist.sum()) or 1.0
+            hist_features.extend((hist / hist_sum).tolist())
+
+        gray = cv2.cvtColor(np.asarray(crop_bgr, dtype=np.uint8), cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(gray, (16, 32), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+        texture_features = cv2.HOGDescriptor(
+            _winSize=(16, 32),
+            _blockSize=(8, 8),
+            _blockStride=(4, 4),
+            _cellSize=(4, 4),
+            _nbins=9,
+        ).compute(resized.astype(np.uint8))
+        texture_vector = texture_features.flatten()[:64] if texture_features is not None else np.zeros(64, dtype=np.float32)
+
+        semantic_bits = np.array(
+            [
+                1.0 if static_attributes.age_group == "adult_like" else 0.0,
+                1.0 if appearance_attributes.hat else 0.0,
+                1.0 if appearance_attributes.bag else 0.0,
+                float(selected_frame.detection_confidence),
+                float(selected_frame.quality_score),
+            ],
+            dtype=np.float32,
         )
+        vector = np.concatenate(
+            [
+                np.asarray(hist_features, dtype=np.float32),
+                texture_vector.astype(np.float32),
+                semantic_bits,
+            ]
+        )
+        norm = float(np.linalg.norm(vector)) or 1.0
+        return tuple(round(float(value / norm), 6) for value in vector.tolist())
 
 
 @dataclass
@@ -764,6 +1001,7 @@ class TrackletFeatureAggregator:
         clips: tuple[ActionClip, ...],
         behavior_results: tuple[BehaviorAnalysisResult, ...],
         semantic_embeddings: tuple[SemanticEmbeddingResult, ...],
+        runtime_metadata: dict[str, object],
     ) -> TrackletFeatureAggregationOutput:
         semantic_tokens = tuple(
             static_attributes.semantic_tokens()
@@ -824,6 +1062,7 @@ class TrackletFeatureAggregator:
             "action_clip_ids": [clip.clip_id for clip in clips],
             "action_labels": [analysis.action_summary for analysis in behavior_results],
         }
+        pipeline_metadata.update(runtime_metadata)
         return TrackletFeatureAggregationOutput(
             video_id=tracklet.video_id,
             object_id=tracklet.object_id,
@@ -913,33 +1152,53 @@ class TrackletFeaturePipelineProcessor:
     """
 
     selector: HybridFrameSelector = field(default_factory=HybridFrameSelector)
-    static_attribute_extractor: StaticAttributeExtractor = field(default_factory=NullStaticAttributeExtractor)
-    attribute_embedding_extractor: AttributeEmbeddingExtractor = field(default_factory=DeterministicAttributeEmbeddingExtractor)
-    appearance_attribute_extractor: AppearanceAttributeExtractor = field(default_factory=NullAppearanceAttributeExtractor)
-    appearance_embedding_extractor: AppearanceEmbeddingExtractor = field(default_factory=DeterministicAppearanceEmbeddingExtractor)
+    static_attribute_extractor: StaticAttributeExtractor = field(default_factory=RuleBasedStaticAttributeExtractor)
+    attribute_embedding_extractor: AttributeEmbeddingExtractor = field(default_factory=VisualAttributeEmbeddingExtractor)
+    appearance_attribute_extractor: AppearanceAttributeExtractor = field(default_factory=ColorAppearanceAttributeExtractor)
+    appearance_embedding_extractor: AppearanceEmbeddingExtractor = field(default_factory=VisualAppearanceEmbeddingExtractor)
     clip_builder: ActionClipBuilder = field(default_factory=ActionClipBuilder)
     behavior_analyzer: ActionBehaviorAnalyzer = field(default_factory=HeuristicBehaviorAnalyzer)
     semantic_embedder: ActionSemanticEmbedder = field(default_factory=ActionVocabularyEmbedder)
     aggregator: TrackletFeatureAggregator = field(default_factory=TrackletFeatureAggregator)
+    stage_execution: TrackletStageExecutionConfig = field(default_factory=TrackletStageExecutionConfig)
 
     def process(self, tracklet: TrackletFeatureInput) -> TrackletFeaturePipelineOutput:
         selection = self.selector.select(tracklet)
-        static_attributes = self.static_attribute_extractor.extract(tracklet, selection.representative_frame)
-        attribute_embedding = self.attribute_embedding_extractor.extract(
-            tracklet,
-            selection.representative_frame,
-            static_attributes,
-        )
-        appearance_attributes = self.appearance_attribute_extractor.extract(tracklet, selection.representative_frame)
-        appearance_embedding = self.appearance_embedding_extractor.extract(
-            tracklet,
-            selection.representative_frame,
-            static_attributes,
-            appearance_attributes,
-        )
-        clips = self.clip_builder.build(tracklet, selection.representative_frame.frame_index)
-        behavior_results = tuple(self.behavior_analyzer.analyze(clip) for clip in clips)
-        semantic_embeddings = tuple(self.semantic_embedder.embed(result) for result in behavior_results)
+        max_workers = max(1, self.stage_execution.max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            static_future = executor.submit(self.static_attribute_extractor.extract, tracklet, selection)
+            appearance_future = executor.submit(self.appearance_attribute_extractor.extract, tracklet, selection)
+            clips_future = executor.submit(self.clip_builder.build, tracklet, selection.representative_frame.frame_index)
+
+            static_attributes = static_future.result()
+            appearance_attributes = appearance_future.result()
+            clips = clips_future.result()
+
+            attribute_embedding_future = executor.submit(
+                self.attribute_embedding_extractor.extract,
+                tracklet,
+                selection,
+                static_attributes,
+            )
+            appearance_embedding_future = executor.submit(
+                self.appearance_embedding_extractor.extract,
+                tracklet,
+                selection,
+                static_attributes,
+                appearance_attributes,
+            )
+
+            if clips:
+                behavior_results = tuple(executor.map(self.behavior_analyzer.analyze, clips))
+                semantic_embeddings = tuple(executor.map(self.semantic_embedder.embed, behavior_results))
+            else:
+                behavior_results = ()
+                semantic_embeddings = ()
+
+            attribute_embedding = attribute_embedding_future.result()
+            appearance_embedding = appearance_embedding_future.result()
+
+        runtime_metadata = self._runtime_metadata()
         aggregated = self.aggregator.aggregate(
             tracklet=tracklet,
             selection=selection,
@@ -950,6 +1209,7 @@ class TrackletFeaturePipelineProcessor:
             clips=clips,
             behavior_results=behavior_results,
             semantic_embeddings=semantic_embeddings,
+            runtime_metadata=runtime_metadata,
         )
         return TrackletFeaturePipelineOutput(
             selection=selection,
@@ -962,3 +1222,36 @@ class TrackletFeaturePipelineProcessor:
             semantic_embeddings=semantic_embeddings,
             aggregated=aggregated,
         )
+
+    def _runtime_metadata(self) -> dict[str, object]:
+        return {
+            "stage_parallel_workers": max(1, self.stage_execution.max_workers),
+            "model_runtime": {
+                "static_attribute_extractor": self._model_descriptor(self.static_attribute_extractor),
+                "attribute_embedding_extractor": self._model_descriptor(self.attribute_embedding_extractor),
+                "appearance_attribute_extractor": self._model_descriptor(self.appearance_attribute_extractor),
+                "appearance_embedding_extractor": self._model_descriptor(self.appearance_embedding_extractor),
+                "behavior_analyzer": self._model_descriptor(self.behavior_analyzer),
+                "semantic_embedder": self._model_descriptor(self.semantic_embedder),
+            },
+        }
+
+    @staticmethod
+    def _model_descriptor(model: object) -> dict[str, object]:
+        class_name = type(model).__name__
+        placeholder_classes = {
+            "NullStaticAttributeExtractor",
+        }
+        approximate_classes = {
+            "RuleBasedStaticAttributeExtractor",
+            "ColorAppearanceAttributeExtractor",
+            "VisualAttributeEmbeddingExtractor",
+            "VisualAppearanceEmbeddingExtractor",
+            "HeuristicBehaviorAnalyzer",
+            "ActionVocabularyEmbedder",
+        }
+        return {
+            "class_name": class_name,
+            "placeholder": class_name in placeholder_classes,
+            "approximate": class_name in approximate_classes,
+        }

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 import json
+import os
 from pathlib import Path
 
 import cv2
@@ -14,6 +17,13 @@ from .tracklet_feature_pipeline import (
     TrackletFeaturePipelineProcessor,
     TrackletFrameObservation,
 )
+
+
+def _default_tracklet_worker_count() -> int:
+    configured = os.getenv("MCPT_METADATA_WORKERS", "").strip()
+    if configured.isdigit():
+        return max(1, int(configured))
+    return max(1, min((os.cpu_count() or 1), 8))
 
 
 @dataclass(frozen=True)
@@ -35,6 +45,7 @@ class FrameDetection:
     bbox: BoundingBox
     confidence: float
     laplacian_score: float
+    crop_bgr: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,7 @@ class TrackletObservation:
     bbox: BoundingBox
     confidence: float
     laplacian_score: float
+    crop_bgr: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,7 @@ class TrackletQualityResult:
     average_confidence: float
     average_laplacian: float
     frame_count: int
+    duration_seconds: float
     rejection_reason: str | None
 
 
@@ -174,6 +187,7 @@ class HogPersonDetector:
                         bbox=bbox,
                         confidence=max(0.0, min(confidence / 2.0, 1.0)),
                         laplacian_score=frame.laplacian_score,
+                        crop_bgr=self._crop_from_bbox(frame.image, bbox),
                     )
                 )
 
@@ -203,9 +217,22 @@ class HogPersonDetector:
                     bbox=bbox,
                     confidence=0.51,
                     laplacian_score=frame.laplacian_score,
+                    crop_bgr=HogPersonDetector._crop_from_bbox(frame.image, bbox),
                 )
             )
         return detections
+
+    @staticmethod
+    def _crop_from_bbox(image: np.ndarray, bbox: BoundingBox) -> np.ndarray | None:
+        h, w = image.shape[:2]
+        x1 = max(0, min(bbox.x1, w))
+        x2 = max(0, min(bbox.x2, w))
+        y1 = max(0, min(bbox.y1, h))
+        y2 = max(0, min(bbox.y2, h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        crop = image[y1:y2, x1:x2]
+        return crop.copy() if crop.size > 0 else None
 
 
 @dataclass
@@ -268,6 +295,7 @@ class GreedyIoUTracker:
                     bbox=detection.bbox,
                     confidence=detection.confidence,
                     laplacian_score=detection.laplacian_score,
+                    crop_bgr=detection.crop_bgr,
                 )
                 active_tracks.setdefault(best_track_id, []).append(observation)
                 active_last_bbox[best_track_id] = detection.bbox
@@ -323,14 +351,14 @@ class TrackletQualityScorer:
             duration_seconds = max(tracklet.observations[-1].timestamp_second - tracklet.observations[0].timestamp_second, 0.0)
 
         if frame_count < self.minimum_frame_count:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, "insufficient_frames")
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "insufficient_frames")
         if duration_seconds < self.minimum_duration_seconds:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, "short_tracklet")
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "short_tracklet")
         if average_confidence < self.minimum_confidence_score:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, "low_confidence")
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "low_confidence")
         if average_laplacian < self.minimum_average_laplacian:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, "blurry_tracklet")
-        return TrackletQualityResult(True, average_confidence, average_laplacian, frame_count, None)
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "blurry_tracklet")
+        return TrackletQualityResult(True, average_confidence, average_laplacian, frame_count, duration_seconds, None)
 
 
 @dataclass
@@ -338,6 +366,7 @@ class LocalMetadataAssembler:
     """Convert accepted tracklets into the unified metadata payload."""
 
     feature_pipeline: TrackletFeaturePipelineProcessor = field(default_factory=TrackletFeaturePipelineProcessor)
+    tracklet_worker_count: int = field(default_factory=_default_tracklet_worker_count)
 
     def build_people(
         self,
@@ -348,60 +377,109 @@ class LocalMetadataAssembler:
         quality_results: dict[str, TrackletQualityResult],
         sampled_fps: int,
     ) -> list[dict[str, object]]:
-        people: list[dict[str, object]] = []
-        for tracklet in tracklets:
-            quality = quality_results.get(tracklet.track_id)
-            if quality is None or not quality.accepted:
-                continue
+        accepted_tracklets = [
+            (tracklet, quality_results[tracklet.track_id])
+            for tracklet in tracklets
+            if tracklet.track_id in quality_results and quality_results[tracklet.track_id].accepted
+        ]
+        if not accepted_tracklets:
+            return []
 
-            payload = TrackletFeatureInput(
+        worker_count = max(1, min(self.tracklet_worker_count, len(accepted_tracklets)))
+        if worker_count == 1:
+            return [
+                self._build_person_metadata(
+                    video_id=video_id,
+                    camera_id=camera_id,
+                    tracklet=tracklet,
+                    quality=quality,
+                    sampled_fps=sampled_fps,
+                )
+                for tracklet, quality in accepted_tracklets
+            ]
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            build_person = partial(
+                self._build_person_metadata_from_item,
                 video_id=video_id,
-                object_id=tracklet.track_id,
+                camera_id=camera_id,
                 sampled_fps=sampled_fps,
-                frames=tuple(
-                    TrackletFrameObservation(
-                        frame_index=item.frame_index,
-                        timestamp_second=item.timestamp_second,
-                        bbox=item.bbox,
-                        detection_confidence=item.confidence,
-                        laplacian_score=item.laplacian_score,
-                    )
+            )
+            return list(
+                executor.map(build_person, accepted_tracklets)
+            )
+
+    def _build_person_metadata_from_item(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        item: tuple[LocalTracklet, TrackletQualityResult],
+        sampled_fps: int,
+    ) -> dict[str, object]:
+        tracklet, quality = item
+        return self._build_person_metadata(
+            video_id=video_id,
+            camera_id=camera_id,
+            tracklet=tracklet,
+            quality=quality,
+            sampled_fps=sampled_fps,
+        )
+
+    def _build_person_metadata(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        tracklet: LocalTracklet,
+        quality: TrackletQualityResult,
+        sampled_fps: int,
+    ) -> dict[str, object]:
+        payload = TrackletFeatureInput(
+            video_id=video_id,
+            object_id=tracklet.track_id,
+            sampled_fps=sampled_fps,
+            frames=tuple(
+                TrackletFrameObservation(
+                    frame_index=item.frame_index,
+                    timestamp_second=item.timestamp_second,
+                    bbox=item.bbox,
+                    detection_confidence=item.confidence,
+                    laplacian_score=item.laplacian_score,
+                    crop_bgr=item.crop_bgr,
+                )
+                for item in tracklet.observations
+            ),
+        )
+        feature_output = self.feature_pipeline.process(payload)
+        aggregated_metadata = feature_output.aggregated.to_metadata()
+        candidate_id = f"{video_id}:{tracklet.track_id}"
+        aggregated_metadata.update(
+            {
+                "candidate_id": candidate_id,
+                "camera_id": camera_id,
+                "video_id": video_id,
+                "track_id": tracklet.track_id,
+                "human_key": f"{camera_id or video_id}:{tracklet.track_id}",
+                "tracklet_frames": [
+                    {
+                        "frame_idx": item.frame_index,
+                        "timestamp_second": item.timestamp_second,
+                        "bbox": item.bbox.to_xyxy(),
+                        "confidence": item.confidence,
+                    }
                     for item in tracklet.observations
-                ),
-            )
-            feature_output = self.feature_pipeline.process(payload)
-            aggregated_metadata = feature_output.aggregated.to_metadata()
-            candidate_id = f"{video_id}:{tracklet.track_id}"
-            aggregated_metadata.update(
-                {
-                    "candidate_id": candidate_id,
-                    "camera_id": camera_id,
-                    "video_id": video_id,
-                    "track_id": tracklet.track_id,
-                    "human_key": f"{camera_id or video_id}:{tracklet.track_id}",
-                    "tracklet_frames": [
-                        {
-                            "frame_idx": item.frame_index,
-                            "timestamp_second": item.timestamp_second,
-                            "bbox": item.bbox.to_xyxy(),
-                            "confidence": item.confidence,
-                        }
-                        for item in tracklet.observations
-                    ],
-                    "tracklet_quality": {
-                        "accepted": quality.accepted,
-                        "average_confidence": quality.average_confidence,
-                        "average_laplacian": quality.average_laplacian,
-                        "frame_count": quality.frame_count,
-                        "duration_seconds": round(
-                            max(tracklet.observations[-1].timestamp_second - tracklet.observations[0].timestamp_second, 0.0),
-                            6,
-                        ) if len(tracklet.observations) >= 2 else 0.0,
-                    },
-                }
-            )
-            people.append(aggregated_metadata)
-        return people
+                ],
+                "tracklet_quality": {
+                    "accepted": quality.accepted,
+                    "average_confidence": quality.average_confidence,
+                    "average_laplacian": quality.average_laplacian,
+                    "frame_count": quality.frame_count,
+                    "duration_seconds": round(quality.duration_seconds, 6),
+                },
+            }
+        )
+        return aggregated_metadata
 
 
 @dataclass
