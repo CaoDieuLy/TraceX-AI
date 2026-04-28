@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from sqlalchemy import text
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
@@ -69,6 +70,7 @@ from .service import (
 )
 
 app = FastAPI(title="MCPT Metadata Service", version="2.0.0")
+LOGGER = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
@@ -76,6 +78,7 @@ def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     session = SessionLocal()
     try:
+        # Keep auth/schema compatibility changes even if queue sync fails later.
         session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'USER'"))
         session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"))
         session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ NULL"))
@@ -88,9 +91,12 @@ def on_startup() -> None:
             password=settings.bootstrap_admin_password,
             full_name=settings.bootstrap_admin_full_name,
         )
+        session.commit()
         sync_local_queue_state(session, only_if_empty=True)
+        session.commit()
     except Exception:
         session.rollback()
+        LOGGER.exception("Metadata service startup initialization failed")
     finally:
         session.close()
 

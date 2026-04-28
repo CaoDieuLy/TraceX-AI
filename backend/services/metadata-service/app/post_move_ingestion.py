@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -13,13 +14,23 @@ if TYPE_CHECKING:
 STORAGE_INGEST_SOURCE_MODE = "storage_ingest"
 
 
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw_value = str(os.getenv(name, "") or "").strip()
+    if not raw_value:
+        return default
+    try:
+        return max(int(raw_value), minimum)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class DecodeSamplingPolicy:
     """Fixed decode/sampling contract for post-move storage ingestion."""
 
     container_suffix: str = ".mp4"
     codec: str = "h265"
-    sample_fps: int = 5
+    sample_fps: int = field(default_factory=lambda: _env_int("STORAGE_INGEST_SAMPLE_FPS", 5))
     keep_container_as_mp4: bool = True
 
     def to_metadata(self) -> dict[str, Any]:

@@ -235,6 +235,13 @@ class VideoIngestionRuntime:
         if source_path.suffix.lower() in INGESTION_VIDEO_SUFFIXES:
             output_name = self._normalize_output_name(source_path, output_basename)
             target_path = target_video_dir / output_name
+            if (
+                settings.ingestion_reuse_downloaded_mp4
+                and source_path.parent == self.default_source_dir
+                and target_video_dir == self.default_video_dir
+                and target_path.name == source_path.name
+            ):
+                return source_path
             if source_path.resolve() != target_path.resolve():
                 shutil.copy2(source_path, target_path)
             return target_path
@@ -289,7 +296,7 @@ class VideoIngestionRuntime:
             metadata.get("ingestion_contract", {})
             .get("decode_sampling", {})
             .get("sample_fps")
-            or 5
+            or settings.ingestion_default_sample_fps
         )
         pipeline_runner = LocalVideoIngestionPipeline(sample_fps=sample_fps)
         output = pipeline_runner.run(

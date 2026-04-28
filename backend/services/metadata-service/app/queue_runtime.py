@@ -342,17 +342,15 @@ class QueueSyncService:
         """Send one storage/camera/date MP4 to tracking and persist local queue artifacts."""
 
         task = self.storage_request_factory.build(item)
-
-        # For Drive-sourced items: pass the public download URL so the tracking
-        # service (LightningAI) can download directly from Drive without
-        # requiring OAuth credentials on that host.
+        source_path = task.source_path
+        source_drive_file_id = task.source_drive_file_id
         source_url: str | None = None
-        if task.source_path is None and task.source_drive_file_id:
-            source_url = self._drive_public_download_url(task.source_drive_file_id)
+        if source_path is None and source_drive_file_id:
+            source_url = self._drive_public_download_url(source_drive_file_id)
 
         result = self._request_tracking_processing(
-            source_path=task.source_path,
-            source_drive_file_id=task.source_drive_file_id,
+            source_path=source_path,
+            source_drive_file_id=source_drive_file_id,
             source_url=source_url,
             source_filename=task.source_filename,
             camera_id=task.camera_id,
@@ -361,6 +359,7 @@ class QueueSyncService:
             source_mode=task.source_mode,
             metadata_extra=task.metadata,
         )
+
         processed = self.storage_result_assembler.assemble(item, result, task.source_mode)
         return {
             "result": processed.result,

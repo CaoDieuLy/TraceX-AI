@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     ffmpeg_preset: str = "medium"
     ffmpeg_audio_codec: str = "aac"
     ffmpeg_overwrite_output: bool = False
+    ingestion_default_sample_fps: int = 5
+    ingestion_reuse_downloaded_mp4: bool = True
 
     lightning_api_base_url: str = ""
     lightning_api_endpoint: str = "/api/v1/ai/worker"
