@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import logging
 import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 
 from .config import settings
 from .cuda_runtime import configure_torch_runtime
 from .execution_plan import resolve_execution_plan
 from .local_ingestion_pipeline import LocalVideoIngestionPipeline
 from .strict_pipeline import get_strict_pipeline
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _dict_or_empty(value: object) -> dict:
@@ -94,14 +98,30 @@ class VideoIngestionRuntime:
     @staticmethod
     def _download_public_url(url: str, target_path: Path) -> None:
         """Download from a public HTTP URL with Google Drive large-file redirect handling."""
+        if not str(url or "").strip():
+            raise ValueError("source_url is required for ingestion download")
+
         import requests as _req
         session = _req.Session()
         resp = session.get(url, stream=True, timeout=300)
+        LOGGER.info(
+            "Ingestion download started url_host=%s status=%s content_type=%s filename=%s",
+            urlparse(str(resp.url)).netloc,
+            resp.status_code,
+            resp.headers.get("content-type"),
+            target_path.name,
+        )
         # Google Drive shows a virus-scan warning for files > 25 MB
         for key, value in resp.cookies.items():
             if key.startswith("download_warning"):
                 separator = "&" if "?" in url else "?"
                 resp = session.get(f"{url}{separator}confirm={value}", stream=True, timeout=300)
+                LOGGER.info(
+                    "Followed Google Drive download_warning cookie for %s; status=%s content_type=%s",
+                    target_path.name,
+                    resp.status_code,
+                    resp.headers.get("content-type"),
+                )
                 break
         if "text/html" in str(resp.headers.get("content-type") or "").lower():
             parser = _GoogleDriveDownloadFormParser()
@@ -110,12 +130,37 @@ class VideoIngestionRuntime:
                 download_url = f"{urljoin(resp.url, parser.action)}?{urlencode(parser.inputs)}"
                 resp.close()
                 resp = session.get(download_url, stream=True, timeout=300)
+                LOGGER.info(
+                    "Followed Google Drive download form for %s; status=%s content_type=%s",
+                    target_path.name,
+                    resp.status_code,
+                    resp.headers.get("content-type"),
+                )
+            else:
+                preview = str(resp.text or "")[:500].replace("\n", " ")
+                raise RuntimeError(
+                    "Google Drive returned an HTML download page without a usable download form. "
+                    f"Preview: {preview}"
+                )
         resp.raise_for_status()
+        content_type = str(resp.headers.get("content-type") or "").lower()
+        if "text/html" in content_type:
+            preview = str(resp.text or "")[:500].replace("\n", " ")
+            raise RuntimeError(
+                "Google Drive returned HTML instead of video content after confirmation. "
+                f"Content-Type: {content_type}. Preview: {preview}"
+            )
+
         target_path.parent.mkdir(parents=True, exist_ok=True)
+        bytes_written = 0
         with target_path.open("wb") as fh:
             for chunk in resp.iter_content(chunk_size=1 << 17):  # 128 KB
                 if chunk:
                     fh.write(chunk)
+                    bytes_written += len(chunk)
+        if bytes_written <= 0:
+            raise RuntimeError(f"Downloaded empty source video: {target_path.name}")
+        LOGGER.info("Ingestion download completed filename=%s bytes=%s", target_path.name, bytes_written)
 
     def _resolve_source(
         self,
@@ -176,6 +221,12 @@ class VideoIngestionRuntime:
         metadata: dict | None = None,
     ) -> dict:
         metadata = _dict_or_empty(metadata)
+        LOGGER.info(
+            "Video ingestion started source_filename=%s camera_id=%s output_basename=%s",
+            source_filename,
+            camera_id,
+            output_basename,
+        )
         pipeline, detected_hardware, execution_plan = self._resolve_pipeline(metadata)
         self._apply_execution_environment(execution_plan)
         configure_torch_runtime(
@@ -221,4 +272,11 @@ class VideoIngestionRuntime:
             host_cpu_count=int(execution_plan.get("hardware", {}).get("host_cpu_count") or detected_hardware.get("host_cpu_count") or 1),
         )
 
+        LOGGER.info(
+            "Video ingestion completed source_filename=%s camera_id=%s people=%s metadata=%s",
+            source_filename,
+            camera_id,
+            response.get("person_count"),
+            response.get("metadata_path"),
+        )
         return response

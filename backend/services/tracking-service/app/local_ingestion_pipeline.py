@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -17,6 +18,9 @@ from .tracklet_feature_pipeline import (
     TrackletFeaturePipelineProcessor,
     TrackletFrameObservation,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _default_tracklet_worker_count() -> int:
@@ -800,15 +804,25 @@ class LocalVideoIngestionPipeline:
         recorded_start: datetime | None,
         metadata: dict[str, object],
     ) -> LocalIngestionOutput:
+        LOGGER.info("Local ingestion sampling started source=%s sample_fps=%s", source_path, self.sample_fps)
         sampled_frames = self.sampler.sample(source_path)
+        LOGGER.info("Local ingestion sampling completed frames=%s source=%s", len(sampled_frames), source_path)
+
+        LOGGER.info("Local ingestion detection started frames=%s", len(sampled_frames))
         detections_by_frame = self.detector.detect(sampled_frames)
+        detection_count = sum(len(items) for items in detections_by_frame.values())
+        LOGGER.info("Local ingestion detection completed detections=%s", detection_count)
+
         video_id = compressed_path.name
+        LOGGER.info("Local ingestion tracking started video_id=%s", video_id)
         tracklets = self.tracker.track(
             video_id=video_id,
             camera_id=camera_id,
             detections_by_frame=detections_by_frame,
         )
+        LOGGER.info("Local ingestion tracking completed tracklets=%s", len(tracklets))
         quality_results = {tracklet.track_id: self.quality_scorer.score(tracklet) for tracklet in tracklets}
+        LOGGER.info("Local ingestion metadata assembly started accepted_tracklets=%s", sum(1 for result in quality_results.values() if result.accepted))
         people = self.metadata_assembler.build_people(
             video_id=video_id,
             camera_id=camera_id,
@@ -816,6 +830,7 @@ class LocalVideoIngestionPipeline:
             quality_results=quality_results,
             sampled_fps=self.sample_fps,
         )
+        LOGGER.info("Local ingestion metadata assembly completed people=%s", len(people))
         processed_at = datetime.now(timezone.utc).replace(microsecond=0)
         video_payload: dict[str, object] = {
             "video_id": video_id,
@@ -838,6 +853,7 @@ class LocalVideoIngestionPipeline:
             json.dumps({"video": video_payload, "people": people}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        LOGGER.info("Local ingestion metadata written path=%s", metadata_path)
         return LocalIngestionOutput(
             video=video_payload,
             people=people,

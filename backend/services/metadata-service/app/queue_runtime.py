@@ -267,10 +267,31 @@ class QueueSyncService:
         }
         endpoint = f"{endpoint_root}/api/v1/ingestion/process"
         headers = self._build_tracking_headers()
+        LOGGER.info(
+            "Requesting tracking ingestion source_filename=%s camera_id=%s endpoint=%s",
+            source_filename,
+            camera_id,
+            endpoint,
+        )
         with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
             response = client.post(endpoint, json=payload, headers=headers or None)
+            if response.is_error:
+                LOGGER.error(
+                    "Tracking ingestion failed source_filename=%s camera_id=%s status=%s body=%s",
+                    source_filename,
+                    camera_id,
+                    response.status_code,
+                    response.text[:2000],
+                )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            LOGGER.info(
+                "Tracking ingestion completed source_filename=%s camera_id=%s people=%s",
+                source_filename,
+                camera_id,
+                data.get("person_count"),
+            )
+            return data
 
     @staticmethod
     def _drive_public_download_url(file_id: str) -> str:

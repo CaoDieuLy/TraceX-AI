@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -27,6 +28,8 @@ from .service import (
     run_tracking,
     search_candidates_remote,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
 
@@ -105,7 +108,25 @@ def tracking_run(payload: TrackingRequest) -> dict:
 
 @app.post("/api/v1/ingestion/process", response_model=VideoIngestionResponse)
 def ingestion_process(payload: VideoIngestionRequest) -> dict:
-    return process_video_ingestion(payload.model_dump())
+    try:
+        return process_video_ingestion(payload.model_dump())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Video ingestion failed for source_filename=%s camera_id=%s",
+            payload.source_filename,
+            payload.camera_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": type(exc).__name__,
+                "message": str(exc),
+                "source_filename": payload.source_filename,
+                "camera_id": payload.camera_id,
+            },
+        ) from exc
 
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)
