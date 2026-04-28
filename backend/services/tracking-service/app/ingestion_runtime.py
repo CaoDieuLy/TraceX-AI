@@ -138,11 +138,31 @@ class VideoIngestionRuntime:
             "download_link": str(created.get("webContentLink") or self._drive_download_link(file_id)),
         }
 
+    @staticmethod
+    def _download_public_url(url: str, target_path: Path) -> None:
+        """Download from a public HTTP URL with Google Drive large-file redirect handling."""
+        import requests as _req
+        session = _req.Session()
+        resp = session.get(url, stream=True, timeout=300)
+        # Google Drive shows a virus-scan warning for files > 25 MB
+        for key, value in resp.cookies.items():
+            if key.startswith("download_warning"):
+                separator = "&" if "?" in url else "?"
+                resp = session.get(f"{url}{separator}confirm={value}", stream=True, timeout=300)
+                break
+        resp.raise_for_status()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with target_path.open("wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 17):  # 128 KB
+                if chunk:
+                    fh.write(chunk)
+
     def _resolve_source(
         self,
         *,
         source_path: str | None,
         source_drive_file_id: str | None,
+        source_url: str | None = None,
         source_filename: str | None,
     ) -> Path:
         if source_path:
@@ -150,12 +170,18 @@ class VideoIngestionRuntime:
             if not resolved_source.exists():
                 raise FileNotFoundError(f"Missing source video: {resolved_source}")
             return resolved_source
+        if source_url:
+            filename = Path(source_filename or "video.mp4").name
+            target_path = self.default_source_dir / filename
+            self._download_public_url(source_url, target_path)
+            return target_path
         if source_drive_file_id:
+            # Fallback: try Drive API (requires OAuth token on this host).
             filename = Path(source_filename or f"{source_drive_file_id}.mp4").name
             target_path = self.default_source_dir / filename
             self._download_drive_file(source_drive_file_id, target_path)
             return target_path
-        raise ValueError("Provide either source_path or source_drive_file_id")
+        raise ValueError("Provide source_path, source_url, or source_drive_file_id")
 
     @staticmethod
     def _normalize_output_name(source_path: Path, output_basename: str | None) -> str:
@@ -190,6 +216,7 @@ class VideoIngestionRuntime:
         *,
         source_path: str | None,
         source_drive_file_id: str | None = None,
+        source_url: str | None = None,
         source_filename: str | None = None,
         camera_id: str | None = None,
         recorded_start: datetime | None = None,
@@ -213,6 +240,7 @@ class VideoIngestionRuntime:
         resolved_source_path = self._resolve_source(
             source_path=source_path,
             source_drive_file_id=source_drive_file_id,
+            source_url=source_url,
             source_filename=source_filename,
         )
         output_video_root = Path(output_video_dir) if output_video_dir else self.default_video_dir

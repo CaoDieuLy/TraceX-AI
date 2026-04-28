@@ -48,6 +48,7 @@ class AiProcessResponse(BaseModel):
 class VideoIngestionRequest(BaseModel):
     source_path: str | None = None
     source_drive_file_id: str | None = None
+    source_url: str | None = None  # public HTTP(S) URL — no credentials needed
     source_filename: str | None = None
     camera_id: str | None = None
     recorded_start: datetime | None = None

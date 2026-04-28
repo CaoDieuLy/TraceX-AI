@@ -965,6 +965,7 @@ def process_video_ingestion(payload: dict) -> dict:
     return runtime.process_video(
         source_path=str(payload.get("source_path") or "").strip() or None,
         source_drive_file_id=str(payload.get("source_drive_file_id") or "").strip() or None,
+        source_url=str(payload.get("source_url") or "").strip() or None,
         source_filename=str(payload.get("source_filename") or "").strip() or None,
         camera_id=payload.get("camera_id"),
         recorded_start=payload.get("recorded_start"),

@@ -241,6 +241,7 @@ class QueueSyncService:
         *,
         source_path: Path | None = None,
         source_drive_file_id: str | None = None,
+        source_url: str | None = None,
         source_filename: str | None = None,
         camera_id: str | None,
         recorded_start: datetime | None,
@@ -273,6 +274,7 @@ class QueueSyncService:
         payload = {
             "source_path": str(source_path) if source_path is not None else None,
             "source_drive_file_id": source_drive_file_id,
+            "source_url": source_url,
             "source_filename": source_filename,
             "camera_id": camera_id,
             "recorded_start": recorded_start.isoformat() if recorded_start else None,
@@ -326,13 +328,31 @@ class QueueSyncService:
                 response.raise_for_status()
                 return response.json()
 
+    @staticmethod
+    def _drive_public_download_url(file_id: str) -> str:
+        """Return the public direct-download URL for a Google Drive file.
+
+        Works when the file is shared as 'Anyone with the link can view'.
+        The query parameter confirm=t bypasses the large-file virus-scan page.
+        """
+        return f"https://drive.google.com/uc?id={file_id}&export=download&confirm=t"
+
     def _process_storage_video_item(self, item: StorageVideoItem) -> dict:
         """Send one storage/camera/date MP4 to tracking and persist local queue artifacts."""
 
         task = self.storage_request_factory.build(item)
+
+        # For Drive-sourced items: pass the public download URL so the tracking
+        # service (LightningAI) can download directly from Drive without
+        # requiring OAuth credentials on that host.
+        source_url: str | None = None
+        if task.source_path is None and task.source_drive_file_id:
+            source_url = self._drive_public_download_url(task.source_drive_file_id)
+
         result = self._request_tracking_processing(
             source_path=task.source_path,
             source_drive_file_id=task.source_drive_file_id,
+            source_url=source_url,
             source_filename=task.source_filename,
             camera_id=task.camera_id,
             recorded_start=task.recorded_at,
