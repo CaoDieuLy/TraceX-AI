@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
 import os
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urljoin
 
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
@@ -21,6 +23,29 @@ def _dict_or_empty(value: object) -> dict:
 
 
 INGESTION_VIDEO_SUFFIXES = {".mp4"}
+
+
+class _GoogleDriveDownloadFormParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.action: str | None = None
+        self.inputs: dict[str, str] = {}
+        self._in_download_form = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key: value or "" for key, value in attrs}
+        if tag == "form" and values.get("id") == "download-form":
+            self._in_download_form = True
+            self.action = values.get("action") or None
+            return
+        if tag == "input" and self._in_download_form:
+            name = values.get("name")
+            if name:
+                self.inputs[name] = values.get("value", "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form" and self._in_download_form:
+            self._in_download_form = False
 
 _HERE = Path(__file__).resolve()
 for candidate in [Path(os.getenv("A20_ROOT", "")).expanduser() if os.getenv("A20_ROOT", "").strip() else None, Path("/workspace/a20-root"), *_HERE.parents]:
@@ -150,6 +175,13 @@ class VideoIngestionRuntime:
                 separator = "&" if "?" in url else "?"
                 resp = session.get(f"{url}{separator}confirm={value}", stream=True, timeout=300)
                 break
+        if "text/html" in str(resp.headers.get("content-type") or "").lower():
+            parser = _GoogleDriveDownloadFormParser()
+            parser.feed(resp.text)
+            if parser.action and parser.inputs:
+                download_url = f"{urljoin(resp.url, parser.action)}?{urlencode(parser.inputs)}"
+                resp.close()
+                resp = session.get(download_url, stream=True, timeout=300)
         resp.raise_for_status()
         target_path.parent.mkdir(parents=True, exist_ok=True)
         with target_path.open("wb") as fh:

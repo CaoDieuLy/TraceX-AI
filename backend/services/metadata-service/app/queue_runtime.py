@@ -253,8 +253,9 @@ class QueueSyncService:
         metadata_extra: dict | None = None,
     ) -> dict:
         endpoint_root = settings.tracking_service_url.rstrip("/")
+        remote_endpoint = self._is_remote_endpoint(endpoint_root)
 
-        if source_path is not None and self._is_remote_endpoint(endpoint_root):
+        if source_path is not None and remote_endpoint:
             return self._request_tracking_processing_upload(
                 source_path=source_path,
                 source_filename=source_filename or source_path.name,
@@ -278,8 +279,8 @@ class QueueSyncService:
             "source_filename": source_filename,
             "camera_id": camera_id,
             "recorded_start": recorded_start.isoformat() if recorded_start else None,
-            "output_video_dir": str(self.local_queue_video_dir) if not upload_outputs_to_drive else None,
-            "output_metadata_dir": str(self.local_queue_metadata_dir) if not upload_outputs_to_drive else None,
+            "output_video_dir": str(self.local_queue_video_dir) if not upload_outputs_to_drive and not remote_endpoint else None,
+            "output_metadata_dir": str(self.local_queue_metadata_dir) if not upload_outputs_to_drive and not remote_endpoint else None,
             "output_basename": output_basename,
             "destination_video_folder_id": destination_video_folder_id,
             "destination_metadata_folder_id": destination_metadata_folder_id,
