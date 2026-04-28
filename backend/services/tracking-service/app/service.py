@@ -755,19 +755,19 @@ def search_candidates_remote(query_text: str, candidates: list[dict], limit: int
 
 
 def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> Path:
-    runtime = get_ingestion_runtime()
     source_root = _artifact_root() / artifact_id / "sources"
     source_root.mkdir(parents=True, exist_ok=True)
 
     drive_file_id = str(candidate.get("drive_video_file_id") or "").strip()
     if drive_file_id:
+        public_url = f"https://drive.google.com/uc?id={drive_file_id}&export=download&confirm=t"
         filename = Path(
             str(candidate.get("source_filename") or candidate.get("video_title") or candidate.get("candidate_id") or drive_file_id)
         ).name
         if not Path(filename).suffix:
             filename = f"{filename}.mp4"
         target_path = source_root / filename
-        runtime._download_drive_file(drive_file_id, target_path)
+        _download_file(public_url, str(target_path))
         return target_path
 
     for key in ("available_link_video", "storage_path", "local_video_path"):
@@ -963,17 +963,12 @@ def run_tracking(candidate_info: dict) -> dict:
 def process_video_ingestion(payload: dict) -> dict:
     runtime = get_ingestion_runtime()
     return runtime.process_video(
-        source_path=str(payload.get("source_path") or "").strip() or None,
-        source_drive_file_id=str(payload.get("source_drive_file_id") or "").strip() or None,
-        source_url=str(payload.get("source_url") or "").strip() or None,
+        source_url=str(payload.get("source_url") or "").strip(),
         source_filename=str(payload.get("source_filename") or "").strip() or None,
         camera_id=payload.get("camera_id"),
         recorded_start=payload.get("recorded_start"),
         output_video_dir=payload.get("output_video_dir"),
         output_metadata_dir=payload.get("output_metadata_dir"),
         output_basename=payload.get("output_basename"),
-        destination_video_folder_id=payload.get("destination_video_folder_id"),
-        destination_metadata_folder_id=payload.get("destination_metadata_folder_id"),
-        upload_outputs_to_drive=bool(payload.get("upload_outputs_to_drive")),
         metadata=_dict_or_empty(payload.get("metadata")),
     )

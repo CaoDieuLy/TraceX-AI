@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -239,65 +238,7 @@ class QueueSyncService:
     def _request_tracking_processing(
         self,
         *,
-        source_path: Path | None = None,
-        source_drive_file_id: str | None = None,
-        source_url: str | None = None,
-        source_filename: str | None = None,
-        camera_id: str | None,
-        recorded_start: datetime | None,
-        output_basename: str | None,
-        source_mode: str,
-        upload_outputs_to_drive: bool = False,
-        destination_video_folder_id: str | None = None,
-        destination_metadata_folder_id: str | None = None,
-        metadata_extra: dict | None = None,
-    ) -> dict:
-        endpoint_root = settings.tracking_service_url.rstrip("/")
-        remote_endpoint = self._is_remote_endpoint(endpoint_root)
-
-        if source_path is not None and remote_endpoint:
-            return self._request_tracking_processing_upload(
-                source_path=source_path,
-                source_filename=source_filename or source_path.name,
-                camera_id=camera_id,
-                recorded_start=recorded_start,
-                output_basename=output_basename,
-                source_mode=source_mode,
-                metadata_extra=metadata_extra,
-            )
-
-        ingestion_metadata = {
-            "source_mode": source_mode,
-        }
-        if isinstance(metadata_extra, dict):
-            ingestion_metadata.update(metadata_extra)
-
-        payload = {
-            "source_path": str(source_path) if source_path is not None else None,
-            "source_drive_file_id": source_drive_file_id,
-            "source_url": source_url,
-            "source_filename": source_filename,
-            "camera_id": camera_id,
-            "recorded_start": recorded_start.isoformat() if recorded_start else None,
-            "output_video_dir": str(self.local_queue_video_dir) if not upload_outputs_to_drive and not remote_endpoint else None,
-            "output_metadata_dir": str(self.local_queue_metadata_dir) if not upload_outputs_to_drive and not remote_endpoint else None,
-            "output_basename": output_basename,
-            "destination_video_folder_id": destination_video_folder_id,
-            "destination_metadata_folder_id": destination_metadata_folder_id,
-            "upload_outputs_to_drive": upload_outputs_to_drive,
-            "metadata": ingestion_metadata,
-        }
-        endpoint = f"{endpoint_root}/api/v1/ingestion/process"
-        headers = self._build_tracking_headers()
-        with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
-            response = client.post(endpoint, json=payload, headers=headers or None)
-            response.raise_for_status()
-            return response.json()
-
-    def _request_tracking_processing_upload(
-        self,
-        *,
-        source_path: Path,
+        source_url: str,
         source_filename: str,
         camera_id: str | None,
         recorded_start: datetime | None,
@@ -306,8 +247,7 @@ class QueueSyncService:
         metadata_extra: dict | None = None,
     ) -> dict:
         endpoint_root = settings.tracking_service_url.rstrip("/")
-        endpoint = f"{endpoint_root}/api/v1/ingestion/upload"
-        headers = self._build_tracking_headers()
+        remote_endpoint = self._is_remote_endpoint(endpoint_root)
 
         ingestion_metadata = {
             "source_mode": source_mode,
@@ -315,19 +255,22 @@ class QueueSyncService:
         if isinstance(metadata_extra, dict):
             ingestion_metadata.update(metadata_extra)
 
-        data = {
+        payload = {
+            "source_url": source_url,
             "source_filename": source_filename,
-            "camera_id": camera_id or "",
-            "recorded_start": recorded_start.isoformat() if recorded_start else "",
-            "output_basename": output_basename or "",
-            "metadata": json.dumps(ingestion_metadata),
+            "camera_id": camera_id,
+            "recorded_start": recorded_start.isoformat() if recorded_start else None,
+            "output_video_dir": str(self.local_queue_video_dir) if not remote_endpoint else None,
+            "output_metadata_dir": str(self.local_queue_metadata_dir) if not remote_endpoint else None,
+            "output_basename": output_basename,
+            "metadata": ingestion_metadata,
         }
-        with source_path.open("rb") as handle:
-            files = {"file": (source_filename, handle, self._video_media_type(source_filename))}
-            with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
-                response = client.post(endpoint, data=data, files=files, headers=headers or None)
-                response.raise_for_status()
-                return response.json()
+        endpoint = f"{endpoint_root}/api/v1/ingestion/process"
+        headers = self._build_tracking_headers()
+        with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
+            response = client.post(endpoint, json=payload, headers=headers or None)
+            response.raise_for_status()
+            return response.json()
 
     @staticmethod
     def _drive_public_download_url(file_id: str) -> str:
@@ -342,15 +285,15 @@ class QueueSyncService:
         """Send one storage/camera/date MP4 to tracking and persist local queue artifacts."""
 
         task = self.storage_request_factory.build(item)
-        source_path = task.source_path
         source_drive_file_id = task.source_drive_file_id
-        source_url: str | None = None
-        if source_path is None and source_drive_file_id:
-            source_url = self._drive_public_download_url(source_drive_file_id)
+        if not source_drive_file_id:
+            raise ValueError(
+                f"Storage ingest requires a Google Drive file id for direct source_url delivery. "
+                f"Got none for {task.source_filename}."
+            )
+        source_url = self._drive_public_download_url(source_drive_file_id)
 
         result = self._request_tracking_processing(
-            source_path=source_path,
-            source_drive_file_id=source_drive_file_id,
             source_url=source_url,
             source_filename=task.source_filename,
             camera_id=task.camera_id,

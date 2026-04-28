@@ -1,5 +1,4 @@
 import json
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -107,47 +106,6 @@ def tracking_run(payload: TrackingRequest) -> dict:
 @app.post("/api/v1/ingestion/process", response_model=VideoIngestionResponse)
 def ingestion_process(payload: VideoIngestionRequest) -> dict:
     return process_video_ingestion(payload.model_dump())
-
-
-@app.post("/api/v1/ingestion/upload", response_model=VideoIngestionResponse)
-async def ingestion_upload(
-    file: UploadFile = File(...),
-    source_filename: str | None = Form(default=None),
-    camera_id: str | None = Form(default=None),
-    recorded_start: str | None = Form(default=None),
-    output_basename: str | None = Form(default=None),
-    metadata: str | None = Form(default=None),
-) -> dict:
-    upload_root = Path(settings.ingestion_work_root) / "uploaded-ingestion-inputs"
-    upload_root.mkdir(parents=True, exist_ok=True)
-    filename = source_filename or file.filename or "upload.mp4"
-    local_input_path = upload_root / filename
-    local_input_path.write_bytes(await file.read())
-
-    parsed_recorded_start = None
-    if recorded_start:
-        normalized = recorded_start.strip().replace("Z", "+00:00")
-        parsed_recorded_start = datetime.fromisoformat(normalized)
-
-    parsed_metadata = {}
-    if metadata:
-        try:
-            payload = json.loads(metadata)
-        except ValueError:
-            payload = {}
-        if isinstance(payload, dict):
-            parsed_metadata = payload
-
-    return process_video_ingestion(
-        {
-            "source_path": str(local_input_path),
-            "source_filename": filename,
-            "camera_id": camera_id,
-            "recorded_start": parsed_recorded_start,
-            "output_basename": output_basename,
-            "metadata": parsed_metadata,
-        }
-    )
 
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)

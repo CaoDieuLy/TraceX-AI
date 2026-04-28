@@ -46,18 +46,13 @@ class AiProcessResponse(BaseModel):
 
 
 class VideoIngestionRequest(BaseModel):
-    source_path: str | None = None
-    source_drive_file_id: str | None = None
-    source_url: str | None = None  # public HTTP(S) URL — no credentials needed
+    source_url: str
     source_filename: str | None = None
     camera_id: str | None = None
     recorded_start: datetime | None = None
     output_video_dir: str | None = None
     output_metadata_dir: str | None = None
     output_basename: str | None = None
-    destination_video_folder_id: str | None = None
-    destination_metadata_folder_id: str | None = None
-    upload_outputs_to_drive: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

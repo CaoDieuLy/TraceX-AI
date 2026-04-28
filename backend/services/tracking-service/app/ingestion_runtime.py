@@ -3,13 +3,10 @@ from __future__ import annotations
 from html.parser import HTMLParser
 import os
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urljoin
-
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from .config import settings
 from .cuda_runtime import configure_torch_runtime
@@ -47,15 +44,6 @@ class _GoogleDriveDownloadFormParser(HTMLParser):
         if tag == "form" and self._in_download_form:
             self._in_download_form = False
 
-_HERE = Path(__file__).resolve()
-for candidate in [Path(os.getenv("A20_ROOT", "")).expanduser() if os.getenv("A20_ROOT", "").strip() else None, Path("/workspace/a20-root"), *_HERE.parents]:
-    if candidate and (candidate / "shared_secret_runtime.py").exists():
-        if str(candidate) not in sys.path:
-            sys.path.insert(0, str(candidate))
-        break
-
-from shared_secret_runtime import build_google_drive_oauth_service  # noqa: E402
-
 
 class VideoIngestionRuntime:
     def __init__(self) -> None:
@@ -66,7 +54,6 @@ class VideoIngestionRuntime:
         self.default_video_dir.mkdir(parents=True, exist_ok=True)
         self.default_metadata_dir.mkdir(parents=True, exist_ok=True)
         self.default_source_dir.mkdir(parents=True, exist_ok=True)
-        self._drive_service = None
 
     @staticmethod
     def _apply_execution_environment(execution_plan: dict) -> None:
@@ -104,65 +91,6 @@ class VideoIngestionRuntime:
         detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
         return pipeline, detected_hardware, execution_plan
 
-    def _build_drive_service(self):
-        if not settings.google_drive_enabled:
-            raise RuntimeError("Google Drive support is disabled on tracking-service.")
-        if self._drive_service is not None:
-            return self._drive_service
-        self._drive_service = build_google_drive_oauth_service()
-        return self._drive_service
-
-    @staticmethod
-    def _drive_view_link(file_id: str) -> str:
-        return f"https://drive.google.com/file/d/{file_id}/view"
-
-    @staticmethod
-    def _drive_download_link(file_id: str) -> str:
-        return f"https://drive.google.com/uc?id={file_id}&export=download"
-
-    def _ensure_public_read(self, file_id: str) -> None:
-        if not settings.google_drive_make_public:
-            return
-        service = self._build_drive_service()
-        try:
-            service.permissions().create(
-                fileId=file_id,
-                body={"type": "anyone", "role": "reader"},
-                fields="id",
-                supportsAllDrives=True,
-            ).execute()
-        except Exception:
-            pass
-
-    def _download_drive_file(self, file_id: str, target_path: Path) -> None:
-        service = self._build_drive_service()
-        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        import io
-        with target_path.open("wb") as handle:
-            fh = io.FileIO(handle.name, mode='wb')
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                _status, done = downloader.next_chunk()
-
-    def _upload_to_drive(self, local_path: Path, parent_id: str, mime_type: str) -> dict[str, str]:
-        service = self._build_drive_service()
-        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
-        created = service.files().create(
-            body={"name": local_path.name, "parents": [parent_id]},
-            media_body=media,
-            fields="id, webViewLink, webContentLink",
-            supportsAllDrives=True,
-        ).execute()
-        file_id = str(created["id"])
-        self._ensure_public_read(file_id)
-        return {
-            "file_id": file_id,
-            "view_link": str(created.get("webViewLink") or self._drive_view_link(file_id)),
-            "download_link": str(created.get("webContentLink") or self._drive_download_link(file_id)),
-        }
-
     @staticmethod
     def _download_public_url(url: str, target_path: Path) -> None:
         """Download from a public HTTP URL with Google Drive large-file redirect handling."""
@@ -192,28 +120,13 @@ class VideoIngestionRuntime:
     def _resolve_source(
         self,
         *,
-        source_path: str | None,
-        source_drive_file_id: str | None,
-        source_url: str | None = None,
+        source_url: str,
         source_filename: str | None,
     ) -> Path:
-        if source_path:
-            resolved_source = Path(source_path)
-            if not resolved_source.exists():
-                raise FileNotFoundError(f"Missing source video: {resolved_source}")
-            return resolved_source
-        if source_url:
-            filename = Path(source_filename or "video.mp4").name
-            target_path = self.default_source_dir / filename
-            self._download_public_url(source_url, target_path)
-            return target_path
-        if source_drive_file_id:
-            # Fallback: try Drive API (requires OAuth token on this host).
-            filename = Path(source_filename or f"{source_drive_file_id}.mp4").name
-            target_path = self.default_source_dir / filename
-            self._download_drive_file(source_drive_file_id, target_path)
-            return target_path
-        raise ValueError("Provide source_path, source_url, or source_drive_file_id")
+        filename = Path(source_filename or "video.mp4").name
+        target_path = self.default_source_dir / filename
+        self._download_public_url(source_url, target_path)
+        return target_path
 
     @staticmethod
     def _normalize_output_name(source_path: Path, output_basename: str | None) -> str:
@@ -253,18 +166,13 @@ class VideoIngestionRuntime:
     def process_video(
         self,
         *,
-        source_path: str | None,
-        source_drive_file_id: str | None = None,
-        source_url: str | None = None,
+        source_url: str,
         source_filename: str | None = None,
         camera_id: str | None = None,
         recorded_start: datetime | None = None,
         output_video_dir: str | None = None,
         output_metadata_dir: str | None = None,
         output_basename: str | None = None,
-        destination_video_folder_id: str | None = None,
-        destination_metadata_folder_id: str | None = None,
-        upload_outputs_to_drive: bool = False,
         metadata: dict | None = None,
     ) -> dict:
         metadata = _dict_or_empty(metadata)
@@ -277,8 +185,6 @@ class VideoIngestionRuntime:
         )
 
         resolved_source_path = self._resolve_source(
-            source_path=source_path,
-            source_drive_file_id=source_drive_file_id,
             source_url=source_url,
             source_filename=source_filename,
         )
@@ -314,13 +220,5 @@ class VideoIngestionRuntime:
             cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
             host_cpu_count=int(execution_plan.get("hardware", {}).get("host_cpu_count") or detected_hardware.get("host_cpu_count") or 1),
         )
-
-        if upload_outputs_to_drive and destination_video_folder_id and destination_metadata_folder_id:
-            uploaded_video = self._upload_to_drive(compressed_path, destination_video_folder_id, "video/mp4")
-            uploaded_metadata = self._upload_to_drive(metadata_path, destination_metadata_folder_id, "application/json")
-            response["drive_video_file_id"] = uploaded_video["file_id"]
-            response["drive_metadata_file_id"] = uploaded_metadata["file_id"]
-            response["drive_video_link"] = uploaded_video["view_link"]
-            response["drive_metadata_link"] = uploaded_metadata["view_link"]
 
         return response
