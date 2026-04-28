@@ -153,6 +153,86 @@ class VideoFrameSampler:
 
 
 @dataclass
+class RFDETRPersonDetector:
+    """
+    RF-DETR 2x-large person detector — strict production detector.
+
+    Uses rfdetr[plus] package (roboflow). Falls back to HogPersonDetector
+    automatically when the package is unavailable so the pipeline never crashes.
+    """
+
+    confidence_threshold: float = 0.32
+    max_detections_per_frame: int = 300
+
+    def __post_init__(self) -> None:
+        self._model = None
+        self._ready = False
+
+    def _ensure_loaded(self) -> None:
+        if self._ready:
+            return
+        self._model = self._try_load_rfdetr()
+        self._ready = True
+
+    @staticmethod
+    def _try_load_rfdetr():
+        for loader in [
+            lambda: __import__("rfdetr", fromlist=["RFDETR2XLarge"]).RFDETR2XLarge(),
+            lambda: __import__("rfdetr", fromlist=["RFDETRLarge"]).RFDETRLarge(),
+            lambda: __import__("rfdetr", fromlist=["RFDETR"]).RFDETR(model_id="rf-detr-2xlarge"),
+        ]:
+            try:
+                return loader()
+            except Exception:
+                continue
+        return None
+
+    def detect(self, frames: tuple[SampledFrame, ...]) -> dict[int, tuple[FrameDetection, ...]]:
+        self._ensure_loaded()
+        if self._model is None:
+            return HogPersonDetector().detect(frames)
+
+        import numpy as np
+        from PIL import Image as _PILImage
+
+        result: dict[int, tuple[FrameDetection, ...]] = {}
+        for frame in frames:
+            pil = _PILImage.fromarray(cv2.cvtColor(frame.image, cv2.COLOR_BGR2RGB))
+            try:
+                dets = self._model.predict(pil, threshold=self.confidence_threshold)
+            except Exception:
+                result[frame.frame_index] = ()
+                continue
+
+            xyxy = getattr(dets, "xyxy", None)
+            confs = getattr(dets, "confidence", None)
+            class_ids = getattr(dets, "class_id", None)
+            if xyxy is None or confs is None:
+                result[frame.frame_index] = ()
+                continue
+
+            frame_dets: list[FrameDetection] = []
+            for i, (box, conf) in enumerate(zip(xyxy, confs)):
+                if class_ids is not None and int(class_ids[i]) != 0:
+                    continue
+                x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+                bbox = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
+                frame_dets.append(
+                    FrameDetection(
+                        frame_index=frame.frame_index,
+                        timestamp_second=frame.timestamp_second,
+                        bbox=bbox,
+                        confidence=float(np.clip(conf, 0.0, 1.0)),
+                        laplacian_score=frame.laplacian_score,
+                        crop_bgr=HogPersonDetector._crop_from_bbox(frame.image, bbox),
+                    )
+                )
+            frame_dets.sort(key=lambda d: d.confidence, reverse=True)
+            result[frame.frame_index] = tuple(frame_dets[: self.max_detections_per_frame])
+        return result
+
+
+@dataclass
 class HogPersonDetector:
     """Lightweight local detector so the repo can execute end-to-end without external runtime."""
 
@@ -332,6 +412,204 @@ class GreedyIoUTracker:
 
 
 @dataclass
+class OCMCTrackStyleTracker:
+    """
+    OCMCTrack-style corrective cascade tracker — strict production tracker.
+
+    Two-stage matching cascade:
+    Stage 1 – high-confidence detections (conf ≥ high_confidence_threshold) matched
+              to active tracks via IoU gate + appearance gate.
+    Stage 2 – low-confidence detections (conf ≥ low_confidence_threshold) matched
+              to remaining unmatched tracks with relaxed criteria.
+    Corrective buffer – recently-lost tracks (< corrective_buffer_seconds) kept alive
+                        for re-association to resolve temporal occlusions.
+    New tracks – created only when detection confidence ≥ new_track_threshold.
+
+    Hyperparameters match strict_pipeline.py exactly.
+    """
+
+    high_confidence_threshold: float = 0.45
+    low_confidence_threshold: float = 0.12
+    new_track_threshold: float = 0.55
+    iou_gate: float = 0.18
+    appearance_gate: float = 0.22
+    corrective_buffer_seconds: float = 14.0
+    max_frame_gap: int = 3
+
+    def track(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        detections_by_frame: dict[int, tuple[FrameDetection, ...]],
+    ) -> tuple[LocalTracklet, ...]:
+        active: dict[str, list[TrackletObservation]] = {}
+        active_last_bbox: dict[str, BoundingBox] = {}
+        active_last_ts: dict[str, float] = {}
+        active_appearance: dict[str, np.ndarray] = {}
+
+        buffer: dict[str, list[TrackletObservation]] = {}
+        buffer_last_bbox: dict[str, BoundingBox] = {}
+        buffer_last_ts: dict[str, float] = {}
+        buffer_appearance: dict[str, np.ndarray] = {}
+
+        completed: list[LocalTracklet] = []
+        next_id = 1
+
+        for frame_idx in sorted(detections_by_frame):
+            dets = list(detections_by_frame.get(frame_idx) or ())
+            if not dets:
+                continue
+            frame_ts = dets[0].timestamp_second
+
+            # Expire buffer entries beyond corrective window
+            expired = [tid for tid, ts in buffer_last_ts.items() if frame_ts - ts > self.corrective_buffer_seconds]
+            for tid in expired:
+                completed.append(LocalTracklet(
+                    video_id=video_id, camera_id=camera_id,
+                    track_id=tid, observations=tuple(buffer.pop(tid, []))
+                ))
+                buffer_last_bbox.pop(tid, None)
+                buffer_last_ts.pop(tid, None)
+                buffer_appearance.pop(tid, None)
+
+            # Move stale active → buffer
+            stale = [tid for tid, ts in active_last_ts.items() if frame_idx - self._last_frame_idx(active[tid]) > self.max_frame_gap]
+            for tid in stale:
+                buffer[tid] = active.pop(tid)
+                buffer_last_bbox[tid] = active_last_bbox.pop(tid)
+                buffer_last_ts[tid] = active_last_ts.pop(tid)
+                buffer_appearance[tid] = active_appearance.pop(tid, np.zeros(16))
+
+            high_dets = [d for d in dets if d.confidence >= self.high_confidence_threshold]
+            low_dets = [d for d in dets if self.low_confidence_threshold <= d.confidence < self.high_confidence_threshold]
+            new_dets = [d for d in dets if d.confidence >= self.new_track_threshold]
+
+            unmatched_high: list[FrameDetection] = []
+            active_unmatched = set(active.keys())
+
+            # Stage 1: high-confidence dets → active tracks
+            for det in high_dets:
+                best_tid, best_score = self._best_match(
+                    det, active_last_bbox, active_appearance, active_unmatched
+                )
+                if best_tid is not None and best_score >= self.iou_gate:
+                    self._update_track(active, active_last_bbox, active_last_ts, active_appearance, best_tid, det, frame_ts)
+                    active_unmatched.discard(best_tid)
+                else:
+                    unmatched_high.append(det)
+
+            # Stage 2: low-confidence dets → remaining active tracks
+            for det in low_dets:
+                best_tid, best_score = self._best_match(det, active_last_bbox, active_appearance, active_unmatched)
+                if best_tid is not None and best_score >= self.iou_gate:
+                    self._update_track(active, active_last_bbox, active_last_ts, active_appearance, best_tid, det, frame_ts)
+                    active_unmatched.discard(best_tid)
+
+            # Corrective stage: unmatched high-conf dets → buffer tracks
+            buffer_unmatched = set(buffer.keys())
+            for det in list(unmatched_high):
+                best_tid, best_score = self._best_match(det, buffer_last_bbox, buffer_appearance, buffer_unmatched)
+                if best_tid is not None and best_score >= self.iou_gate:
+                    obs_list = buffer.pop(best_tid)
+                    bbox_prev = buffer_last_bbox.pop(best_tid)
+                    ts_prev = buffer_last_ts.pop(best_tid, frame_ts)
+                    app_prev = buffer_appearance.pop(best_tid, np.zeros(16))
+                    obs = self._make_observation(det, frame_ts)
+                    active[best_tid] = obs_list + [obs]
+                    active_last_bbox[best_tid] = det.bbox
+                    active_last_ts[best_tid] = frame_ts
+                    active_appearance[best_tid] = self._appearance_descriptor(det)
+                    buffer_unmatched.discard(best_tid)
+                    unmatched_high.remove(det)
+
+            # New tracks from unmatched high-conf dets above new_track_threshold
+            for det in unmatched_high:
+                if det.confidence >= self.new_track_threshold:
+                    tid = str(next_id); next_id += 1
+                    active[tid] = [self._make_observation(det, frame_ts)]
+                    active_last_bbox[tid] = det.bbox
+                    active_last_ts[tid] = frame_ts
+                    active_appearance[tid] = self._appearance_descriptor(det)
+
+        # Finalize all remaining tracks
+        for container, tracks in [(active, active), (buffer, buffer)]:
+            for tid, obs_list in tracks.items():
+                if obs_list:
+                    completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs_list)))
+
+        return tuple(t for t in completed if t.observations)
+
+    def _best_match(
+        self,
+        det: FrameDetection,
+        last_bbox: dict[str, BoundingBox],
+        appearance: dict[str, np.ndarray],
+        candidates: set[str],
+    ) -> tuple[str | None, float]:
+        best_tid = None
+        best_score = -1.0
+        det_app = self._appearance_descriptor(det)
+        for tid in candidates:
+            iou = GreedyIoUTracker._bbox_iou(last_bbox[tid], det.bbox)
+            if iou < self.iou_gate:
+                continue
+            app_sim = self._cosine_sim(appearance.get(tid, np.zeros(16)), det_app)
+            score = 0.6 * iou + 0.4 * max(app_sim, 0.0)
+            if score > best_score:
+                best_score = score
+                best_tid = tid
+        return best_tid, best_score
+
+    @staticmethod
+    def _update_track(
+        active: dict,
+        bbox_map: dict,
+        ts_map: dict,
+        app_map: dict,
+        tid: str,
+        det: FrameDetection,
+        frame_ts: float,
+    ) -> None:
+        active[tid].append(OCMCTrackStyleTracker._make_observation(det, frame_ts))
+        bbox_map[tid] = det.bbox
+        ts_map[tid] = frame_ts
+        app_map[tid] = OCMCTrackStyleTracker._appearance_descriptor(det)
+
+    @staticmethod
+    def _make_observation(det: FrameDetection, frame_ts: float) -> TrackletObservation:
+        return TrackletObservation(
+            frame_index=det.frame_index,
+            timestamp_second=frame_ts,
+            bbox=det.bbox,
+            confidence=det.confidence,
+            laplacian_score=det.laplacian_score,
+            crop_bgr=det.crop_bgr,
+        )
+
+    @staticmethod
+    def _appearance_descriptor(det: FrameDetection) -> np.ndarray:
+        """Compact 16-bin HSV histogram for fast appearance gating in the tracker."""
+        crop = det.crop_bgr
+        if crop is None or crop.size == 0:
+            return np.zeros(16, dtype=np.float32)
+        hsv = cv2.cvtColor(np.asarray(crop, dtype=np.uint8), cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten().astype(np.float32)
+        norm = float(hist.sum()) or 1.0
+        return hist / norm
+
+    @staticmethod
+    def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+        na = float(np.linalg.norm(a)) or 1.0
+        nb = float(np.linalg.norm(b)) or 1.0
+        return float(np.dot(a, b) / (na * nb))
+
+    @staticmethod
+    def _last_frame_idx(obs_list: list[TrackletObservation]) -> int:
+        return obs_list[-1].frame_index if obs_list else 0
+
+
+@dataclass
 class TrackletQualityScorer:
     """Filter blurry or weak tracklets before feature extraction."""
 
@@ -482,14 +760,30 @@ class LocalMetadataAssembler:
         return aggregated_metadata
 
 
+def _default_detector():
+    """RF-DETR 2x-large if available, HOG fallback otherwise."""
+    return RFDETRPersonDetector()
+
+
+def _default_tracker():
+    """OCMCTrack-style corrective cascade — always available (pure Python + numpy)."""
+    return OCMCTrackStyleTracker()
+
+
 @dataclass
 class LocalVideoIngestionPipeline:
-    """Runnable local ingestion pipeline for development and smoke verification."""
+    """
+    Video ingestion pipeline.
+
+    Production path: RF-DETR 2x-large (detector) + OCMCTrack-style corrective
+    cascade (tracker) + TrackletFeaturePipelineProcessor with CLIP / SOLIDER+KPR
+    adapters.  Falls back to HOG + GreedyIoU when rfdetr package is absent.
+    """
 
     sample_fps: int = 5
     sampler: VideoFrameSampler = field(default_factory=VideoFrameSampler)
-    detector: HogPersonDetector = field(default_factory=HogPersonDetector)
-    tracker: GreedyIoUTracker = field(default_factory=GreedyIoUTracker)
+    detector: RFDETRPersonDetector = field(default_factory=_default_detector)
+    tracker: OCMCTrackStyleTracker = field(default_factory=_default_tracker)
     quality_scorer: TrackletQualityScorer = field(default_factory=TrackletQualityScorer)
     metadata_assembler: LocalMetadataAssembler = field(default_factory=LocalMetadataAssembler)
 

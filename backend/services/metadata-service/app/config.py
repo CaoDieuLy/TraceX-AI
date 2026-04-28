@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     queue_download_workers: int = 4
     storage_ingest_enabled: bool = True
     storage_ingest_root: str = str(PROJECT_ROOT / "storage")
+    storage_ingest_source_backend: str = "filesystem"
     storage_ingest_batch_size: int = 50
     storage_ingest_min_file_age_seconds: int = 2
     storage_ingest_processed_dir_name: str = "ProcessedStorage"
@@ -118,6 +119,8 @@ class Settings(BaseSettings):
     google_drive_root_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_name: str = "VinUni"
+    google_drive_source_storage_folder_id: str = ""
+    google_drive_source_storage_folder_name: str = "Storage"
     google_drive_queue_folder_name: str = "Storage"
     google_drive_metadata_folder_name: str = "Metadata"
     google_drive_make_public: bool = True

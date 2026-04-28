@@ -178,8 +178,13 @@ def build_google_drive_oauth_credentials():
         credentials = pickle.load(handle)
     if getattr(credentials, "expired", False):
         credentials.refresh(google.auth.transport.requests.Request())
-        with token_path.open("wb") as handle:
-            pickle.dump(credentials, handle)
+        try:
+            with token_path.open("wb") as handle:
+                pickle.dump(credentials, handle)
+        except OSError:
+            # Secrets volume may be read-only (container mount :ro).
+            # Token is refreshed in memory and valid for this session.
+            pass
     return credentials
 
 

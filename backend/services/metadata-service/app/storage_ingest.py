@@ -60,8 +60,10 @@ class StorageVideoIdentity:
 class StorageVideoItem:
     """Input contract for one storage video that can be sent to ingestion."""
 
-    source_path: Path
+    source_path: Path | None
+    source_drive_file_id: str | None
     relative_path: str
+    source_filename: str
     camera_id: str
     recorded_at: datetime
     size_bytes: int
@@ -69,16 +71,12 @@ class StorageVideoItem:
     fingerprint: str
 
     @property
-    def source_filename(self) -> str:
-        return self.source_path.name
-
-    @property
     def output_basename(self) -> str:
-        return self.source_path.name
+        return self.source_filename
 
     def marker_payload(self) -> dict:
         payload = asdict(self)
-        payload["source_path"] = str(self.source_path)
+        payload["source_path"] = str(self.source_path) if self.source_path is not None else None
         payload["recorded_at"] = self.recorded_at.isoformat()
         return payload
 
@@ -175,7 +173,9 @@ class StorageVideoScanner:
             items.append(
                 StorageVideoItem(
                     source_path=source_path,
+                    source_drive_file_id=None,
                     relative_path=relative_path,
+                    source_filename=source_path.name,
                     camera_id=identity.camera_id,
                     recorded_at=identity.recorded_at,
                     size_bytes=int(stat.st_size),

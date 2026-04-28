@@ -1136,6 +1136,46 @@ class TrackletFeaturePipelineOutput:
     aggregated: TrackletFeatureAggregationOutput
 
 
+def _default_static_attribute_extractor():
+    try:
+        from model_adapters import ZeroShotAttributeAdapter
+        return ZeroShotAttributeAdapter()
+    except Exception:
+        return RuleBasedStaticAttributeExtractor()
+
+
+def _default_attribute_embedding_extractor():
+    try:
+        from model_adapters import CLIPAttributeEmbeddingAdapter
+        return CLIPAttributeEmbeddingAdapter()
+    except Exception:
+        return VisualAttributeEmbeddingExtractor()
+
+
+def _default_appearance_attribute_extractor():
+    try:
+        from model_adapters import ZeroShotAppearanceMetadataAdapter
+        return ZeroShotAppearanceMetadataAdapter()
+    except Exception:
+        return ColorAppearanceAttributeExtractor()
+
+
+def _default_appearance_embedding_extractor():
+    try:
+        from model_adapters import SoliderKPRAppearanceEmbeddingAdapter
+        return SoliderKPRAppearanceEmbeddingAdapter()
+    except Exception:
+        return VisualAppearanceEmbeddingExtractor()
+
+
+def _default_semantic_embedder():
+    try:
+        from model_adapters import ItselfSemanticEmbedder
+        return ItselfSemanticEmbedder()
+    except Exception:
+        return ActionVocabularyEmbedder()
+
+
 @dataclass
 class TrackletFeaturePipelineProcessor:
     """
@@ -1143,22 +1183,30 @@ class TrackletFeaturePipelineProcessor:
 
     Stage order:
     1. frame selection
-    2. static attribute extraction
-    3. appearance extraction
+    2. static attribute extraction   (CLIP zero-shot / heuristic fallback)
+    3. appearance extraction          (CLIP zero-shot / heuristic fallback)
     4. action clip building
     5. action / behavior analysis
-    6. action semantic embedding
+    6. action semantic embedding      (CLIP text / vocab fallback)
     7. feature aggregation
     """
 
     selector: HybridFrameSelector = field(default_factory=HybridFrameSelector)
-    static_attribute_extractor: StaticAttributeExtractor = field(default_factory=RuleBasedStaticAttributeExtractor)
-    attribute_embedding_extractor: AttributeEmbeddingExtractor = field(default_factory=VisualAttributeEmbeddingExtractor)
-    appearance_attribute_extractor: AppearanceAttributeExtractor = field(default_factory=ColorAppearanceAttributeExtractor)
-    appearance_embedding_extractor: AppearanceEmbeddingExtractor = field(default_factory=VisualAppearanceEmbeddingExtractor)
+    static_attribute_extractor: StaticAttributeExtractor = field(
+        default_factory=_default_static_attribute_extractor
+    )
+    attribute_embedding_extractor: AttributeEmbeddingExtractor = field(
+        default_factory=_default_attribute_embedding_extractor
+    )
+    appearance_attribute_extractor: AppearanceAttributeExtractor = field(
+        default_factory=_default_appearance_attribute_extractor
+    )
+    appearance_embedding_extractor: AppearanceEmbeddingExtractor = field(
+        default_factory=_default_appearance_embedding_extractor
+    )
     clip_builder: ActionClipBuilder = field(default_factory=ActionClipBuilder)
     behavior_analyzer: ActionBehaviorAnalyzer = field(default_factory=HeuristicBehaviorAnalyzer)
-    semantic_embedder: ActionSemanticEmbedder = field(default_factory=ActionVocabularyEmbedder)
+    semantic_embedder: ActionSemanticEmbedder = field(default_factory=_default_semantic_embedder)
     aggregator: TrackletFeatureAggregator = field(default_factory=TrackletFeatureAggregator)
     stage_execution: TrackletStageExecutionConfig = field(default_factory=TrackletStageExecutionConfig)
 
@@ -1250,8 +1298,16 @@ class TrackletFeaturePipelineProcessor:
             "HeuristicBehaviorAnalyzer",
             "ActionVocabularyEmbedder",
         }
+        production_classes = {
+            "ZeroShotAttributeAdapter",
+            "ZeroShotAppearanceMetadataAdapter",
+            "SoliderKPRAppearanceEmbeddingAdapter",
+            "CLIPAttributeEmbeddingAdapter",
+            "ItselfSemanticEmbedder",
+        }
         return {
             "class_name": class_name,
             "placeholder": class_name in placeholder_classes,
             "approximate": class_name in approximate_classes,
+            "production": class_name in production_classes,
         }

@@ -71,6 +71,7 @@ class Settings(BaseSettings):
 
     # Camera calibration for 3D world projection
     camera_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "camera_calibration.json")
+    world_projection_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "world_projection_calibration.json")
 
     # PostgreSQL
     postgres_host: str = "localhost"
@@ -141,3 +142,7 @@ settings.video_conversion_output_dir = _normalize_runtime_path(settings.video_co
 settings.video_download_output_dir = _normalize_runtime_path(settings.video_download_output_dir, "storage/tracking-outputs")
 settings.tracking_artifact_root = _normalize_runtime_path(settings.tracking_artifact_root, "storage/tracking-artifacts")
 settings.camera_calibration_path = _normalize_runtime_path(settings.camera_calibration_path, "backend/config/camera_calibration.json")
+settings.world_projection_calibration_path = _normalize_runtime_path(
+    settings.world_projection_calibration_path,
+    "backend/config/world_projection_calibration.json",
+)

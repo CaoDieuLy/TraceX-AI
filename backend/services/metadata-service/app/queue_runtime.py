@@ -20,6 +20,7 @@ from .post_move_ingestion import (
     StorageTrackingRequestFactory,
     StorageTrackingResultAssembler,
 )
+from .drive_storage_ingest import DriveStorageVideoScanner
 from .service import (
     delete_queue_video_asset,
     get_queue_video_rows,
@@ -125,6 +126,27 @@ class QueueSyncService:
         )
         rows = self._query_single(query, fields="id, name")
         return rows[0] if rows else None
+
+    def resolve_drive_source_storage_folder_id(self) -> str:
+        configured_id = str(settings.google_drive_source_storage_folder_id or "").strip()
+        if configured_id:
+            return configured_id
+
+        vinuni_folder_id = (settings.google_drive_vinuni_folder_id or "").strip()
+        root_folder_id = (settings.google_drive_root_folder_id or "").strip()
+        if not vinuni_folder_id and not root_folder_id:
+            raise RuntimeError(
+                "Set GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID or GOOGLE_DRIVE_VINUNI_FOLDER_ID/GOOGLE_DRIVE_ROOT_FOLDER_ID "
+                "to enable Drive-backed storage ingestion."
+            )
+
+        vinuni_id = vinuni_folder_id or self._ensure_folder(root_folder_id, settings.google_drive_vinuni_folder_name)
+        folder = self._find_child_folder(vinuni_id, settings.google_drive_source_storage_folder_name)
+        if folder is None:
+            raise RuntimeError(
+                f"Google Drive source storage folder '{settings.google_drive_source_storage_folder_name}' was not found under VinUni."
+            )
+        return str(folder["id"])
 
     def _ensure_folder(self, parent_id: str, name: str) -> str:
         existing = self._find_child_folder(parent_id, name)
@@ -310,6 +332,8 @@ class QueueSyncService:
         task = self.storage_request_factory.build(item)
         result = self._request_tracking_processing(
             source_path=task.source_path,
+            source_drive_file_id=task.source_drive_file_id,
+            source_filename=task.source_filename,
             camera_id=task.camera_id,
             recorded_start=task.recorded_at,
             output_basename=task.output_basename,
@@ -427,11 +451,19 @@ class QueueSyncService:
             }
 
         registry = StorageIngestRegistry(self.storage_processed_dir)
-        scanner = StorageVideoScanner(
-            storage_root=self.storage_ingest_root,
-            registry=registry,
-            min_file_age_seconds=settings.storage_ingest_min_file_age_seconds,
-        )
+        if str(settings.storage_ingest_source_backend or "filesystem").strip().lower() == "google_drive":
+            scanner = DriveStorageVideoScanner(
+                drive_service=self._build_drive_service(),
+                source_storage_root_id=self.resolve_drive_source_storage_folder_id(),
+                registry=registry,
+                min_file_age_seconds=settings.storage_ingest_min_file_age_seconds,
+            )
+        else:
+            scanner = StorageVideoScanner(
+                storage_root=self.storage_ingest_root,
+                registry=registry,
+                min_file_age_seconds=settings.storage_ingest_min_file_age_seconds,
+            )
         storage_items = scanner.list_pending(limit=settings.storage_ingest_batch_size)
         parallel_jobs = self._parallel_jobs(len(storage_items), settings.queue_parallel_jobs)
 

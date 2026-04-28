@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.\\\\.venv\\\\Scripts\\\\python.exe -X utf8 upload_oauth2.py)",
+      "Bash(python3 -)",
+      "Bash(python _vps_sync_rebuild.py)"
+    ]
+  }
+}

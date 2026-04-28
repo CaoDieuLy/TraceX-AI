@@ -174,7 +174,8 @@ class PostMoveIngestionPolicy:
 class StorageIngestionTask:
     """Typed request payload sent from metadata-service to strict tracking runtime."""
 
-    source_path: Path
+    source_path: Path | None
+    source_drive_file_id: str | None
     source_filename: str
     camera_id: str
     recorded_at: datetime
@@ -202,6 +203,7 @@ class StorageTrackingRequestFactory:
     def build(self, item: "StorageVideoItem") -> StorageIngestionTask:
         return StorageIngestionTask(
             source_path=item.source_path,
+            source_drive_file_id=item.source_drive_file_id,
             source_filename=item.source_filename,
             camera_id=item.camera_id,
             recorded_at=item.recorded_at,
@@ -220,15 +222,17 @@ class StorageTrackingResultAssembler:
     def assemble(self, item: "StorageVideoItem", raw_result: dict[str, Any], source_mode: str) -> ProcessedStorageVideo:
         video_payload = dict(raw_result.get("video") or {})
         people = list(raw_result.get("people") or [])
-        metadata_path = self.metadata_dir / f"{item.source_path.stem}.json"
+        metadata_path = self.metadata_dir / f"{Path(item.source_filename).stem}.json"
+        compressed_path = str(raw_result.get("compressed_path") or item.source_path or "")
 
         video_payload["source_mode"] = source_mode
         video_payload["source_storage_relative_path"] = item.relative_path
-        video_payload["compressed_path"] = str(item.source_path)
+        video_payload["source_drive_file_id"] = item.source_drive_file_id
+        video_payload["compressed_path"] = compressed_path
         video_payload["metadata_path"] = str(metadata_path)
 
         normalized_result = dict(raw_result)
-        normalized_result["compressed_path"] = str(item.source_path)
+        normalized_result["compressed_path"] = compressed_path
         normalized_result["metadata_path"] = str(metadata_path)
         normalized_result["video"] = video_payload
 
