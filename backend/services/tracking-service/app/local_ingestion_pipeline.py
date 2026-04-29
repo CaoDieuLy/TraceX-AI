@@ -110,6 +110,32 @@ class LocalIngestionOutput:
         }
 
 
+def _crop_from_bbox(image: np.ndarray, bbox: BoundingBox) -> np.ndarray | None:
+    """Extract a BGR crop from image at bbox coordinates, clamped to image bounds."""
+    h, w = image.shape[:2]
+    x1 = max(0, min(bbox.x1, w))
+    x2 = max(0, min(bbox.x2, w))
+    y1 = max(0, min(bbox.y1, h))
+    y2 = max(0, min(bbox.y2, h))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = image[y1:y2, x1:x2]
+    return crop.copy() if crop.size > 0 else None
+
+
+def _bbox_iou(lhs: BoundingBox, rhs: BoundingBox) -> float:
+    """Intersection-over-Union for two bounding boxes."""
+    inter_x1 = max(lhs.x1, rhs.x1)
+    inter_y1 = max(lhs.y1, rhs.y1)
+    inter_x2 = min(lhs.x2, rhs.x2)
+    inter_y2 = min(lhs.y2, rhs.y2)
+    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+    if inter_area <= 0:
+        return 0.0
+    union_area = lhs.area + rhs.area - inter_area
+    return float(inter_area / union_area) if union_area > 0 else 0.0
+
+
 @dataclass
 class VideoFrameSampler:
     """Decode video and sample frames at the fixed ingest FPS."""
@@ -158,12 +184,7 @@ class VideoFrameSampler:
 
 @dataclass
 class RFDETRPersonDetector:
-    """
-    RF-DETR 2x-large person detector — strict production detector.
-
-    Uses rfdetr[plus] package (roboflow). Falls back to HogPersonDetector
-    automatically when the package is unavailable so the pipeline never crashes.
-    """
+    """RF-DETR 2x-large person detector — strict production detector (roboflow rfdetr[plus])."""
 
     confidence_threshold: float = 0.32
     max_detections_per_frame: int = 300
@@ -180,7 +201,7 @@ class RFDETRPersonDetector:
 
     @staticmethod
     def _try_load_rfdetr():
-        for loader in [
+        for loader in [  # noqa: RET503
             lambda: __import__("rfdetr", fromlist=["RFDETR2XLarge"]).RFDETR2XLarge(),
             lambda: __import__("rfdetr", fromlist=["RFDETRLarge"]).RFDETRLarge(),
             lambda: __import__("rfdetr", fromlist=["RFDETR"]).RFDETR(model_id="rf-detr-2xlarge"),
@@ -194,7 +215,7 @@ class RFDETRPersonDetector:
     def detect(self, frames: tuple[SampledFrame, ...]) -> dict[int, tuple[FrameDetection, ...]]:
         self._ensure_loaded()
         if self._model is None:
-            return HogPersonDetector().detect(frames)
+            raise RuntimeError("RF-DETR model failed to load. Ensure rfdetr[plus] is installed on the LightningAI GPU machine.")
 
         import numpy as np
         from PIL import Image as _PILImage
@@ -236,191 +257,12 @@ class RFDETRPersonDetector:
                             bbox=bbox,
                             confidence=float(np.clip(conf, 0.0, 1.0)),
                             laplacian_score=frame.laplacian_score,
-                            crop_bgr=HogPersonDetector._crop_from_bbox(frame.image, bbox),
+                            crop_bgr=_crop_from_bbox(frame.image, bbox),
                         )
                     )
                 frame_dets.sort(key=lambda d: d.confidence, reverse=True)
                 result[frame.frame_index] = tuple(frame_dets[: self.max_detections_per_frame])
         return result
-
-
-@dataclass
-class HogPersonDetector:
-    """Lightweight local detector so the repo can execute end-to-end without external runtime."""
-
-    hit_threshold: float = 0.0
-    win_stride: tuple[int, int] = (4, 4)
-    padding: tuple[int, int] = (8, 8)
-    scale: float = 1.05
-    max_detections_per_frame: int = 8
-
-    def __post_init__(self) -> None:
-        self._hog = cv2.HOGDescriptor()
-        self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
-    def detect(self, frames: tuple[SampledFrame, ...]) -> dict[int, tuple[FrameDetection, ...]]:
-        detections_by_frame: dict[int, tuple[FrameDetection, ...]] = {}
-        for frame in frames:
-            rects, weights = self._hog.detectMultiScale(
-                frame.image,
-                hitThreshold=self.hit_threshold,
-                winStride=self.win_stride,
-                padding=self.padding,
-                scale=self.scale,
-            )
-            frame_detections: list[FrameDetection] = []
-            for (x, y, w, h), weight in zip(rects, weights):
-                bbox = BoundingBox(x1=int(x), y1=int(y), x2=int(x + w), y2=int(y + h))
-                confidence = float(weight) if weight is not None else 0.5
-                frame_detections.append(
-                    FrameDetection(
-                        frame_index=frame.frame_index,
-                        timestamp_second=frame.timestamp_second,
-                        bbox=bbox,
-                        confidence=max(0.0, min(confidence / 2.0, 1.0)),
-                        laplacian_score=frame.laplacian_score,
-                        crop_bgr=self._crop_from_bbox(frame.image, bbox),
-                    )
-                )
-
-            if not frame_detections:
-                frame_detections.extend(self._fallback_contour_detections(frame))
-
-            frame_detections.sort(key=lambda item: item.confidence, reverse=True)
-            detections_by_frame[frame.frame_index] = tuple(frame_detections[: self.max_detections_per_frame])
-        return detections_by_frame
-
-    @staticmethod
-    def _fallback_contour_detections(frame: SampledFrame) -> list[FrameDetection]:
-        gray = cv2.cvtColor(frame.image, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 24, 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        detections: list[FrameDetection] = []
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            area = w * h
-            if area < 1200:
-                continue
-            bbox = BoundingBox(x1=int(x), y1=int(y), x2=int(x + w), y2=int(y + h))
-            detections.append(
-                FrameDetection(
-                    frame_index=frame.frame_index,
-                    timestamp_second=frame.timestamp_second,
-                    bbox=bbox,
-                    confidence=0.51,
-                    laplacian_score=frame.laplacian_score,
-                    crop_bgr=HogPersonDetector._crop_from_bbox(frame.image, bbox),
-                )
-            )
-        return detections
-
-    @staticmethod
-    def _crop_from_bbox(image: np.ndarray, bbox: BoundingBox) -> np.ndarray | None:
-        h, w = image.shape[:2]
-        x1 = max(0, min(bbox.x1, w))
-        x2 = max(0, min(bbox.x2, w))
-        y1 = max(0, min(bbox.y1, h))
-        y2 = max(0, min(bbox.y2, h))
-        if x2 <= x1 or y2 <= y1:
-            return None
-        crop = image[y1:y2, x1:x2]
-        return crop.copy() if crop.size > 0 else None
-
-
-@dataclass
-class GreedyIoUTracker:
-    """Simple per-video tracker with greedy IoU assignment."""
-
-    iou_threshold: float = 0.3
-    max_frame_gap: int = 2
-
-    def track(
-        self,
-        *,
-        video_id: str,
-        camera_id: str | None,
-        detections_by_frame: dict[int, tuple[FrameDetection, ...]],
-    ) -> tuple[LocalTracklet, ...]:
-        active_tracks: dict[str, list[TrackletObservation]] = {}
-        active_last_bbox: dict[str, BoundingBox] = {}
-        active_last_frame: dict[str, int] = {}
-        completed_tracks: list[LocalTracklet] = []
-        next_track_id = 1
-
-        for frame_index in sorted(detections_by_frame):
-            detections = list(detections_by_frame.get(frame_index) or ())
-            stale_track_ids = [
-                track_id
-                for track_id, last_frame_index in active_last_frame.items()
-                if frame_index - last_frame_index > self.max_frame_gap
-            ]
-            for track_id in stale_track_ids:
-                completed_tracks.append(
-                    LocalTracklet(
-                        video_id=video_id,
-                        camera_id=camera_id,
-                        track_id=track_id,
-                        observations=tuple(active_tracks.pop(track_id, [])),
-                    )
-                )
-                active_last_bbox.pop(track_id, None)
-                active_last_frame.pop(track_id, None)
-
-            unmatched_tracks = set(active_tracks.keys())
-            for detection in detections:
-                best_track_id = None
-                best_iou = 0.0
-                for track_id in list(unmatched_tracks):
-                    iou_score = self._bbox_iou(active_last_bbox[track_id], detection.bbox)
-                    if iou_score >= self.iou_threshold and iou_score > best_iou:
-                        best_iou = iou_score
-                        best_track_id = track_id
-
-                if best_track_id is None:
-                    best_track_id = str(next_track_id)
-                    next_track_id += 1
-                    active_tracks[best_track_id] = []
-
-                observation = TrackletObservation(
-                    frame_index=detection.frame_index,
-                    timestamp_second=detection.timestamp_second,
-                    bbox=detection.bbox,
-                    confidence=detection.confidence,
-                    laplacian_score=detection.laplacian_score,
-                    crop_bgr=detection.crop_bgr,
-                )
-                active_tracks.setdefault(best_track_id, []).append(observation)
-                active_last_bbox[best_track_id] = detection.bbox
-                active_last_frame[best_track_id] = detection.frame_index
-                unmatched_tracks.discard(best_track_id)
-
-        for track_id, observations in active_tracks.items():
-            completed_tracks.append(
-                LocalTracklet(
-                    video_id=video_id,
-                    camera_id=camera_id,
-                    track_id=track_id,
-                    observations=tuple(observations),
-                )
-            )
-
-        return tuple(track for track in completed_tracks if track.observations)
-
-    @staticmethod
-    def _bbox_iou(lhs: BoundingBox, rhs: BoundingBox) -> float:
-        inter_x1 = max(lhs.x1, rhs.x1)
-        inter_y1 = max(lhs.y1, rhs.y1)
-        inter_x2 = min(lhs.x2, rhs.x2)
-        inter_y2 = min(lhs.y2, rhs.y2)
-        inter_w = max(0, inter_x2 - inter_x1)
-        inter_h = max(0, inter_y2 - inter_y1)
-        inter_area = inter_w * inter_h
-        if inter_area <= 0:
-            return 0.0
-        union_area = lhs.area + rhs.area - inter_area
-        if union_area <= 0:
-            return 0.0
-        return float(inter_area / union_area)
 
 
 @dataclass
@@ -563,7 +405,7 @@ class OCMCTrackStyleTracker:
         best_score = -1.0
         det_app = self._appearance_descriptor(det)
         for tid in candidates:
-            iou = GreedyIoUTracker._bbox_iou(last_bbox[tid], det.bbox)
+            iou = _bbox_iou(last_bbox[tid], det.bbox)
             if iou < self.iou_gate:
                 continue
             app_sim = self._cosine_sim(appearance.get(tid, np.zeros(16)), det_app)
@@ -773,7 +615,7 @@ class LocalMetadataAssembler:
 
 
 def _default_detector():
-    """RF-DETR 2x-large if available, HOG fallback otherwise."""
+    """RF-DETR 2x-large — strict production detector on LightningAI GPU."""
     return RFDETRPersonDetector()
 
 

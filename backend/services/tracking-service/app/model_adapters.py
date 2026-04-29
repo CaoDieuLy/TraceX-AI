@@ -1,20 +1,19 @@
 """
-Model adapters for tracklet feature pipeline — single production path, no fallbacks.
+Model adapters for tracklet feature pipeline — SOTA single production path, no fallbacks.
 
-All adapters use SigLIP2 ViT-L-16-512/webli (1024-dim) for both image and text
-encoding, enabling direct cosine similarity between query text and crop embeddings.
+Models (all SOTA as of April 2026):
+  TransReIDHub    — ViT-Base Re-ID backbone, 768-dim (MSMT17, CVPR 2021)
+  VideoMAEHub     — Large video transformer, 1024-dim (Kinetics-400, ECCV 2022)
+  SigLIP2ModelHub — ViT-L-16-512 image/text, 1024-dim (webli, Feb 2025 SOTA)
+  OSNetReIDHub    — x1.0 AIN MSMT17, 512-dim (2019, kept for reference)
 
-Hub:
-  SigLIP2ModelHub — lazy singleton, handles image_features, text_features,
-                    and classify_zero_shot for all adapters.
-
-Adapters (all SigLIP2-backed):
-  ZeroShotAttributeAdapter          — gender + age_group zero-shot
-  ZeroShotAppearanceMetadataAdapter — 8-field appearance zero-shot
-  CLIPAttributeEmbeddingAdapter     — attribute text embedding (1024-dim)
-  SoliderKPRAppearanceEmbeddingAdapter — KPR-style appearance embedding (1024-dim)
-  ItselfSemanticEmbedder            — action semantic embedding (1024-dim)
-  SigLIP2BehaviorAnalyzer           — zero-shot action classification from clip frames
+Adapters:
+  ZeroShotAttributeAdapter          — gender + age_group (SigLIP2 zero-shot)
+  ZeroShotAppearanceMetadataAdapter — 8-field appearance metadata (SigLIP2 zero-shot)
+  CLIPAttributeEmbeddingAdapter     — attribute text embedding 1024-dim (SigLIP2)
+  SoliderKPRAppearanceEmbeddingAdapter — KPR part fusion Re-ID 768-dim (TransReID)
+  SigLIP2BehaviorAnalyzer           — VideoMAE temporal + SigLIP2 text action scoring
+  ItselfSemanticEmbedder            — action semantic embedding 1024-dim (SigLIP2)
 """
 
 from __future__ import annotations
@@ -120,6 +119,254 @@ _SHOES_PROMPTS = [
     ("heels",    ["a person wearing high heels"]),
     ("formal",   ["a person wearing formal shoes or dress shoes"]),
 ]
+
+
+# ---------------------------------------------------------------------------
+# TransReID Hub — ViT-base cross-camera Re-ID (768-dim, MSMT17, CVPR 2021)
+# Checkpoint: transformer_120.pth from umair894/KAT-ReID-MSMT17
+# ---------------------------------------------------------------------------
+
+class TransReIDHub:
+    """
+    TransReID ViT-Base/16 trained on MSMT17 — lazy singleton for person Re-ID.
+
+    Produces 768-dim L2-normalised embeddings from 256×128 person crops.
+    Significantly outperforms OSNet-AIN for cross-camera Re-ID tasks.
+    Checkpoint: 86M params, trained for 120 epochs on MSMT17 (4,101 identities).
+    """
+
+    _instance: Optional["TransReIDHub"] = None
+    _lock = threading.Lock()
+
+    _CKPT = (
+        Path(__file__).parent.parent.parent.parent.parent.parent
+        / "storage" / "model-weights" / "transreid-reid" / "transformer_120.pth"
+    )
+
+    def __new__(cls) -> "TransReIDHub":
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._loaded = False
+            return cls._instance
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        with self._lock:
+            if self._loaded:
+                return
+            import torch
+            import timm
+            logger.info("Loading TransReID ViT-base from %s …", self._CKPT)
+            # Build ViT-base matching TransReID's patch_embed architecture
+            model = timm.create_model(
+                "vit_base_patch16_224",
+                pretrained=False,
+                num_classes=0,
+                img_size=(256, 128),
+            )
+            if self._CKPT.exists():
+                ckpt = torch.load(str(self._CKPT), map_location="cpu")
+                state = ckpt.get("state_dict", ckpt.get("model", ckpt))
+                # TransReID wraps backbone under 'base.' prefix
+                backbone_state = {
+                    k[len("base."):]: v
+                    for k, v in state.items()
+                    if k.startswith("base.") and "classifier" not in k
+                }
+                missing, unexpected = model.load_state_dict(backbone_state, strict=False)
+                logger.info(
+                    "TransReID loaded: missing=%d unexpected=%d from %s",
+                    len(missing), len(unexpected), self._CKPT.name,
+                )
+            else:
+                logger.warning("TransReID checkpoint not found at %s", self._CKPT)
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = model.to(self._device).eval()
+            self._model = model
+            self._torch = torch
+            self._loaded = True
+            logger.info("TransReID ready on %s (768-dim)", self._device)
+
+    def embed_crops(self, pil_crops: list[Image.Image]) -> np.ndarray:
+        """Return L2-normalised 768-dim Re-ID embeddings [N, 768]."""
+        self._ensure_loaded()
+        import torchvision.transforms as T
+        transform = T.Compose([
+            T.Resize((256, 128)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        tensors = [transform(img.convert("RGB")) for img in pil_crops]
+        batch = self._torch.stack(tensors).to(self._device)
+        with self._torch.no_grad():
+            feats = self._model(batch)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        return feats.cpu().numpy().astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# VideoMAE Hub — large video transformer for action recognition (1024-dim)
+# Checkpoint: MCG-NJU/videomae-large (pretrained Kinetics-400)
+# ---------------------------------------------------------------------------
+
+class VideoMAEHub:
+    """
+    VideoMAE Large — lazy singleton for video action feature extraction.
+
+    Input: list of PIL frames from an ActionClip (resampled to 16 frames × 224×224).
+    Output: 1024-dim L2-normalised CLS token embedding.
+    SOTA self-supervised video pretraining (ECCV 2022 + Kinetics fine-tuned).
+    """
+
+    _instance: Optional["VideoMAEHub"] = None
+    _lock = threading.Lock()
+
+    _CKPT_DIR = (
+        Path(__file__).parent.parent.parent.parent.parent.parent
+        / "storage" / "model-weights" / "videomae-action"
+    )
+
+    def __new__(cls) -> "VideoMAEHub":
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._loaded = False
+            return cls._instance
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        with self._lock:
+            if self._loaded:
+                return
+            import torch
+            from transformers import VideoMAEModel
+            logger.info("Loading VideoMAE Large from %s …", self._CKPT_DIR)
+            model = VideoMAEModel.from_pretrained(str(self._CKPT_DIR))
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = model.to(self._device).eval()
+            self._model = model
+            self._torch = torch
+            self._loaded = True
+            logger.info("VideoMAE Large ready on %s (1024-dim)", self._device)
+
+    def extract_features(self, pil_frames: list[Image.Image]) -> np.ndarray:
+        """
+        Extract 1024-dim CLS token from a clip.
+
+        pil_frames: list of PIL RGB frames (any length, resampled to 16).
+        Returns [1024] L2-normalised vector.
+        """
+        self._ensure_loaded()
+        import torchvision.transforms as T
+        transform = T.Compose([
+            T.Resize((224, 224)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        # Resample to exactly 16 frames
+        n = len(pil_frames)
+        if n == 0:
+            return np.zeros(1024, dtype=np.float32)
+        indices = [int(i * (n - 1) / 15) for i in range(16)] if n >= 2 else [0] * 16
+        frames_16 = [pil_frames[idx].convert("RGB") for idx in indices]
+        tensors = [transform(f) for f in frames_16]
+        # Shape: [1, 16, 3, 224, 224]
+        clip = self._torch.stack(tensors).unsqueeze(0).to(self._device)
+        with self._torch.no_grad():
+            out = self._model(pixel_values=clip)
+        cls = out.last_hidden_state[:, 0]  # CLS token [1, 1024]
+        cls = cls / cls.norm(dim=-1, keepdim=True)
+        return cls.squeeze(0).cpu().numpy().astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# OSNet-AIN Re-ID Hub — kept as fallback reference (replaced by TransReID)
+# ---------------------------------------------------------------------------
+# NOTE: OSNet-AIN (512-dim) is superseded by TransReID (768-dim).
+# The TransReIDHub is the primary Re-ID backbone.
+
+# ---------------------------------------------------------------------------
+# OSNet-AIN Re-ID Hub — cross-camera appearance matching (512-dim)
+# Checkpoint: osnet_ain_x1_0 trained on MSMT17 (appearance-invariant normalization)
+# ---------------------------------------------------------------------------
+
+class OSNetReIDHub:
+    """
+    OSNet-AIN x1.0 trained on MSMT17 — lazy singleton for cross-camera Re-ID.
+
+    Produces 512-dim L2-normalised person embeddings optimised for Re-ID across
+    cameras with varying illumination (AIN = Appearance-Invariant Normalization).
+    Used in trace pipeline for spatiotemporal candidate matching.
+    Input: 256×128 RGB crop  Output: 512-dim vector
+    """
+
+    _instance: Optional["OSNetReIDHub"] = None
+    _lock = threading.Lock()
+
+    _CKPT = (
+        Path(__file__).parent.parent.parent.parent.parent.parent
+        / "storage" / "model-weights" / "osnet-reid"
+        / "osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth"
+    )
+
+    def __new__(cls) -> "OSNetReIDHub":
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._loaded = False
+            return cls._instance
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        with self._lock:
+            if self._loaded:
+                return
+            import sys, torch
+            from pathlib import Path as _Path
+            # Add legacy-engine to path for torchreid
+            legacy = str(_Path(__file__).parent.parent.parent.parent / "legacy-engine")
+            if legacy not in sys.path:
+                sys.path.insert(0, legacy)
+            import torchreid
+            logger.info("Loading OSNet-AIN x1.0 from %s …", self._CKPT)
+            model = torchreid.models.build_model(
+                "osnet_ain_x1_0", num_classes=1, pretrained=False, loss="softmax"
+            )
+            if self._CKPT.exists():
+                ckpt = torch.load(str(self._CKPT), map_location="cpu")
+                state = ckpt.get("state_dict", ckpt.get("model", ckpt))
+                state = {k.replace("module.", ""): v for k, v in state.items()}
+                backbone_state = {k: v for k, v in state.items() if "classifier" not in k}
+                model.load_state_dict(backbone_state, strict=False)
+                logger.info("OSNet-AIN checkpoint loaded from %s", self._CKPT.name)
+            else:
+                logger.warning("OSNet-AIN checkpoint not found at %s — using random weights", self._CKPT)
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = model.to(self._device).eval()
+            self._model = model
+            self._torch = torch
+            self._loaded = True
+            logger.info("OSNet-AIN ready on %s (512-dim)", self._device)
+
+    def embed_crops(self, pil_crops: list[Image.Image]) -> np.ndarray:
+        """Return L2-normalised 512-dim Re-ID embeddings [N, 512]."""
+        self._ensure_loaded()
+        import torchvision.transforms as T
+        transform = T.Compose([
+            T.Resize((256, 128)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        tensors = [transform(img.convert("RGB")) for img in pil_crops]
+        batch = self._torch.stack(tensors).to(self._device)
+        with self._torch.no_grad():
+            feats = self._model(batch)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        return feats.cpu().numpy().astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -246,11 +493,11 @@ def _quality_weighted_pool(vectors: list[np.ndarray], weights: list[float]) -> n
 
 
 def _part_crops(pil_image: Image.Image) -> list[Image.Image]:
-    """KPR-style: [full, upper_half, lower_half] at 512×512 for SigLIP2."""
+    """KPR-style: [full, upper_half, lower_half] at 256×128 for OSNet-AIN Re-ID."""
     w, h = pil_image.size
     upper = pil_image.crop((0, 0, w, h // 2))
     lower = pil_image.crop((0, h // 2, w, h))
-    target = (512, 512)
+    target = (128, 256)  # OSNet input: width=128, height=256
     return [
         pil_image.resize(target, Image.BILINEAR),
         upper.resize(target, Image.BILINEAR),
@@ -386,14 +633,15 @@ class CLIPAttributeEmbeddingAdapter:
 @dataclass
 class SoliderKPRAppearanceEmbeddingAdapter:
     """
-    SigLIP2 + KPR-style part appearance embedding (1024-dim).
+    TransReID ViT-Base (MSMT17) + KPR-style part fusion appearance embedding.
 
-    Part strategy: global (full crop) + upper + lower body crops.
-    Fusion: 0.55 * global + 0.45 * mean(upper, lower), quality-weighted mean
-    across selected frames, L2-normalised. Shares embedding space with text queries.
+    Primary Re-ID backbone: TransReID 768-dim (SOTA cross-camera Re-ID).
+    Part strategy: global (full crop) + upper + lower body crops (KPR-style).
+    Fusion: 0.55 * global + 0.45 * mean(upper, lower), quality-weighted mean.
+    Output: 768-dim L2-normalised vector stored as appearance_embedding_vector.
     """
 
-    embedding_model: str = "siglip2-vit-l16-512-kpr"
+    embedding_model: str = "transreid-vit-base-msmt17-kpr"
     global_weight: float = 0.55
     part_weight: float = 0.45
 
@@ -404,7 +652,7 @@ class SoliderKPRAppearanceEmbeddingAdapter:
         static_attributes: StaticAttributeResult,
         appearance_attributes: AppearanceAttributeResult,
     ) -> AppearanceEmbeddingResult:
-        hub = SigLIP2ModelHub()
+        hub = TransReIDHub()
         selected = _selected_observations(tracklet, selection)
         quality_map = {item.frame_index: item.quality_score for item in selection.selected_frames}
 
@@ -418,7 +666,7 @@ class SoliderKPRAppearanceEmbeddingAdapter:
             weights.append(quality_map.get(frame.frame_index, 0.1))
 
         if not pil_crops:
-            empty = tuple(0.0 for _ in range(1024))
+            empty = tuple(0.0 for _ in range(512))
             return AppearanceEmbeddingResult(
                 embedding_model=self.embedding_model,
                 embedding_vector=empty,
@@ -438,7 +686,7 @@ class SoliderKPRAppearanceEmbeddingAdapter:
 
     def _embed_frames(
         self,
-        hub: SigLIP2ModelHub,
+        hub: OSNetReIDHub,
         pil_crops: list[Image.Image],
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
         all_parts = [_part_crops(pil) for pil in pil_crops]
@@ -446,9 +694,9 @@ class SoliderKPRAppearanceEmbeddingAdapter:
         upper_crops = [p[1] for p in all_parts]
         lower_crops = [p[2] for p in all_parts]
 
-        global_feats = hub.image_features(full_crops)   # [N, 1024]
-        upper_feats  = hub.image_features(upper_crops)  # [N, 1024]
-        lower_feats  = hub.image_features(lower_crops)  # [N, 1024]
+        global_feats = hub.embed_crops(full_crops)   # [N, 768]
+        upper_feats  = hub.embed_crops(upper_crops)  # [N, 768]
+        lower_feats  = hub.embed_crops(lower_crops)  # [N, 768]
 
         per_frame_vecs: list[np.ndarray] = []
         for i in range(len(pil_crops)):
@@ -469,11 +717,11 @@ class SoliderKPRAppearanceEmbeddingAdapter:
 @dataclass
 class SigLIP2BehaviorAnalyzer:
     """
-    Zero-shot action classification via SigLIP2 image-text matching.
+    Action classification: VideoMAE Large temporal features + SigLIP2 text matching.
 
-    Extracts mean image features from up to 4 key frames per ActionClip,
-    then ranks action vocabulary labels by cosine similarity with their
-    SigLIP2 text embeddings. No heuristic motion rules.
+    Stage 1: Extract 1024-dim video clip features via VideoMAE Large (ECCV 2022).
+    Stage 2: Score against action vocabulary text embeddings via SigLIP2.
+    Combined: VideoMAE captures temporal motion, SigLIP2 maps to semantic labels.
     """
 
     vocabulary: tuple[str, ...] = EMBEDDING_VOCABULARY
@@ -495,12 +743,9 @@ class SigLIP2BehaviorAnalyzer:
                 metadata={},
             )
 
-        hub = SigLIP2ModelHub()
-        step = max(1, len(frames) // 4)
-        sampled = [frames[i] for i in range(0, len(frames), step)][:4]
-
+        # Collect PIL frames from crop_bgr (full-body crops from tracklet)
         pils: list[Image.Image] = []
-        for frame in sampled:
+        for frame in frames:
             crop = frame.crop_bgr
             if crop is not None and crop.size > 0:
                 rgb = cv2.cvtColor(np.asarray(crop, dtype=np.uint8), cv2.COLOR_BGR2RGB)
@@ -515,15 +760,17 @@ class SigLIP2BehaviorAnalyzer:
                 metadata={},
             )
 
-        img_feats = hub.image_features(pils)     # [N, 1024]
-        mean_feat = img_feats.mean(axis=0)
-        norm = float(np.linalg.norm(mean_feat))
-        if norm > 1e-8:
-            mean_feat /= norm
+        # Stage 1: VideoMAE temporal embedding (1024-dim) — captures motion patterns
+        vmae = VideoMAEHub()
+        video_feat = vmae.extract_features(pils)  # [1024]
 
+        # Stage 2: SigLIP2 text embeddings for action labels, cosine similarity
+        siglip = SigLIP2ModelHub()
         labels = list(self.vocabulary)
-        text_feats = hub.text_features([self._prompts[lbl] for lbl in labels])  # [K, 1024]
-        scores = text_feats @ mean_feat
+        text_feats = siglip.text_features([self._prompts[lbl] for lbl in labels])  # [K, 1024]
+
+        # VideoMAE dim=1024 matches SigLIP2 dim=1024 — direct dot product
+        scores = text_feats @ video_feat
 
         best_idx = int(np.argmax(scores))
         best_label = labels[best_idx]

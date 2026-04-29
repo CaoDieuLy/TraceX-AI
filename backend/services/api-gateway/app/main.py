@@ -572,6 +572,34 @@ async def candidate_track(payload: dict[str, Any], request: Request) -> dict:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
+@app.post("/api/v1/trace/run")
+async def trace_run(payload: dict[str, Any], request: Request) -> dict:
+    try:
+        return await _post_json(
+            f"{settings.metadata_service_url}/api/v1/trace/run",
+            payload,
+            headers=_forward_auth_headers(request),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.post("/api/v1/trace/feedback")
+async def trace_feedback(payload: dict[str, Any], request: Request) -> dict:
+    try:
+        return await _post_json(
+            f"{settings.metadata_service_url}/api/v1/trace/feedback",
+            payload,
+            headers=_forward_auth_headers(request),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
 @app.get("/api/v1/queue/videos")
 async def queue_videos() -> dict:
     try:

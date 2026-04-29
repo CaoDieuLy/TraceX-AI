@@ -88,14 +88,6 @@ def _candidate_payload_view(candidate: dict) -> dict:
     return merged
 
 
-def _strict_runtime_unavailable(stage: str) -> RuntimeError:
-    pipeline = get_strict_pipeline()
-    return RuntimeError(
-        f"{stage} requires the fixed strict pipeline. "
-        "This repository no longer contains a local substitute implementation."
-    )
-
-
 # ═══════════════════════════════════════════════════════════════
 # ITSELF-Style Ranking (RANGE Ensemble)
 # Weights: embedding(0.58) + semantic(0.22) + visibility(0.12) + world(0.08)
