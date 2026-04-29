@@ -78,6 +78,9 @@ class CandidateSearchRequest(BaseModel):
     query_text: str = Field(min_length=1, max_length=4000)
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     limit: int = Field(default=5, ge=1, le=50)
+    camera_ids: list[str] | None = Field(default=None)
+    time_from: str | None = Field(default=None)
+    time_to: str | None = Field(default=None)
 
 
 class CandidateSearchResponse(BaseModel):

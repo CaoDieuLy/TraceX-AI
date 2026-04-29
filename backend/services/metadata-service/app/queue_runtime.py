@@ -422,10 +422,10 @@ class QueueSyncService:
             drive_video_file_id=uploaded_video.get("file_id"),
             drive_metadata_file_id=drive_metadata_file_id,
             local_video_path=str(compressed_path_value or ""),
-            local_metadata_path=str(metadata_path_value or ""),
+            local_metadata_path=None,
             raw_video_metadata=video,
         )
-        upsert_person_candidates(session, people, str(metadata_path_value or ""))
+        upsert_person_candidates(session, people, None)
         session.commit()
         return evicted_video_ids
 
@@ -454,37 +454,64 @@ class QueueSyncService:
             )
         storage_items = scanner.list_pending(limit=settings.storage_ingest_batch_size)
 
-        results: list[dict] = []
+        processed_videos = 0
+        imported_source_files: list[str] = []
+        evicted_video_ids: list[str] = []
+
+        def _process_and_save(item: StorageVideoItem) -> None:
+            nonlocal processed_videos
+            result_dict = self._process_storage_video_item(item)
+            result = result_dict["result"]
+            remote = result_dict.get("remote_endpoint", False)
+            evicted_video_ids.extend(
+                self._append_processed_result(
+                    session,
+                    result,
+                    source_filename=result_dict["source_filename"],
+                    source_mode=result_dict["source_mode"],
+                    publish_to_drive=bool(settings.google_drive_enabled) and not remote,
+                )
+            )
+            registry.mark_processed(result_dict["source_item"], result)
+            imported_source_files.append(str(result_dict["source_item"].relative_path))
+            processed_videos += 1
+            LOGGER.info(
+                "Saved to DB: %s people=%s (%d/%d)",
+                result_dict["source_filename"],
+                len((result.get("people") or [])),
+                processed_videos,
+                len(storage_items),
+            )
+
         if storage_items:
-            # Send the first item sequentially to let the tracking service cold-start,
-            # then dispatch the rest in parallel once it is warm.
-            results.append(self._process_storage_video_item(storage_items[0]))
+            # First item runs solo to warm up the tracking service before parallel load
+            _process_and_save(storage_items[0])
             remaining = storage_items[1:]
             if remaining:
                 parallel_jobs = self._parallel_jobs(len(remaining), settings.queue_parallel_jobs)
                 with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
                     for item in executor.map(self._process_storage_video_item, remaining):
-                        results.append(item)
-
-        processed_videos = 0
-        imported_source_files: list[str] = []
-        evicted_video_ids: list[str] = []
-
-        for item in results:
-            result = item["result"]
-            remote = item.get("remote_endpoint", False)
-            evicted_video_ids.extend(
-                self._append_processed_result(
-                    session,
-                    result,
-                    source_filename=item["source_filename"],
-                    source_mode=item["source_mode"],
-                    publish_to_drive=bool(settings.google_drive_enabled) and not remote,
-                )
-            )
-            registry.mark_processed(item["source_item"], result)
-            imported_source_files.append(str(item["source_item"].relative_path))
-            processed_videos += 1
+                        result = item["result"]
+                        remote = item.get("remote_endpoint", False)
+                        evicted_video_ids.extend(
+                            self._append_processed_result(
+                                session,
+                                result,
+                                source_filename=item["source_filename"],
+                                source_mode=item["source_mode"],
+                                publish_to_drive=bool(settings.google_drive_enabled) and not remote,
+                            )
+                        )
+                        registry.mark_processed(item["source_item"], result)
+                        imported_source_files.append(str(item["source_item"].relative_path))
+                        processed_videos += 1
+                        LOGGER.info(
+                            "Saved to DB: %s people=%s (%d/%d)",
+                            item["source_filename"],
+                            len((result.get("people") or [])),
+                            processed_videos,
+                            len(storage_items),
+                        )
 
         return {
             "processed_videos": processed_videos,

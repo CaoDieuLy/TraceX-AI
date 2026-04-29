@@ -24,6 +24,10 @@ class InternalSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     top_k: int = Field(default=10, ge=1, le=50)
     offset: int = Field(default=0, ge=0)
+    # Hard constraints (Phase 1)
+    camera_ids: list[str] | None = Field(default=None, description="Zone filter: list of camera IDs")
+    time_from: str | None = Field(default=None, description="ISO datetime lower bound")
+    time_to: str | None = Field(default=None, description="ISO datetime upper bound")
 
 
 class SearchResultItem(BaseModel):
@@ -71,7 +75,14 @@ def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
 
     session = SessionLocal()
     try:
-        ranked = rank_candidates(session=session, query_text=payload.query.strip(), limit=ranked_limit)
+        ranked = rank_candidates(
+            session=session,
+            query_text=payload.query.strip(),
+            limit=ranked_limit,
+            camera_ids=payload.camera_ids,
+            time_from=payload.time_from,
+            time_to=payload.time_to,
+        )
     except httpx.HTTPStatusError as exc:
         upstream_detail = (exc.response.text or "").strip()
         raise HTTPException(

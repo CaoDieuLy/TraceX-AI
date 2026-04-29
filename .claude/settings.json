@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(sshpass -p xVrqU6Dg@VhAcj4 ssh -o StrictHostKeyChecking=no root@103.72.56.139 ' *)",
+      "Bash(python3 -c ' *)"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {

@@ -1134,43 +1134,28 @@ class TrackletFeaturePipelineOutput:
 
 
 def _default_static_attribute_extractor():
-    try:
-        from model_adapters import ZeroShotAttributeAdapter
-        return ZeroShotAttributeAdapter()
-    except Exception:
-        return RuleBasedStaticAttributeExtractor()
+    from model_adapters import ZeroShotAttributeAdapter
+    return ZeroShotAttributeAdapter()
 
 
 def _default_attribute_embedding_extractor():
-    try:
-        from model_adapters import CLIPAttributeEmbeddingAdapter
-        return CLIPAttributeEmbeddingAdapter()
-    except Exception:
-        return VisualAttributeEmbeddingExtractor()
+    from model_adapters import CLIPAttributeEmbeddingAdapter
+    return CLIPAttributeEmbeddingAdapter()
 
 
 def _default_appearance_attribute_extractor():
-    try:
-        from model_adapters import ZeroShotAppearanceMetadataAdapter
-        return ZeroShotAppearanceMetadataAdapter()
-    except Exception:
-        return ColorAppearanceAttributeExtractor()
+    from model_adapters import ZeroShotAppearanceMetadataAdapter
+    return ZeroShotAppearanceMetadataAdapter()
 
 
 def _default_appearance_embedding_extractor():
-    try:
-        from model_adapters import SoliderKPRAppearanceEmbeddingAdapter
-        return SoliderKPRAppearanceEmbeddingAdapter()
-    except Exception:
-        return VisualAppearanceEmbeddingExtractor()
+    from model_adapters import SoliderKPRAppearanceEmbeddingAdapter
+    return SoliderKPRAppearanceEmbeddingAdapter()
 
 
 def _default_semantic_embedder():
-    try:
-        from model_adapters import ItselfSemanticEmbedder
-        return ItselfSemanticEmbedder()
-    except Exception:
-        return ActionVocabularyEmbedder()
+    from model_adapters import ItselfSemanticEmbedder
+    return ItselfSemanticEmbedder()
 
 
 @dataclass
@@ -1202,7 +1187,7 @@ class TrackletFeaturePipelineProcessor:
         default_factory=_default_appearance_embedding_extractor
     )
     clip_builder: ActionClipBuilder = field(default_factory=ActionClipBuilder)
-    behavior_analyzer: ActionBehaviorAnalyzer = field(default_factory=HeuristicBehaviorAnalyzer)
+    behavior_analyzer: ActionBehaviorAnalyzer = field(default_factory=lambda: __import__("model_adapters", fromlist=["SigLIP2BehaviorAnalyzer"]).SigLIP2BehaviorAnalyzer())
     semantic_embedder: ActionSemanticEmbedder = field(default_factory=_default_semantic_embedder)
     aggregator: TrackletFeatureAggregator = field(default_factory=TrackletFeatureAggregator)
     stage_execution: TrackletStageExecutionConfig = field(default_factory=TrackletStageExecutionConfig)

@@ -5,7 +5,7 @@ import logging
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -178,12 +178,6 @@ def _rank_candidate_itself(
         world_bonus * 0.08
     )
     return round(final_score, 6)
-
-
-def _rank_candidate(query_text: str, candidate: dict) -> float:
-    """Compatibility helper for callers that only need lexical pre-sorting."""
-    return round(_semantic_overlap_itself(query_text, candidate), 6)
-
 
 
 def _tokenize(text: str) -> set[str]:
@@ -439,19 +433,6 @@ def _summarize_matches(query_text: str, video_id: str, matches: list[dict], pers
     )
 
 
-def _build_worker_match(
-    candidate: dict,
-    query_text: str,
-    query_embedding: np.ndarray | None = None,
-) -> dict:
-    match = dict(candidate)
-    match["search_text"] = _candidate_search_document(candidate)
-    match["semantic_overlap"] = round(_semantic_overlap_itself(query_text, candidate), 6)
-    match["score"] = _rank_candidate_itself(query_text, query_embedding, candidate)
-    match["matched_segments"] = _extract_candidate_segments(candidate)
-    return match
-
-
 def _resolve_query_source_path(storage_path: str, video_id: str | None = None) -> Path:
     source = str(storage_path or "").strip()
     if not source:
@@ -579,7 +560,6 @@ def _download_file(url: str, output_path: str, timeout: int = 180) -> None:
         if src.resolve() != dst.resolve():
             logger.info(f"Copying {src} to {dst}")
             dst.parent.mkdir(parents=True, exist_ok=True)
-            import shutil
 
             shutil.copy2(src, dst)
         else:
@@ -715,42 +695,339 @@ def process_video_query(payload: dict) -> dict:
         _cleanup_remote_query_files(*cleanup_targets)
 
 
-def process_video_query_worker(payload: dict) -> dict:
-    raise _strict_runtime_unavailable("AI worker processing")
+# ═══════════════════════════════════════════════════════════════
+# Phase 1-5: Full Search Pipeline
+# ═══════════════════════════════════════════════════════════════
+
+_ATTRIBUTE_KEYWORDS: dict[str, list[str]] = {
+    "gender": ["male", "female", "man", "woman", "boy", "girl", "nam", "nữ"],
+    "age_group": ["child", "adult", "elderly", "young", "old", "trẻ em", "người lớn", "người già"],
+    "shirt": ["shirt", "áo", "jacket", "hoodie", "sweater", "top"],
+    "pants": ["pants", "quần", "shorts", "skirt", "jeans"],
+    "shoes": ["shoes", "giày", "sneaker", "boot", "sandal", "dép"],
+    "bag": ["bag", "túi", "backpack", "balo", "luggage", "vali"],
+    "hat": ["hat", "cap", "mũ", "helmet"],
+}
+
+_ACTION_KEYWORDS: list[str] = [
+    "run", "walk", "stand", "sit", "fall", "jump", "carry", "push", "pull",
+    "chạy", "đi", "đứng", "ngồi", "ngã", "nhảy", "mang", "đẩy",
+    "throw", "fight", "loiter", "enter", "exit", "pick", "drop",
+]
+
+_COLOR_KEYWORDS: list[str] = [
+    "red", "blue", "green", "black", "white", "yellow", "orange", "purple",
+    "pink", "brown", "gray", "grey", "đỏ", "xanh", "đen", "trắng", "vàng",
+]
 
 
-def search_candidates_remote(query_text: str, candidates: list[dict], limit: int = 5) -> dict:
+def _parse_query_intent(query_text: str) -> dict:
+    """Phase 2: Extract attribute tags and action intent from query."""
+    lower = query_text.lower()
+    tokens = set(re.findall(r"[a-zA-Zàáảãạăắặẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]+", lower))
+
+    attributes: dict[str, list[str]] = {}
+    for attr, keywords in _ATTRIBUTE_KEYWORDS.items():
+        matched = [kw for kw in keywords if kw in lower]
+        if matched:
+            attributes[attr] = matched
+
+    colors = [c for c in _COLOR_KEYWORDS if c in lower]
+    if colors:
+        attributes["colors"] = colors
+
+    actions = [a for a in _ACTION_KEYWORDS if a in lower]
+
+    return {
+        "raw_query": query_text,
+        "tokens": tokens,
+        "attributes": attributes,
+        "actions": actions,
+        "has_action_intent": len(actions) > 0,
+        "has_appearance_intent": len(attributes) > 0 or len(colors) > 0,
+    }
+
+
+def _encode_query_clip(query_text: str) -> np.ndarray | None:
+    """
+    Phase 2: Encode query text with SigLIP2 ViT-L-16-512 → 1024-dim L2-normalised vector.
+
+    SigLIP2 text and image features share the same embedding space, enabling
+    direct cosine similarity between query text and appearance embeddings.
+    Returns None if encoding fails — scoring gracefully degrades to lexical only.
+    """
+    try:
+        from .model_adapters import SigLIP2ModelHub
+        hub = SigLIP2ModelHub()
+        feats = hub.text_features([query_text])  # [1, 1024]
+        vec = feats[0].astype(np.float32)
+        norm = float(np.linalg.norm(vec))
+        return vec / norm if norm > 1e-8 else None
+    except Exception as exc:
+        logger.warning("SigLIP2 query encoding failed: %s", exc)
+        return None
+
+
+def _hard_filter_candidates(
+    candidates: list[dict],
+    camera_ids: list[str] | None,
+    time_from: str | None,
+    time_to: str | None,
+) -> list[dict]:
+    """Phase 3 — Hard filter: remove candidates outside time window or camera zone."""
+    if not camera_ids and not time_from and not time_to:
+        return candidates
+
+    result = []
+    tf = datetime.fromisoformat(time_from) if time_from else None
+    tt = datetime.fromisoformat(time_to) if time_to else None
+    cam_set = {c.lower().strip() for c in (camera_ids or [])} if camera_ids else None
+
+    for c in candidates:
+        if cam_set:
+            cam = str(c.get("camera_id") or "").lower().strip()
+            if cam and cam not in cam_set:
+                continue
+
+        if tf or tt:
+            timeline = c.get("timeline")
+            if isinstance(timeline, list) and timeline:
+                start = None
+                for seg in timeline:
+                    if isinstance(seg, dict) and seg.get("start_second") is not None:
+                        try:
+                            recorded_start = c.get("recorded_start") or ""
+                            if recorded_start:
+                                base = datetime.fromisoformat(str(recorded_start))
+                                seg_time = base.replace(tzinfo=timezone.utc) + timedelta(seconds=float(seg["start_second"]))
+                                start = seg_time
+                                break
+                        except Exception:
+                            pass
+                if start:
+                    if tf and start < tf.replace(tzinfo=timezone.utc):
+                        continue
+                    if tt and start > tt.replace(tzinfo=timezone.utc):
+                        continue
+        result.append(c)
+    return result
+
+
+def _score_attribute_match(query_intent: dict, candidate: dict) -> float:
+    """Phase 3 — Metadata match: +score for each matching attribute, -0.03 for mismatch."""
+    if not query_intent["attributes"] and not query_intent["actions"]:
+        return 0.0
+
+    attrs_query = query_intent["attributes"]
+    search_doc = (_candidate_search_document(candidate) + " " + str(candidate.get("search_text") or "")).lower()
+    semantic_attrs = [str(a).lower() for a in _coerce_string_list(candidate.get("semantic_attributes"))]
+    full_text = search_doc + " " + " ".join(semantic_attrs)
+
+    score = 0.0
+    matched = 0
+    total = 0
+
+    for attr_type, keywords in attrs_query.items():
+        total += 1
+        if any(kw in full_text for kw in keywords):
+            score += 0.12
+            matched += 1
+        else:
+            score -= 0.03
+
+    for action in query_intent["actions"]:
+        total += 1
+        if action in full_text:
+            score += 0.10
+            matched += 1
+
+    return round(score, 6)
+
+
+def _rank_candidate_multimodal(
+    query_text: str,
+    query_clip_embed: np.ndarray | None,
+    query_intent: dict,
+    candidate: dict,
+) -> float:
+    """
+    Phase 3+4: Hybrid multi-modal scoring.
+
+    Weights:
+      W_app  = 0.42  — CLIP text vs attribute_embedding_vector (768-dim)
+      W_act  = 0.20  — CLIP text vs action_semantic_embedding (768-dim)
+      W_meta = 0.18  — Attribute keyword match
+      W_sem  = 0.12  — Token Jaccard semantic overlap
+      W_vis  = 0.05  — Visibility bonus
+      W_world= 0.03  — World position bonus
+    """
+    view = _candidate_payload_view(candidate)
+
+    # --- Appearance similarity (CLIP text vs CLIP image attributes) ---
+    app_sim = 0.0
+    if query_clip_embed is not None:
+        attr_embed = view.get("attribute_embedding_vector")
+        if isinstance(attr_embed, list) and len(attr_embed) == query_clip_embed.shape[0]:
+            app_sim = _embedding_similarity(query_clip_embed, attr_embed)
+
+    # --- Action similarity (CLIP text vs ITSELF action embedding) ---
+    act_sim = 0.0
+    if query_clip_embed is not None and query_intent["has_action_intent"]:
+        action_embed_data = view.get("action_semantic_embedding")
+        if isinstance(action_embed_data, dict):
+            action_vec = action_embed_data.get("embedding_vector")
+        else:
+            action_vec = None
+        if isinstance(action_vec, list) and len(action_vec) == query_clip_embed.shape[0]:
+            act_sim = _embedding_similarity(query_clip_embed, action_vec)
+
+    # --- Attribute metadata match ---
+    meta_score = _score_attribute_match(query_intent, view)
+
+    # --- Token Jaccard ---
+    sem_overlap = _semantic_overlap_itself(query_text, view)
+
+    # --- Visibility & world bonus ---
+    vis_bonus = _visibility_bonus(view)
+    world_bonus = _world_position_bonus(view)
+
+    final = (
+        app_sim   * 0.42 +
+        act_sim   * 0.20 +
+        meta_score* 0.18 +
+        sem_overlap* 0.12 +
+        vis_bonus  * 0.05 +
+        world_bonus* 0.03
+    )
+    return round(final, 6)
+
+
+def _deduplicate_cross_camera(
+    scored: list[tuple[float, dict]],
+    similarity_threshold: float = 0.85,
+    per_camera_limit: int = 2,
+) -> list[dict]:
+    """
+    Phase 5: Cluster candidates by embedding similarity across cameras.
+    Each identity cluster contributes at most 1 representative to results.
+    """
+    if not scored:
+        return []
+
+    clusters: list[list[int]] = []
+    assigned = [False] * len(scored)
+    embed_cache: dict[int, np.ndarray | None] = {}
+
+    def get_embed(idx: int) -> np.ndarray | None:
+        if idx not in embed_cache:
+            vec = scored[idx][1].get("embedding_vector")
+            if isinstance(vec, list) and vec:
+                arr = np.array(vec, dtype=np.float32)
+                norm = np.linalg.norm(arr)
+                embed_cache[idx] = arr / norm if norm > 1e-8 else None
+            else:
+                embed_cache[idx] = None
+        return embed_cache[idx]
+
+    for i in range(len(scored)):
+        if assigned[i]:
+            continue
+        cluster = [i]
+        assigned[i] = True
+        ei = get_embed(i)
+        if ei is not None:
+            for j in range(i + 1, len(scored)):
+                if assigned[j]:
+                    continue
+                ej = get_embed(j)
+                if ej is not None and ei.shape == ej.shape:
+                    sim = float(np.dot(ei, ej))
+                    if sim >= similarity_threshold:
+                        cluster.append(j)
+                        assigned[j] = True
+        clusters.append(cluster)
+
+    result = []
+    cam_counts: dict[str, int] = {}
+    for cluster in clusters:
+        best_idx = cluster[0]
+        enriched = dict(scored[best_idx][1])
+        enriched["score"] = round(scored[best_idx][0], 6)
+        if len(cluster) > 1:
+            enriched["cross_camera_matches"] = [
+                {"candidate_id": scored[idx][1].get("candidate_id"), "camera_id": scored[idx][1].get("camera_id")}
+                for idx in cluster[1:]
+            ]
+        cam = str(enriched.get("camera_id") or "")
+        if cam and cam_counts.get(cam, 0) >= per_camera_limit:
+            continue
+        cam_counts[cam] = cam_counts.get(cam, 0) + 1
+        result.append(enriched)
+
+    return result
+
+
+def search_candidates_remote(
+    query_text: str,
+    candidates: list[dict],
+    limit: int = 5,
+    camera_ids: list[str] | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+    weights: dict | None = None,
+) -> dict:
+    """
+    Full 5-phase search pipeline:
+    1. Parse query intent (attributes, actions)
+    2. Encode query with CLIP ViT-L/14 (768-dim)
+    3. Hard filter (camera zone + time window) + Hybrid scoring
+    4. Weighted fusion: app(0.42) + act(0.20) + meta(0.18) + sem(0.12) + vis(0.05) + world(0.03)
+    5. Cross-camera deduplication + diversity Top-k
+    """
     cleaned_query = str(query_text or "").strip()
     if not cleaned_query:
         return {"query_text": cleaned_query, "count": 0, "items": []}
 
     bounded_limit = max(1, min(int(limit or 5), 50))
-    normalized_candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
+    normalized_candidates = [c for c in candidates if isinstance(c, dict)]
     if not normalized_candidates:
         return {"query_text": cleaned_query, "count": 0, "items": []}
 
-    ranked_items: list[dict[str, object]] = []
-    for candidate in normalized_candidates:
+    # Phase 1+2: Parse intent & encode query
+    query_intent = _parse_query_intent(cleaned_query)
+    query_clip_embed = _encode_query_clip(cleaned_query)
+    logger.info(
+        "Query parsed: attributes=%s actions=%s clip_encoded=%s candidates=%d",
+        list(query_intent["attributes"].keys()),
+        query_intent["actions"],
+        query_clip_embed is not None,
+        len(normalized_candidates),
+    )
+
+    # Phase 3a: Hard filter
+    filtered = _hard_filter_candidates(normalized_candidates, camera_ids, time_from, time_to)
+    logger.info("After hard filter: %d/%d candidates", len(filtered), len(normalized_candidates))
+
+    # Phase 3b+4: Hybrid scoring per candidate
+    scored: list[tuple[float, dict]] = []
+    for candidate in filtered:
         candidate_view = _candidate_payload_view(candidate)
+        score = _rank_candidate_multimodal(cleaned_query, query_clip_embed, query_intent, candidate_view)
         enriched = dict(candidate)
         enriched["search_text"] = _candidate_search_document(candidate_view)
         enriched["semantic_overlap"] = round(_semantic_overlap_itself(cleaned_query, candidate_view), 6)
-        enriched["score"] = _rank_candidate_itself(cleaned_query, None, candidate_view)
         if not isinstance(enriched.get("matched_segments"), list) or not enriched.get("matched_segments"):
             enriched["matched_segments"] = _normalize_tracking_segments(candidate_view, limit=3)
         if not isinstance(enriched.get("timeline"), list) and isinstance(candidate_view.get("timeline"), list):
             enriched["timeline"] = candidate_view.get("timeline")
-        ranked_items.append(enriched)
+        scored.append((score, enriched))
 
-    ranked_items.sort(
-        key=lambda item: (
-            -float(item.get("score") or 0.0),
-            -float(item.get("semantic_overlap") or 0.0),
-            str(item.get("video_id") or ""),
-            str(item.get("candidate_id") or ""),
-        )
-    )
-    items = ranked_items[:bounded_limit]
+    scored.sort(key=lambda x: (-x[0], str(x[1].get("video_id") or ""), str(x[1].get("candidate_id") or "")))
+
+    # Phase 5: Cross-camera dedup + diversity Top-k
+    items = _deduplicate_cross_camera(scored, per_camera_limit=max(1, bounded_limit // 5 + 1))
+    items = items[:bounded_limit]
+
     return {"query_text": cleaned_query, "count": len(items), "items": items}
 
 

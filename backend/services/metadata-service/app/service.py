@@ -981,20 +981,36 @@ def build_candidate_preview_image(session: Session, candidate_id: str) -> Path:
         return _build_metadata_only_candidate_preview(row, raw_metadata, preview_path)
 
 
-def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[dict]:
+def rank_candidates(
+    session: Session,
+    query_text: str,
+    limit: int = 5,
+    camera_ids: list[str] | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+) -> list[dict]:
     """
-    Rank candidate bang luong strict:
-    1) lay candidate moi nhat tu DB,
-    2) prefilter local de giam tap tim kiem,
-    3) goi tracking_service /api/v1/candidates/search de semantic rank.
-    Khong co fallback local khi upstream loi.
+    Rank candidate — 5-phase pipeline:
+    1) Hard filter DB by camera_ids (zone) if provided
+    2) Local prefilter to reduce candidate set
+    3) Call tracking_service /api/v1/candidates/search with CLIP encoding + hybrid scoring
+    No fallback local when upstream fails.
     """
     cleaned_query = query_text.strip()
     if not cleaned_query:
         return []
 
     bounded_limit = max(1, min(limit, 50))
+
+    # Phase 1 — Hard filter at DB level: camera zone
     statement = select(PersonCandidate).order_by(PersonCandidate.updated_at.desc(), PersonCandidate.id.desc())
+    if camera_ids:
+        cam_lower = [c.lower().strip() for c in camera_ids if c.strip()]
+        if cam_lower:
+            statement = statement.where(
+                func.lower(PersonCandidate.camera_id).in_(cam_lower)
+            )
+
     rows = session.scalars(statement).all()
     if not rows:
         return []
@@ -1008,14 +1024,20 @@ def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[d
         shortlist_limit=shortlist_limit,
     )
 
-    response = _post_tracking_json(
-        "/api/v1/candidates/search",
-        {
-            "query_text": cleaned_query,
-            "candidates": candidates,
-            "limit": bounded_limit,
-        },
-    )
+    # Phase 3-5 — Send to tracking service with full context
+    payload: dict = {
+        "query_text": cleaned_query,
+        "candidates": candidates,
+        "limit": bounded_limit,
+    }
+    if camera_ids:
+        payload["camera_ids"] = camera_ids
+    if time_from:
+        payload["time_from"] = time_from
+    if time_to:
+        payload["time_to"] = time_to
+
+    response = _post_tracking_json("/api/v1/candidates/search", payload)
     items = response.get("items")
     if not isinstance(items, list):
         raise RuntimeError("Tracking service did not return a valid items list.")
@@ -1541,7 +1563,7 @@ def delete_queue_video_asset(session: Session, video_id: str) -> None:
     session.flush()
 
 
-def upsert_person_candidates(session: Session, people: list[dict], metadata_path: str) -> dict[str, int]:
+def upsert_person_candidates(session: Session, people: list[dict], metadata_path: str | None = None) -> dict[str, int]:
     imported_count = 0
     updated_count = 0
 

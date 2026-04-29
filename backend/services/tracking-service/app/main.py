@@ -131,7 +131,14 @@ def ingestion_process(payload: VideoIngestionRequest) -> dict:
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)
 def candidate_search(payload: CandidateSearchRequest) -> dict:
-    return search_candidates_remote(payload.query_text, payload.candidates, payload.limit)
+    return search_candidates_remote(
+        payload.query_text,
+        payload.candidates,
+        payload.limit,
+        camera_ids=payload.camera_ids,
+        time_from=payload.time_from,
+        time_to=payload.time_to,
+    )
 
 
 @app.post("/api/v1/candidates/track", response_model=CandidateTrackResponse)
