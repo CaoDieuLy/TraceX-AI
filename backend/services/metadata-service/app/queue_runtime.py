@@ -315,6 +315,8 @@ class QueueSyncService:
             )
         source_url = self._drive_public_download_url(source_drive_file_id)
 
+        endpoint_root = settings.tracking_service_url.rstrip("/")
+        remote_endpoint = self._is_remote_endpoint(endpoint_root)
         result = self._request_tracking_processing(
             source_url=source_url,
             source_filename=task.source_filename,
@@ -331,6 +333,7 @@ class QueueSyncService:
             "source_filename": processed.source_filename,
             "source_mode": processed.source_mode,
             "source_item": processed.source_item,
+            "remote_endpoint": remote_endpoint,
         }
 
     def _append_processed_result(
@@ -450,12 +453,18 @@ class QueueSyncService:
                 min_file_age_seconds=settings.storage_ingest_min_file_age_seconds,
             )
         storage_items = scanner.list_pending(limit=settings.storage_ingest_batch_size)
-        parallel_jobs = self._parallel_jobs(len(storage_items), settings.queue_parallel_jobs)
 
         results: list[dict] = []
-        with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
-            for item in executor.map(self._process_storage_video_item, storage_items):
-                results.append(item)
+        if storage_items:
+            # Send the first item sequentially to let the tracking service cold-start,
+            # then dispatch the rest in parallel once it is warm.
+            results.append(self._process_storage_video_item(storage_items[0]))
+            remaining = storage_items[1:]
+            if remaining:
+                parallel_jobs = self._parallel_jobs(len(remaining), settings.queue_parallel_jobs)
+                with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
+                    for item in executor.map(self._process_storage_video_item, remaining):
+                        results.append(item)
 
         processed_videos = 0
         imported_source_files: list[str] = []
@@ -463,13 +472,14 @@ class QueueSyncService:
 
         for item in results:
             result = item["result"]
+            remote = item.get("remote_endpoint", False)
             evicted_video_ids.extend(
                 self._append_processed_result(
                     session,
                     result,
                     source_filename=item["source_filename"],
                     source_mode=item["source_mode"],
-                    publish_to_drive=bool(settings.google_drive_enabled),
+                    publish_to_drive=bool(settings.google_drive_enabled) and not remote,
                 )
             )
             registry.mark_processed(item["source_item"], result)

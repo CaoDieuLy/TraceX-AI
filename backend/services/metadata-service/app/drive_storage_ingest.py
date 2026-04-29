@@ -58,12 +58,17 @@ class DriveStorageVideoScanner:
         if not self.source_storage_root_id:
             return []
 
+        import os
+        min_date = (os.environ.get("STORAGE_INGEST_MIN_DATE") or "").strip()
+
         items: list[StorageVideoItem] = []
         for camera_folder in self._list_folders(self.source_storage_root_id):
             if not camera_folder.name.lower().startswith("cam_"):
                 continue
             for date_folder in self._list_folders(camera_folder.id):
                 date_name = date_folder.name
+                if min_date and date_name < min_date:
+                    continue
                 for file_row in self._list_mp4_files(date_folder.id):
                     identity = StorageVideoIdentity.parse(Path(str(file_row.get("name") or "")))
                     if identity is None:
@@ -87,7 +92,13 @@ class DriveStorageVideoScanner:
                             fingerprint=self._fingerprint(relative_path, str(file_row["id"])),
                         )
                     )
-        return sorted(items, key=lambda item: item.relative_path)
+        # Google Drive allows duplicate filenames — keep only the newest per relative_path
+        seen: dict[str, StorageVideoItem] = {}
+        for item in items:
+            existing = seen.get(item.relative_path)
+            if existing is None or item.modified_ns > existing.modified_ns:
+                seen[item.relative_path] = item
+        return sorted(seen.values(), key=lambda item: item.relative_path)
 
     def _list_folders(self, parent_id: str) -> list[DriveFolderRef]:
         rows = self._query_children(

@@ -3,7 +3,13 @@
     "allow": [
       "Bash(.\\\\.venv\\\\Scripts\\\\python.exe -X utf8 upload_oauth2.py)",
       "Bash(python3 -)",
-      "Bash(python _vps_sync_rebuild.py)"
+      "Bash(python _vps_sync_rebuild.py)",
+      "Bash(sudo apt-get *)",
+      "Bash(sshpass -p 'xVrqU6Dg@VhAcj4' ssh -o StrictHostKeyChecking=no root@103.72.56.139 \"ls /opt/mcpt/A20-App-119/infra/env/ && echo '---' && cat /opt/mcpt/A20-App-119/infra/env/backend.env | grep TRACKING_SERVICE_URL\")",
+      "Bash(sshpass -p xVrqU6Dg@VhAcj4 ssh -o StrictHostKeyChecking=no root@103.72.56.139 ' *)",
+      "Bash(sshpass -p 'xVrqU6Dg@VhAcj4' ssh -o StrictHostKeyChecking=no root@103.72.56.139 \"docker compose -f /opt/mcpt/A20-App-119/infra/docker-compose.yml --env-file /opt/mcpt/A20-App-119/infra/env/backend.env ps\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('/teamspace/studios/this_studio/A20-App-119/secrets/oauth/oauth2_credentials.json'\\)\\); print\\(list\\(d.get\\('installed', d\\).keys\\(\\)\\)[:5]\\)\")",
+      "Bash(sshpass -p 'xVrqU6Dg@VhAcj4' ssh -o StrictHostKeyChecking=no root@103.72.56.139 \"find /opt/mcpt -name '*.pickle' 2>/dev/null; find /workspace -name '*.pickle' 2>/dev/null; docker exec mcpt-backend find /workspace -name '*.pickle' 2>/dev/null\")"
     ]
   }
 }

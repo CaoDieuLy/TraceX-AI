@@ -199,40 +199,48 @@ class RFDETRPersonDetector:
         import numpy as np
         from PIL import Image as _PILImage
 
+        batch_size = max(1, int(os.environ.get("MCPT_DETECTOR_BATCH_SIZE", "8")))
         result: dict[int, tuple[FrameDetection, ...]] = {}
-        for frame in frames:
-            pil = _PILImage.fromarray(cv2.cvtColor(frame.image, cv2.COLOR_BGR2RGB))
+
+        for batch_start in range(0, len(frames), batch_size):
+            batch_frames = frames[batch_start: batch_start + batch_size]
+            pils = [_PILImage.fromarray(cv2.cvtColor(f.image, cv2.COLOR_BGR2RGB)) for f in batch_frames]
             try:
-                dets = self._model.predict(pil, threshold=self.confidence_threshold)
+                batch_dets = self._model.predict(pils, threshold=self.confidence_threshold)
             except Exception:
-                result[frame.frame_index] = ()
+                for f in batch_frames:
+                    result[f.frame_index] = ()
                 continue
 
-            xyxy = getattr(dets, "xyxy", None)
-            confs = getattr(dets, "confidence", None)
-            class_ids = getattr(dets, "class_id", None)
-            if xyxy is None or confs is None:
-                result[frame.frame_index] = ()
-                continue
+            if not isinstance(batch_dets, list):
+                batch_dets = [batch_dets]
 
-            frame_dets: list[FrameDetection] = []
-            for i, (box, conf) in enumerate(zip(xyxy, confs)):
-                if class_ids is not None and int(class_ids[i]) != 0:
+            for frame, dets in zip(batch_frames, batch_dets):
+                xyxy = getattr(dets, "xyxy", None)
+                confs = getattr(dets, "confidence", None)
+                class_ids = getattr(dets, "class_id", None)
+                if xyxy is None or confs is None:
+                    result[frame.frame_index] = ()
                     continue
-                x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-                bbox = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
-                frame_dets.append(
-                    FrameDetection(
-                        frame_index=frame.frame_index,
-                        timestamp_second=frame.timestamp_second,
-                        bbox=bbox,
-                        confidence=float(np.clip(conf, 0.0, 1.0)),
-                        laplacian_score=frame.laplacian_score,
-                        crop_bgr=HogPersonDetector._crop_from_bbox(frame.image, bbox),
+
+                frame_dets: list[FrameDetection] = []
+                for i, (box, conf) in enumerate(zip(xyxy, confs)):
+                    if class_ids is not None and int(class_ids[i]) != 1:  # RF-DETR COCO 1-indexed: person=1
+                        continue
+                    x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+                    bbox = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
+                    frame_dets.append(
+                        FrameDetection(
+                            frame_index=frame.frame_index,
+                            timestamp_second=frame.timestamp_second,
+                            bbox=bbox,
+                            confidence=float(np.clip(conf, 0.0, 1.0)),
+                            laplacian_score=frame.laplacian_score,
+                            crop_bgr=HogPersonDetector._crop_from_bbox(frame.image, bbox),
+                        )
                     )
-                )
-            frame_dets.sort(key=lambda d: d.confidence, reverse=True)
-            result[frame.frame_index] = tuple(frame_dets[: self.max_detections_per_frame])
+                frame_dets.sort(key=lambda d: d.confidence, reverse=True)
+                result[frame.frame_index] = tuple(frame_dets[: self.max_detections_per_frame])
         return result
 
 
@@ -693,10 +701,10 @@ class LocalMetadataAssembler:
 
     def _build_person_metadata_from_item(
         self,
+        item: tuple[LocalTracklet, TrackletQualityResult],
         *,
         video_id: str,
         camera_id: str | None,
-        item: tuple[LocalTracklet, TrackletQualityResult],
         sampled_fps: int,
     ) -> dict[str, object]:
         tracklet, quality = item

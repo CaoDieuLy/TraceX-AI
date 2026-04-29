@@ -58,3 +58,7 @@ move_test_*/
 # large generated/data files
 Multi-Camera-Person-Tracking-and-Re-Identification/videos/
 Multi-Camera-Person-Tracking-and-Re-Identification/exchange_full_results.json
+
+# model weights
+*.pth
+*.pt

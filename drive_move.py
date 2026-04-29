@@ -31,7 +31,7 @@ TEMP_FOLDER_ID    = "1Px379D5sjK95lMOUGZ4oUAgco7wBCk4I"
 STORAGE_FOLDER_ID = "1G6L1d8l2YupSI0HIgB9NkBel04RqX48G"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
-TOKEN_PATH = Path(r"D:\workspace\project\secrets\oauth\oauth2_token.pickle")
+TOKEN_PATH = Path(__file__).parent / "secrets" / "oauth" / "oauth2_token.pickle"
 
 
 def build_drive():

@@ -868,20 +868,17 @@ class ActionClipBuilder:
         if len(frames) < 2:
             return frames[0].frame_index if frames else None
 
-        ordered = tuple(sorted(frames, key=lambda item: item.frame_index))
-        best_score = -1.0
-        best_index = ordered[len(ordered) // 2].frame_index
-        previous = ordered[0]
-        for current in ordered[1:]:
-            previous_center = ((previous.bbox.x1 + previous.bbox.x2) / 2.0, (previous.bbox.y1 + previous.bbox.y2) / 2.0)
-            current_center = ((current.bbox.x1 + current.bbox.x2) / 2.0, (current.bbox.y1 + current.bbox.y2) / 2.0)
-            displacement = math.dist(previous_center, current_center)
-            score = displacement + max(current.detection_confidence, 0.0) * 10.0
-            if score > best_score:
-                best_score = score
-                best_index = current.frame_index
-            previous = current
-        return best_index
+        import numpy as np
+        ordered = sorted(frames, key=lambda item: item.frame_index)
+        centers = np.array(
+            [((f.bbox.x1 + f.bbox.x2) / 2.0, (f.bbox.y1 + f.bbox.y2) / 2.0) for f in ordered],
+            dtype=np.float32,
+        )
+        displacements = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+        confidences = np.array([max(f.detection_confidence, 0.0) for f in ordered[1:]], dtype=np.float32)
+        scores = displacements + confidences * 10.0
+        best_idx = int(np.argmax(scores)) + 1
+        return ordered[best_idx].frame_index
 
 
 @dataclass

@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     queue_video_folder_name: str = "Videos"
     queue_max_size: int = 32
     queue_poll_interval_seconds: int = 30
-    queue_parallel_jobs: int = 4
+    queue_parallel_jobs: int = 3
     queue_download_workers: int = 4
     storage_ingest_enabled: bool = True
     storage_ingest_root: str = str(PROJECT_ROOT / "storage")
