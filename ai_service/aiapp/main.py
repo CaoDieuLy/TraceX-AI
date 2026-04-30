@@ -4,6 +4,7 @@ Gateway không gọi trực tiếp TRACKING_SERVICE_URL.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -14,10 +15,19 @@ from pydantic import BaseModel, Field
 from app.database import SessionLocal
 from app.service import rank_candidates
 
+from .http_client import close_http_client, init_http_client
 from .runtime_contract import build_tracking_runtime_contract
 from .tracking_upstream import proxy_get_bytes, proxy_get_json, proxy_post_json
 
-app = FastAPI(title="MCPT AI Service", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_http_client()
+    yield
+    await close_http_client()
+
+
+app = FastAPI(title="MCPT AI Service", version="1.0.0", lifespan=lifespan)
 
 
 class InternalSearchRequest(BaseModel):

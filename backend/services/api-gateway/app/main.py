@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -9,6 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .config import settings
+from .http_client import close_http_client, get_http_client, init_http_client
 from .services.ai_client import (
     search_internal,
     tracking_ai_process as ai_tracking_process,
@@ -18,7 +20,14 @@ from .services.ai_client import (
     tracking_run as ai_tracking_run,
 )
 
-app = FastAPI(title="MCPT API Gateway", version="2.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_http_client()
+    yield
+    await close_http_client()
+
+
+app = FastAPI(title="MCPT API Gateway", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -71,31 +80,27 @@ def require_auth_header(request: Request) -> None:
 
 
 async def _get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        return response.json()
+    response = await get_http_client().get(url, params=params, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
 
 async def _post_json(url: str, payload: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.post(url, json=payload or {}, headers=headers)
-        response.raise_for_status()
-        return response.json()
+    response = await get_http_client().post(url, json=payload or {}, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
 
 async def _patch_json(url: str, payload: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.patch(url, json=payload or {}, headers=headers)
-        response.raise_for_status()
-        return response.json()
+    response = await get_http_client().patch(url, json=payload or {}, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
 
 async def _get_bytes(url: str, headers: dict[str, str] | None = None) -> tuple[bytes, str]:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-        return response.content, response.headers.get("content-type", "application/octet-stream")
+    response = await get_http_client().get(url, headers=headers)
+    response.raise_for_status()
+    return response.content, response.headers.get("content-type", "application/octet-stream")
 
 
 def _to_search_item(video: dict[str, Any]) -> SearchResultItem:
@@ -414,20 +419,19 @@ async def create_video(
         content = await file.read()
         files = {"file": (file.filename or "video.bin", content, file.content_type or "application/octet-stream")}
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            response = await client.post(
-                f"{settings.metadata_service_url}/api/v1/videos",
-                data=data,
-                files=files,
-                headers=_forward_auth_headers(request),
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+    try:
+        response = await get_http_client().post(
+            f"{settings.metadata_service_url}/api/v1/videos",
+            data=data,
+            files=files,
+            headers=_forward_auth_headers(request),
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
 @app.get("/api/v1/videos")

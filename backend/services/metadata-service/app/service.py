@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import cv2
 import httpx
@@ -87,23 +88,101 @@ def _tracking_service_url(path: str) -> str:
     return settings.tracking_service_url.rstrip("/") + "/" + path.lstrip("/")
 
 
+def _tracking_service_is_remote() -> bool:
+    host = (urlparse(settings.tracking_service_url).hostname or "").strip().lower()
+    return host not in {"", "127.0.0.1", "localhost", "tracking-service"}
+
+
+def _is_tracking_startup_timeout_detail(detail: str) -> bool:
+    text = str(detail or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "api startup timed out",
+        "startup timed out",
+        "cold start",
+        "warming up",
+        "service unavailable",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _wait_for_tracking_upstream_ready(*, context: str) -> None:
+    if not _tracking_service_is_remote():
+        return
+
+    health_url = _tracking_service_url("/health")
+    deadline = time.monotonic() + max(int(settings.tracking_startup_max_wait_seconds), 1)
+    poll_interval = max(int(settings.tracking_startup_poll_interval_seconds), 1)
+    timeout_seconds = max(int(settings.tracking_health_timeout_seconds), 1)
+    last_error: str | None = None
+    attempt = 0
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        try:
+            with httpx.Client(timeout=float(timeout_seconds)) as client:
+                response = client.get(health_url, headers=_tracking_service_headers())
+            if response.is_success:
+                if attempt > 1:
+                    logger.info("Tracking upstream ready after %s health check attempts for %s", attempt, context)
+                return
+            last_error = f"status={response.status_code} body={response.text[:200]}"
+            logger.info("Tracking upstream not ready yet for %s: %s", context, last_error)
+        except httpx.HTTPError as exc:
+            last_error = str(exc)
+            logger.info("Tracking upstream health probe failed for %s: %s", context, exc)
+        time.sleep(poll_interval)
+
+    raise RuntimeError(
+        f"Tracking upstream was not ready within {settings.tracking_startup_max_wait_seconds}s for {context}. "
+        f"Last error: {last_error or 'unknown'}"
+    )
+
+
 def _post_tracking_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    max_attempts = 3
+    max_attempts = max(int(settings.tracking_startup_retry_attempts), 1)
     timeout_seconds = float(settings.tracking_request_timeout_seconds)
     last_exc: Exception | None = None
+    context = f"POST {path}"
     for attempt in range(1, max_attempts + 1):
         try:
+            _wait_for_tracking_upstream_ready(context=context)
             with httpx.Client(timeout=timeout_seconds) as client:
                 response = client.post(
                     _tracking_service_url(path),
                     json=payload,
                     headers=_tracking_service_headers(),
                 )
-                response.raise_for_status()
-                return response.json()
+            if response.is_error:
+                detail = response.text[:2000]
+                if attempt < max_attempts and _is_tracking_startup_timeout_detail(detail):
+                    logger.warning(
+                        "Tracking upstream cold start during %s attempt=%s status=%s detail=%s",
+                        context,
+                        attempt,
+                        response.status_code,
+                        detail,
+                    )
+                    time.sleep(max(2, int(settings.tracking_startup_poll_interval_seconds)))
+                    continue
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPStatusError as exc:
             last_exc = exc
             # Retry transient upstream/server-side failures, otherwise fail fast.
+            if (
+                attempt < max_attempts
+                and _is_tracking_startup_timeout_detail(exc.response.text)
+            ):
+                logger.warning(
+                    "Retrying tracking request after startup timeout for %s attempt=%s status=%s",
+                    context,
+                    attempt,
+                    exc.response.status_code,
+                )
+                time.sleep(max(2, int(settings.tracking_startup_poll_interval_seconds)))
+                continue
             if exc.response.status_code < 500 or attempt >= max_attempts:
                 raise
         except httpx.HTTPError as exc:

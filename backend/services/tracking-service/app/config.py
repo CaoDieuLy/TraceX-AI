@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     lightning_timeout_seconds: int = 180
     download_remote_outputs: bool = False
     cleanup_remote_query_inputs: bool = True
+    startup_warmup_enabled: bool = True
 
     enable_trackeval: bool = True
     enable_geometry_gating: bool = True

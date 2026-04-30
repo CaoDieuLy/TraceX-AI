@@ -21,6 +21,8 @@ from .post_move_ingestion import (
 )
 from .drive_storage_ingest import DriveStorageVideoScanner
 from .service import (
+    _is_tracking_startup_timeout_detail,
+    _wait_for_tracking_upstream_ready,
     delete_queue_video_asset,
     get_queue_video_rows,
     upsert_person_candidates,
@@ -273,25 +275,57 @@ class QueueSyncService:
             camera_id,
             endpoint,
         )
-        with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
-            response = client.post(endpoint, json=payload, headers=headers or None)
-            if response.is_error:
-                LOGGER.error(
-                    "Tracking ingestion failed source_filename=%s camera_id=%s status=%s body=%s",
+        max_attempts = max(int(settings.tracking_startup_retry_attempts), 1)
+        last_exc: Exception | None = None
+        context = f"ingestion:{source_filename}"
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if remote_endpoint:
+                    _wait_for_tracking_upstream_ready(context=context)
+                with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
+                    response = client.post(endpoint, json=payload, headers=headers or None)
+                if response.is_error:
+                    detail = response.text[:2000]
+                    LOGGER.error(
+                        "Tracking ingestion failed source_filename=%s camera_id=%s status=%s body=%s",
+                        source_filename,
+                        camera_id,
+                        response.status_code,
+                        detail,
+                    )
+                    if (
+                        remote_endpoint
+                        and attempt < max_attempts
+                        and _is_tracking_startup_timeout_detail(detail)
+                    ):
+                        LOGGER.warning(
+                            "Retrying tracking ingestion after startup timeout source_filename=%s attempt=%s",
+                            source_filename,
+                            attempt,
+                        )
+                        time.sleep(max(2, int(settings.tracking_startup_poll_interval_seconds)))
+                        continue
+                response.raise_for_status()
+                data = response.json()
+                LOGGER.info(
+                    "Tracking ingestion completed source_filename=%s camera_id=%s people=%s",
                     source_filename,
                     camera_id,
-                    response.status_code,
-                    response.text[:2000],
+                    data.get("person_count"),
                 )
-            response.raise_for_status()
-            data = response.json()
-            LOGGER.info(
-                "Tracking ingestion completed source_filename=%s camera_id=%s people=%s",
-                source_filename,
-                camera_id,
-                data.get("person_count"),
-            )
-            return data
+                return data
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    raise
+            except RuntimeError as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    raise
+            time.sleep(0.8 * attempt)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"Tracking ingestion failed for {source_filename}")
 
     @staticmethod
     def _drive_public_download_url(file_id: str) -> str:

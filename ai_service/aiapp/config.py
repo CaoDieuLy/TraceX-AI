@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     lightning_api_token: str = ""
     lightning_api_auth_header: str = "Authorization"
     lightning_api_auth_prefix: str = "Bearer "
+    tracking_proxy_timeout_seconds: float = 180.0
+    tracking_proxy_connect_timeout_seconds: float = 10.0
+    tracking_proxy_pool_timeout_seconds: float = 10.0
+    tracking_proxy_max_connections: int = 100
+    tracking_proxy_max_keepalive_connections: int = 20
+    tracking_proxy_keepalive_expiry_seconds: float = 30.0
 
     model_config = SettingsConfigDict(extra="ignore")
 

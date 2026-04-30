@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import threading
 
 import cv2
 import numpy as np
@@ -192,12 +193,16 @@ class RFDETRPersonDetector:
     def __post_init__(self) -> None:
         self._model = None
         self._ready = False
+        self._load_lock = threading.Lock()
 
     def _ensure_loaded(self) -> None:
         if self._ready:
             return
-        self._model = self._try_load_rfdetr()
-        self._ready = True
+        with self._load_lock:
+            if self._ready:
+                return
+            self._model = self._try_load_rfdetr()
+            self._ready = True
 
     @staticmethod
     def _try_load_rfdetr():

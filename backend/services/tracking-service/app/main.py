@@ -1,7 +1,9 @@
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+import asyncio
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -30,6 +32,27 @@ from .service import (
 )
 
 logger = logging.getLogger(__name__)
+_warmup_task: asyncio.Task | None = None
+_warmup_state: dict[str, object] = {
+    "enabled": bool(settings.startup_warmup_enabled),
+    "status": "pending",
+    "ready": False,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+}
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _set_warmup_state(**updates: object) -> None:
+    _warmup_state.update(updates)
+
+
+def _warmup_snapshot() -> dict[str, object]:
+    return dict(_warmup_state)
 
 
 def _warmup_models() -> None:
@@ -78,12 +101,27 @@ def _warmup_models() -> None:
     logger.info("[warmup] All models pre-loaded. Service ready for requests.")
 
 
+def _run_warmup_models() -> None:
+    _set_warmup_state(status="running", ready=False, started_at=_utcnow_iso(), finished_at=None, last_error=None)
+    try:
+        _warmup_models()
+    except Exception as exc:  # pragma: no cover
+        logger.exception("[warmup] Background warmup failed")
+        _set_warmup_state(status="failed", ready=False, finished_at=_utcnow_iso(), last_error=str(exc))
+        return
+    _set_warmup_state(status="completed", ready=True, finished_at=_utcnow_iso(), last_error=None)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import asyncio
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _warmup_models)
+    global _warmup_task
+    if settings.startup_warmup_enabled:
+        _warmup_task = asyncio.create_task(asyncio.to_thread(_run_warmup_models))
+    else:
+        _set_warmup_state(status="disabled", ready=False)
     yield
+    if _warmup_task is not None and not _warmup_task.done():
+        _warmup_task.cancel()
 
 
 app = FastAPI(title="MCPT Tracking Service", version="2.0.0", lifespan=lifespan)
@@ -102,12 +140,20 @@ def root() -> dict:
 
 @app.get("/health")
 def healthcheck() -> dict:
-    return {"status": "ok", "service": "tracking-service"}
+    warmup = _warmup_snapshot()
+    return {
+        "status": "ok",
+        "service": "tracking-service",
+        "ready": bool(warmup.get("ready")),
+        "warmup": warmup,
+    }
 
 
 @app.get("/api/v1/runtime-config")
 def runtime_config() -> dict:
-    return get_runtime_config()
+    config = get_runtime_config()
+    config["warmup"] = _warmup_snapshot()
+    return config
 
 
 @app.get("/api/v1/runtime-config/hardware")
@@ -116,6 +162,7 @@ def runtime_config_hardware() -> dict:
     return {
         "detected_hardware": config.get("detected_hardware"),
         "execution_plan": config.get("execution_plan"),
+        "warmup": _warmup_snapshot(),
     }
 
 
