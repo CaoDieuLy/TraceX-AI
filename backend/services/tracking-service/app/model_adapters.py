@@ -126,6 +126,15 @@ _SHOES_PROMPTS = [
 # Checkpoint: transformer_120.pth from umair894/KAT-ReID-MSMT17
 # ---------------------------------------------------------------------------
 
+def _weights_root() -> Path:
+    """Resolve model weights root: env var MCPT_MODEL_WEIGHTS_ROOT → storage/model-weights/ relative to repo."""
+    import os
+    configured = os.environ.get("MCPT_MODEL_WEIGHTS_ROOT", "").strip()
+    if configured:
+        return Path(configured)
+    return Path(__file__).parent.parent.parent.parent.parent.parent / "storage" / "model-weights"
+
+
 class TransReIDHub:
     """
     TransReID ViT-Base/16 trained on MSMT17 — lazy singleton for person Re-ID.
@@ -133,15 +142,17 @@ class TransReIDHub:
     Produces 768-dim L2-normalised embeddings from 256×128 person crops.
     Significantly outperforms OSNet-AIN for cross-camera Re-ID tasks.
     Checkpoint: 86M params, trained for 120 epochs on MSMT17 (4,101 identities).
+    Weights pre-loaded on shared filesystem — no download at inference time.
     """
 
     _instance: Optional["TransReIDHub"] = None
     _lock = threading.Lock()
 
-    _CKPT = (
-        Path(__file__).parent.parent.parent.parent.parent.parent
-        / "storage" / "model-weights" / "transreid-reid" / "transformer_120.pth"
-    )
+    @property
+    def _CKPT(self) -> Path:
+        import os
+        env = os.environ.get("MCPT_TRANSREID_WEIGHTS", "").strip()
+        return Path(env) if env else _weights_root() / "transreid-reid" / "transformer_120.pth"
 
     def __new__(cls) -> "TransReIDHub":
         with cls._lock:
@@ -218,15 +229,17 @@ class VideoMAEHub:
     Input: list of PIL frames from an ActionClip (resampled to 16 frames × 224×224).
     Output: 1024-dim L2-normalised CLS token embedding.
     SOTA self-supervised video pretraining (ECCV 2022 + Kinetics fine-tuned).
+    Weights pre-loaded on shared filesystem — no download at inference time.
     """
 
     _instance: Optional["VideoMAEHub"] = None
     _lock = threading.Lock()
 
-    _CKPT_DIR = (
-        Path(__file__).parent.parent.parent.parent.parent.parent
-        / "storage" / "model-weights" / "videomae-action"
-    )
+    @property
+    def _CKPT_DIR(self) -> Path:
+        import os
+        env = os.environ.get("MCPT_VIDEOMAE_WEIGHTS", "").strip()
+        return Path(env) if env else _weights_root() / "videomae-action"
 
     def __new__(cls) -> "VideoMAEHub":
         with cls._lock:
@@ -397,9 +410,14 @@ class SigLIP2ModelHub:
         with self._lock:
             if self._loaded:
                 return
-            import torch
-            import open_clip
-            logger.info("Loading SigLIP2 ViT-L-16-SigLIP2-512/webli …")
+            import os, torch, open_clip
+            # Ensure HuggingFace uses the pre-downloaded cache on shared filesystem
+            # SigLIP2 (3.4GB) is already at $HF_HOME/hub/models--timm--ViT-L-16-SigLIP2-512/
+            studio_root = str(Path(__file__).parent.parent.parent.parent.parent.parent.parent)
+            hf_home = os.environ.get("HF_HOME") or os.path.join(studio_root, ".cache", "huggingface")
+            os.environ.setdefault("HF_HOME", hf_home)
+            os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(hf_home, "hub"))
+            logger.info("Loading SigLIP2 ViT-L-16-SigLIP2-512/webli from %s …", hf_home)
             model, _, preprocess = open_clip.create_model_and_transforms(
                 "ViT-L-16-SigLIP2-512", pretrained="webli"
             )

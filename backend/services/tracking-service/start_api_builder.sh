@@ -14,6 +14,18 @@ export INGESTION_WORK_ROOT="${INGESTION_WORK_ROOT:-$REPO_ROOT/storage/tracking-i
 export MCPT_SECRETS_ROOT="$SECRETS_ROOT"
 export MCPT_SHARED_ENV_FILE="$SHARED_ENV_FILE"
 
+# Model weights — tất cả đã có sẵn trên shared filesystem, không cần download khi user request
+STUDIO_ROOT="$(cd "$REPO_ROOT/.." && pwd)"  # /teamspace/studios/this_studio
+export MCPT_MODEL_WEIGHTS_ROOT="$REPO_ROOT/storage/model-weights"
+export MCPT_RF_DETR_WEIGHTS="$REPO_ROOT/storage/model-weights/rf-detr/rf-detr-xxlarge.pth"
+export MCPT_TRANSREID_WEIGHTS="$REPO_ROOT/storage/model-weights/transreid-reid/transformer_120.pth"
+export MCPT_VIDEOMAE_WEIGHTS="$REPO_ROOT/storage/model-weights/videomae-action"
+
+# HuggingFace cache — SigLIP2 đã download tại đây (3.4GB, không download lại)
+export HF_HOME="${HF_HOME:-$STUDIO_ROOT/.cache/huggingface}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$STUDIO_ROOT/.cache/huggingface/hub}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+
 echo "[start_api_builder] repo_root=$REPO_ROOT"
 echo "[start_api_builder] service_dir=$SERVICE_DIR"
 echo "[start_api_builder] secrets_root=$MCPT_SECRETS_ROOT"

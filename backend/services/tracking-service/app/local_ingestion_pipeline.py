@@ -201,8 +201,14 @@ class RFDETRPersonDetector:
 
     @staticmethod
     def _try_load_rfdetr():
+        # Checkpoint stored in storage/model-weights/rf-detr/ relative to repo root
+        _here = Path(__file__).resolve()
+        repo_root = _here.parent.parent.parent.parent.parent.parent
+        weights_path = repo_root / "storage" / "model-weights" / "rf-detr" / "rf-detr-xxlarge.pth"
+        weights_str = str(weights_path) if weights_path.exists() else "rf-detr-xxlarge.pth"
+
         for loader in [  # noqa: RET503
-            lambda: __import__("rfdetr", fromlist=["RFDETR2XLarge"]).RFDETR2XLarge(),
+            lambda: __import__("rfdetr", fromlist=["RFDETR2XLarge"]).RFDETR2XLarge(pretrain_weights=weights_str),
             lambda: __import__("rfdetr", fromlist=["RFDETRLarge"]).RFDETRLarge(),
             lambda: __import__("rfdetr", fromlist=["RFDETR"]).RFDETR(model_id="rf-detr-2xlarge"),
         ]:

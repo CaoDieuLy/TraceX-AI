@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -23,7 +24,6 @@ from .service import (
     get_runtime_config,
     process_video_ingestion,
     process_video_query,
-    process_video_query_worker,
     resolve_tracking_artifact_paths,
     run_tracking,
     search_candidates_remote,
@@ -31,7 +31,62 @@ from .service import (
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
+
+def _warmup_models() -> None:
+    """
+    Pre-load tất cả AI models vào GPU memory khi service start.
+    Đảm bảo latency thấp cho request đầu tiên của user.
+    Models: RF-DETR 2XLarge, TransReID ViT-Base, VideoMAE Large, SigLIP2 ViT-L-16-512.
+    """
+    from .model_adapters import SigLIP2ModelHub, TransReIDHub, VideoMAEHub
+
+    logger.info("[warmup] Pre-loading AI models into GPU memory...")
+
+    # SigLIP2 — dùng cho attribute zero-shot + action embedding + query encoding
+    try:
+        hub = SigLIP2ModelHub()
+        hub._ensure_loaded()
+        logger.info("[warmup] SigLIP2 ViT-L-16-512 ready")
+    except Exception as exc:
+        logger.error("[warmup] SigLIP2 failed: %s", exc)
+
+    # TransReID — dùng cho appearance Re-ID embedding
+    try:
+        hub = TransReIDHub()
+        hub._ensure_loaded()
+        logger.info("[warmup] TransReID ViT-Base ready")
+    except Exception as exc:
+        logger.error("[warmup] TransReID failed: %s", exc)
+
+    # VideoMAE — dùng cho action recognition
+    try:
+        hub = VideoMAEHub()
+        hub._ensure_loaded()
+        logger.info("[warmup] VideoMAE Large ready")
+    except Exception as exc:
+        logger.error("[warmup] VideoMAE failed: %s", exc)
+
+    # RF-DETR — dùng cho person detection (heaviest model, load cuối)
+    try:
+        from .local_ingestion_pipeline import RFDETRPersonDetector
+        det = RFDETRPersonDetector()
+        det._ensure_loaded()
+        logger.info("[warmup] RF-DETR 2XLarge ready")
+    except Exception as exc:
+        logger.error("[warmup] RF-DETR failed: %s", exc)
+
+    logger.info("[warmup] All models pre-loaded. Service ready for requests.")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    import asyncio
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _warmup_models)
+    yield
+
+
+app = FastAPI(title="MCPT Tracking Service", version="2.0.0", lifespan=lifespan)
 
 
 @app.get("/")
@@ -81,23 +136,9 @@ async def ai_worker(
     execution_plan: str | None = Form(default=None),
     acceleration_state: str | None = Form(default=None),
 ) -> dict:
-    worker_input_dir = Path(settings.ingestion_work_root) / "remote-ai-inputs"
-    worker_input_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(file.filename or "").suffix or ".bin"
-    local_input_path = worker_input_dir / f"{(video_id or 'query-video').strip() or 'query-video'}-{query_id or 'worker'}{suffix}"
-    local_input_path.write_bytes(await file.read())
-    return process_video_query_worker(
-        {
-            "query_id": query_id,
-            "video_id": video_id,
-            "video_title": video_title,
-            "query_text": query_text,
-            "source_path": str(local_input_path),
-            "metadata": metadata,
-            "detected_hardware": detected_hardware,
-            "execution_plan": execution_plan,
-            "acceleration_state": acceleration_state,
-        }
+    raise HTTPException(
+        status_code=501,
+        detail="AI worker upload endpoint not supported in strict pipeline mode. Use /api/v1/ingestion/process with source_url instead.",
     )
 
 

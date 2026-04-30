@@ -1,23 +1,9 @@
-numpy
-Cython
-h5py==2.10
-Pillow
-six
-scipy
-opencv-python
-matplotlib
-tb-nightly
-future
-yacs
-gdown
-flake8
-yapf
-isort
-imageio
-tensorflow==1.15
-#tensorflow-gpu==1.15
-scikit-learn==0.22.2
+# torchreid — Re-ID framework backbone dùng bởi model_adapters.py (TransReID loader)
+# Chỉ cần subset này để load TransReID checkpoint.
+# Active inference requirements: backend/services/tracking-service/requirements.txt
 torch
 torchvision
-# keras==2.4.0
-keras==2.3.1
+timm
+numpy
+scipy
+Pillow

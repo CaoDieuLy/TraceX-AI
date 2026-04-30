@@ -1,43 +1,41 @@
-# Hạ tầng (infra)
+# infra/
 
-## Chạy toàn bộ stack
+Docker Compose stack cho VPS deployment.
 
-Từ thư mục gốc của repository:
+## Chạy stack
 
 ```bash
-docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env up --build
+# Sinh env files từ secrets/master.env trước
+bash scripts/sync_secrets.sh
+
+# Start tất cả services
+docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env up -d --build
+
+# Xem status
+docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env ps
 ```
 
-- **frontend**: http://localhost:3000  
-- **backend** (API): http://localhost:8000  
-- **ai_service** (nội bộ): http://localhost:8001 — backend gọi qua biến `AI_SERVICE_URL`  
-- **postgres**: localhost:5432 (có thể ghi đè bằng biến môi trường)
+## Services
 
-## Biến môi trường
+| Service | Port | Mô tả |
+|---------|------|-------|
+| `mcpt-frontend` | 3000 | Next.js web app |
+| `mcpt-backend` | 8000 | API Gateway + Metadata Service + Queue Worker |
+| `mcpt-ai-service` | 8001 | AI Search Service (internal) |
+| `mcpt-postgres` | 5432 | PostgreSQL database |
 
-Chỉnh các file trong `infra/env/`:
+## Env files
 
-| File | Mục đích |
-|------|----------|
-| `backend.env` | Gateway + metadata đi kèm, DB, tracking/Lightning, JWT, Drive |
-| `ai.env` | Dịch vụ AI: DB + tracking (cùng pipeline xếp hạng) |
-| `frontend.env` | `NEXT_PUBLIC_API_BASE_URL` cho trình duyệt |
+> Không edit trực tiếp — auto-generated bởi `scripts/sync_secrets.sh` từ `secrets/master.env`.
 
-Thư mục secrets được mount chỉ đọc tại `/workspace/a20-root/secrets` và `/workspace/a20-root/secret` từ `secrets/` và `secret/` trong repo.
+| File | Dùng bởi |
+|------|---------|
+| `env/backend.env` | `docker compose --env-file` |
+| `env/ai.env` | ai_service container |
+| `env/frontend.env` | frontend container |
 
-## Kiến trúc
-
-- **backend**: FastAPI gateway + metadata API trong một container; gateway gọi **ai_service** qua HTTP cho `/search`.
-- **ai_service**: FastAPI `POST /internal/search`; chạy `rank_candidates` (logic metadata được vendor + tracking từ xa).
-
-Chi tiết vai trò từng thư mục (tiếng Việt): [docs/KIEN_TRUC_MODULAR_VI.md](../docs/KIEN_TRUC_MODULAR_VI.md).  
-Lịch sử gỡ monolith: [docs/CHUYEN_DOI_CAU_TRUC.md](../docs/CHUYEN_DOI_CAU_TRUC.md).
-
-## Deploy VPS (tùy chọn)
-
-Trên máy chủ, thư mục ứng dụng phải chứa `backend/`, `frontend/`, `ai_service/`, `infra/`, `shared_secret_runtime.py` (đồng bộ từ CI hoặc `git pull`). Sau đó:
+## Deploy lên VPS
 
 ```bash
-chmod +x infra/vps/deploy.sh
-./infra/vps/deploy.sh "$(pwd)"
+bash infra/vps/deploy.sh .
 ```

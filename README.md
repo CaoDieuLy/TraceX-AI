@@ -23,6 +23,7 @@ Bệnh viện vận hành hàng chục camera giám sát liên tục. Khi cần 
 
 1. [Key Features](#1-key-features)
 2. [Kiến trúc hệ thống](#2-kiến-trúc-hệ-thống)
+0. [**Secret Management — Đọc trước khi làm gì khác**](#0-secret-management--đọc-trước-khi-làm-gì-khác)
 3. [Tech Stack](#3-tech-stack)
 4. [AI Models](#4-ai-models)
 5. [Pipeline Offline Indexing](#5-pipeline-offline-indexing)
@@ -40,6 +41,124 @@ Bệnh viện vận hành hàng chục camera giám sát liên tục. Khi cần 
 17. [Performance Notes](#17-performance-notes)
 18. [Limitations & Future Work](#18-limitations--future-work)
 19. [Thành viên nhóm](#19-thành-viên-nhóm)
+
+---
+
+## 0. Secret Management — Đọc trước khi làm gì khác
+
+### Vấn đề cũ (đã fix)
+
+Trước đây secrets bị rải rác ở nhiều nơi và không kiểm soát được:
+
+| File | Loại | Trạng thái |
+|------|------|-----------|
+| `secret/shared.env` | LightningAI + Google Drive + DB | Không gitignore → **commit nhầm** |
+| `secret/deploy/*.env` | VPS IP, password | Không gitignore → **commit nhầm** |
+| `infra/env/backend.env` | Docker Compose | Có real password → **commit nhầm** |
+| `infra/env/ai.env` | Docker Compose | Có real token → **commit nhầm** |
+| `secrets/shared.env` | Docker mount | Gitignore đúng, nhưng không đồng bộ |
+
+Khi đổi máy phải cập nhật 5–6 file, dễ miss, dễ inconsistent.
+
+### Cấu trúc mới — Single Source of Truth
+
+```
+secrets/                          ← GITIGNORED toàn bộ (trừ README, .example)
+├── master.env                    ← ĐÂY LÀ FILE DUY NHẤT CẦN CHỈNH
+├── master.env.example            ← Template (committed, không có real value)
+├── oauth/
+│   ├── oauth2_credentials.json  ← Google OAuth client credentials
+│   └── oauth2_token.pickle      ← Google OAuth refresh token (generated)
+└── (shared.env, ...)            ← Auto-generated bởi sync_secrets.sh, không edit
+```
+
+Tất cả file khác (`infra/env/backend.env`, `infra/env/ai.env`, `secret/shared.env`...) được **tự động generate** từ `secrets/master.env` bởi script `scripts/sync_secrets.sh`.
+
+### Khi chuyển sang máy mới
+
+Chỉ cần **2 thao tác**:
+
+```bash
+# 1. Copy folder secrets/ từ máy cũ sang máy mới
+scp -r old_machine:/path/to/A20-App-119/secrets/ ./secrets/
+# Hoặc dùng USB, encrypted cloud, etc.
+
+# 2. Chạy sync để generate ra tất cả file cần thiết
+bash scripts/sync_secrets.sh
+
+# Xong. Tất cả infra/env/*.env, secret/shared.env, secrets/shared.env đã được cập nhật.
+```
+
+### Cập nhật một secret (ví dụ: LightningAI URL thay đổi)
+
+```bash
+# Chỉ chỉnh 1 file
+nano secrets/master.env
+# Sửa dòng: LIGHTNING_API_BASE_URL=https://8000-<NEW_HASH>.cloudspaces.litng.ai
+# Sửa dòng: TRACKING_SERVICE_URL=https://8000-<NEW_HASH>.cloudspaces.litng.ai
+
+# Sync ra tất cả nơi + restart VPS services
+bash scripts/sync_secrets.sh --vps
+
+# Hoặc chỉ sync local (không động VPS)
+bash scripts/sync_secrets.sh
+```
+
+### `sync_secrets.sh` làm gì
+
+Script `scripts/sync_secrets.sh` đọc `secrets/master.env` và cập nhật:
+
+| Target | Dùng bởi |
+|--------|---------|
+| `infra/env/backend.env` | `docker compose --env-file` khi chạy local/VPS |
+| `infra/env/ai.env` | `docker compose --env-file` cho ai-service |
+| `infra/env/frontend.env` | `docker compose --env-file` cho frontend |
+| `secret/shared.env` | `shared_secret_runtime.py` — load vào tracking service (LightningAI) |
+| `secrets/shared.env` | Docker volume mount vào container |
+| VPS (với `--vps` flag) | SCP files + restart backend/ai_service |
+
+### Danh sách tất cả secrets cần điền
+
+Mở `secrets/master.env` (copy từ `secrets/master.env.example`) và điền:
+
+| Biến | Lấy ở đâu | Thay đổi khi nào |
+|------|-----------|-----------------|
+| `VPS_HOST` | IP VPS | Khi đổi VPS |
+| `VPS_PASSWORD` | Provider VPS | Khi đổi mật khẩu VPS |
+| `POSTGRES_PASSWORD` | Tự đặt | Khi setup lần đầu |
+| `JWT_SECRET_KEY` | Tự generate random | Khi setup lần đầu |
+| `LIGHTNING_API_BASE_URL` | LightningAI UI → API Builder → Settings → URL | **Mỗi khi restart L4** |
+| `LIGHTNING_API_TOKEN` | Tự đặt (Bearer token) | Khi muốn đổi |
+| `TRACKING_SERVICE_URL` | Giống `LIGHTNING_API_BASE_URL` | **Mỗi khi restart L4** |
+| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | Google Drive URL của folder `VinUni/` | Khi setup lần đầu |
+| `GOOGLE_DRIVE_VINUNI_FOLDER_ID` | Google Drive URL của folder `VinUni/` | Khi setup lần đầu |
+| `GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID` | Google Drive URL của folder `Storage/` | Khi setup lần đầu |
+| `NEXT_PUBLIC_API_GATEWAY_URL` | IP VPS | Khi đổi VPS |
+
+> **Quan trọng:** Sau mỗi lần restart LightningAI API Builder, `LIGHTNING_API_BASE_URL` và `TRACKING_SERVICE_URL` **bắt buộc phải cập nhật**. Đây là thao tác thường xuyên nhất.
+
+### Google Drive OAuth Token
+
+OAuth token không nằm trong `master.env` — nó là file binary:
+
+```bash
+# Lần đầu tạo token (chạy 1 lần, cần browser):
+python3 -c "
+from google_auth_oauthlib.flow import InstalledAppFlow
+flow = InstalledAppFlow.from_client_secrets_file(
+    'secrets/oauth/oauth2_credentials.json',
+    scopes=['https://www.googleapis.com/auth/drive']
+)
+creds = flow.run_local_server(port=0)
+import pickle
+with open('secrets/oauth/oauth2_token.pickle', 'wb') as f:
+    pickle.dump(creds, f)
+print('Token saved to secrets/oauth/oauth2_token.pickle')
+"
+
+# Khi chuyển máy: file này đã nằm trong secrets/ được copy sang rồi
+# Nếu token hết hạn (thường sau vài tháng), xóa và chạy lại lệnh trên
+```
 
 ---
 

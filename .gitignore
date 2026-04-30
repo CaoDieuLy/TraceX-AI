@@ -13,6 +13,13 @@ secrets/**
 !secrets/**/
 !secrets/README.md
 !secrets/**/*.example
+secret/
+
+# infra/env/*.env chứa real values (generated từ secrets/master.env bởi sync_secrets.sh)
+# Chỉ commit file .example
+infra/env/backend.env
+infra/env/ai.env
+infra/env/frontend.env
 oauth2_credentials.json
 oauth2_token.pickle
 **/credentials/
@@ -62,3 +69,4 @@ Multi-Camera-Person-Tracking-and-Re-Identification/exchange_full_results.json
 # model weights
 *.pth
 *.pt
+frontend/next-env.d.ts

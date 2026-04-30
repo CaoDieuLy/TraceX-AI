@@ -46,7 +46,6 @@ services:
       retries: 10
     volumes:
       - ../secrets:/workspace/a20-root/secrets:ro
-      - ../secret:/workspace/a20-root/secret:ro
       - mcpt_storage:/workspace/storage
 
   backend:
@@ -76,7 +75,6 @@ services:
       retries: 10
     volumes:
       - ../secrets:/workspace/a20-root/secrets:ro
-      - ../secret:/workspace/a20-root/secret:ro
       - mcpt_storage:/workspace/storage
       - ../storage:/workspace/storage/storage
 
