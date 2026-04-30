@@ -41,17 +41,17 @@ export function AccountMenu() {
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="flex h-10 w-10 items-center justify-center rounded-full border border-surface-muted bg-white text-sm font-semibold text-ink shadow-card transition hover:bg-surface"
+        className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200/90 bg-white/90 text-sm font-semibold text-slate-800 shadow-[0_10px_24px_rgba(15,23,42,0.12)] transition duration-200 hover:border-sky-300 hover:bg-white"
         aria-label="Tài khoản"
       >
         {initials}
       </button>
       {open ? (
-        <div className="absolute right-0 z-40 mt-2 w-72 rounded-2xl border border-surface-muted bg-white p-3 shadow-elevated">
-          <div className="rounded-xl bg-surface px-3 py-2">
-            <p className="text-sm font-semibold text-ink">{sessionUser?.full_name || "Tai khoan"}</p>
-            <p className="text-xs text-ink-secondary">{sessionUser?.email || "unknown@email"}</p>
-            <p className="mt-1 inline-flex rounded-full bg-white px-2 py-0.5 text-[11px] font-medium text-ink-secondary">
+        <div className="absolute right-0 z-40 mt-2 w-72 rounded-2xl border border-slate-200/90 bg-white/90 p-3 shadow-[0_20px_40px_rgba(15,23,42,0.18)] backdrop-blur-md">
+          <div className="rounded-xl border border-slate-200/80 bg-slate-50 px-3 py-2">
+            <p className="text-sm font-semibold text-slate-900">{sessionUser?.full_name || "Tai khoan"}</p>
+            <p className="text-xs text-slate-600">{sessionUser?.email || "unknown@email"}</p>
+            <p className="mt-1 inline-flex rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600">
               Role: {sessionUser?.role || "USER"}
             </p>
           </div>
@@ -59,7 +59,7 @@ export function AccountMenu() {
             <Link
               href="/settings"
               onClick={() => setOpen(false)}
-              className="rounded-lg px-3 py-2 text-sm text-ink-secondary transition hover:bg-surface hover:text-ink"
+              className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition duration-200 hover:bg-slate-100 hover:text-slate-900"
             >
               Settings
             </Link>
@@ -67,7 +67,7 @@ export function AccountMenu() {
               <Link
                 href="/admin/users"
                 onClick={() => setOpen(false)}
-                className="rounded-lg px-3 py-2 text-sm text-ink-secondary transition hover:bg-surface hover:text-ink"
+                className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition duration-200 hover:bg-slate-100 hover:text-slate-900"
               >
                 User management
               </Link>
@@ -75,7 +75,7 @@ export function AccountMenu() {
             <button
               type="button"
               onClick={handleLogout}
-              className="rounded-lg px-3 py-2 text-left text-sm text-red-600 transition hover:bg-red-50"
+              className="rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition duration-200 hover:bg-red-50"
             >
               Dang xuat
             </button>

@@ -116,12 +116,12 @@ export function LoginPage() {
         backgroundRepeat: "no-repeat",
       }}
     >
-      <div className="absolute inset-0 bg-slate-900/12" />
+      <div className="absolute inset-0 bg-slate-950/18" />
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_22%_30%,rgba(255,255,255,0.34),transparent_48%),radial-gradient(circle_at_82%_20%,rgba(174,213,255,0.26),transparent_45%)]" />
 
 
       <div className="relative mx-auto grid min-h-screen w-full max-w-7xl items-center gap-8 px-4 py-8 md:grid-cols-[1.22fr_0.78fr] md:px-10">
-        <section className="rounded-3xl bg-slate-900/12 p-6 pt-20 text-white backdrop-blur-[2px] md:p-10 md:pt-36">
+        <section className="self-start rounded-3xl border border-white/28 bg-gradient-to-br from-white/22 via-white/12 to-sky-200/12 p-6 pt-10 text-white shadow-[0_18px_50px_rgba(2,8,23,0.35)] backdrop-blur-xl transition-[background-color,border-color,box-shadow] duration-300 hover:border-white/45 hover:shadow-[0_24px_70px_rgba(2,8,23,0.45)] md:p-10 md:pt-20">
           <div className="flex items-center gap-3">
             <img src="/images/auth/img_icon_se.png" alt="logo" className="h-11 w-11 rounded-xl object-contain" />
             <div>
@@ -142,21 +142,21 @@ export function LoginPage() {
           </p>
 
           <div className="mt-8 max-w-xl space-y-3">
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
               <img src="/images/auth/img_icon_Ai.png" alt="AI" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
                 <p className="text-xl font-semibold text-[#F5FAFF]">AI Thong minh</p>
                 <p className="text-sm text-[#DFECFF]">Phat hien khuon mat, hanh vi bat thuong va canh bao theo thoi gian thuc.</p>
               </div>
             </div>
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
               <img src="/images/auth/img_icon_cam.png" alt="Camera" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
                 <p className="text-xl font-semibold text-[#F5FAFF]">Giam sat toan dien</p>
                 <p className="text-sm text-[#DFECFF]">Xem live, xem lai, quan ly nhieu camera moi luc moi noi.</p>
               </div>
             </div>
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
               <img src="/images/auth/img_icon_se2.png" alt="Search" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
                 <p className="text-xl font-semibold text-[#F5FAFF]">Tim nguoi theo mo ta</p>
@@ -182,7 +182,7 @@ export function LoginPage() {
         </section>
 
         <section className="flex items-center justify-center md:justify-end">
-          <div className="w-full max-w-md rounded-3xl border border-white/45 bg-white/78 p-8 shadow-elevated backdrop-blur-xl md:p-9">
+          <div className="w-full max-w-md rounded-3xl border border-white/52 bg-gradient-to-br from-white/84 via-white/72 to-sky-100/62 p-8 shadow-[0_18px_50px_rgba(15,23,42,0.28)] backdrop-blur-2xl transition-[background-color,border-color,box-shadow] duration-300 hover:border-white/70 hover:shadow-[0_28px_70px_rgba(15,23,42,0.36)] md:p-9">
             <div className="mb-8 text-center">
               <h2 className="text-2xl font-semibold text-ink">Log in</h2>
               <p className="mt-2 text-sm text-ink-secondary">Su dung email va password de tiep tuc</p>

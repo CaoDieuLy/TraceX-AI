@@ -39,14 +39,18 @@ function HomeViewInner() {
 
   if (view === "history") {
     return (
-      <div className="mx-auto max-w-2xl rounded-2xl border border-surface-muted bg-white p-8 shadow-card">
-        <h1 className="text-xl font-semibold text-ink">Lịch sử tìm kiếm</h1>
-        <p className="mt-2 text-sm text-ink-secondary">Dữ liệu mô phỏng cho giao diện.</p>
-        <ul className="mt-6 divide-y divide-surface-muted">
+      <div className="mx-auto w-full max-w-4xl rounded-3xl border border-slate-200/90 bg-gradient-to-br from-white/95 via-slate-50/90 to-blue-50/80 p-6 shadow-[0_18px_40px_rgba(15,23,42,0.08)] backdrop-blur-lg md:p-8">
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-sky-700">Search Intelligence</p>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">Lịch sử truy vấn</h1>
+        <p className="mt-2 text-sm leading-relaxed text-slate-600 md:text-base">Dữ liệu mô phỏng để kiểm tra trải nghiệm tìm kiếm và luồng phân tích truy vấn.</p>
+        <ul className="mt-6 space-y-3">
           {MOCK_SEARCH_HISTORY.map((row) => (
-            <li key={row.id} className="flex flex-col gap-1 py-4 first:pt-0">
-              <span className="text-xs text-ink-subtle">{row.at}</span>
-              <span className="text-sm font-medium text-ink">{row.query}</span>
+            <li
+              key={row.id}
+              className="rounded-2xl border border-slate-200/80 bg-white/80 px-4 py-3 shadow-[0_8px_24px_rgba(15,23,42,0.05)] transition-[border-color,box-shadow] duration-200 hover:border-sky-200 hover:shadow-[0_14px_28px_rgba(14,116,144,0.12)]"
+            >
+              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{row.at}</span>
+              <p className="mt-1 text-sm font-semibold text-slate-900 md:text-base">{row.query}</p>
             </li>
           ))}
         </ul>
@@ -56,55 +60,72 @@ function HomeViewInner() {
 
   if (!hasSearched) {
     return (
-      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-surface-muted bg-white p-8 shadow-card">
-        <h2 className="text-lg font-semibold text-ink">{HOME_GUIDE_TITLE}</h2>
-        <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-ink-secondary">
-          {HOME_GUIDE_LINES.map((line) => (
-              <li key={line} className="whitespace-pre-line">
-                {line}
+      <div className="mx-auto w-full max-w-4xl">
+        <section className="rounded-3xl border border-slate-200/90 bg-gradient-to-br from-white/95 via-slate-50/95 to-blue-50/80 p-6 shadow-[0_16px_40px_rgba(15,23,42,0.09)] backdrop-blur-md md:p-8">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-sky-700">Modern B2B SaaS</p>
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">{HOME_GUIDE_TITLE}</h2>
+          <p className="mt-3 text-sm leading-relaxed text-slate-600 md:text-base">
+            Tập trung mô tả ngắn gọn và chính xác để hệ thống phân tích nhanh hơn, đối chiếu đặc điểm hiệu quả hơn và trả về kết quả phù hợp.
+          </p>
+
+          <ol className="mt-6 space-y-3">
+            {HOME_GUIDE_LINES.map((line, idx) => (
+              <li
+                key={line}
+                className="rounded-2xl border border-slate-200/80 bg-white/80 px-4 py-3 shadow-[0_8px_24px_rgba(15,23,42,0.05)]"
+              >
+                <p className="text-xs font-semibold uppercase tracking-[0.13em] text-sky-700">Step {idx + 1}</p>
+                <p className="mt-1 text-sm leading-relaxed text-slate-800 md:text-base">{line}</p>
               </li>
-          ))}
-        </ol>
+            ))}
+          </ol>
+        </section>
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-8">
-      {isLoading ? <p className="text-sm text-ink-secondary">Đang tải kết quả...</p> : null}
+      {isLoading ? (
+        <p className="rounded-2xl border border-sky-100 bg-sky-50/70 px-4 py-3 text-sm font-medium text-sky-900">
+          Đang tải kết quả...
+        </p>
+      ) : null}
       {!isLoading && !error && results.length === 0 ? (
-        <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
           Chưa có video để hiển thị. Backend đang trả danh sách rỗng.
         </p>
       ) : null}
       <VideoGrid items={pageItems} />
 
-      <div className="flex flex-wrap items-center justify-between gap-4 border-t border-surface-muted pt-6">
-        <p className="text-sm font-medium text-ink-secondary">
-          {isLastPage ? "Top End" : `Top ${startRank}-${endRank}`}
-        </p>
-        <button
-          type="button"
-          disabled={isLastPage || isLoading}
-          onClick={async () => {
-            if (!isLastLoadedPage) {
-              setGridPage(gridPage + 1);
-              return;
-            }
-            if (hasMore) {
-              const added = await loadMore();
-              if (added) {
+      <div className="rounded-2xl border border-slate-200/90 bg-white/80 p-4 shadow-[0_10px_28px_rgba(15,23,42,0.06)] backdrop-blur-md">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <p className="text-sm font-semibold text-slate-700">
+            {isLastPage ? "Top End" : `Top ${startRank}-${endRank}`}
+          </p>
+          <button
+            type="button"
+            disabled={isLastPage || isLoading}
+            onClick={async () => {
+              if (!isLastLoadedPage) {
                 setGridPage(gridPage + 1);
+                return;
               }
-            }
-          }}
-          className="rounded-xl bg-ink px-5 py-2.5 text-sm font-semibold text-white shadow-card transition hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Next
-        </button>
+              if (hasMore) {
+                const added = await loadMore();
+                if (added) {
+                  setGridPage(gridPage + 1);
+                }
+              }
+            }}
+            className="rounded-xl bg-[#0F172A] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_12px_28px_rgba(15,23,42,0.26)] transition duration-200 hover:bg-[#1E293B] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Next
+          </button>
+        </div>
       </div>
 
-      <p className="text-center text-xs text-ink-subtle">
+      <p className="text-center text-xs font-medium tracking-wide text-slate-500">
         Mỗi lần loop {PAGE_SIZE} kết quả · Top n hiện tại = {topK}
       </p>
     </div>
