@@ -18,8 +18,10 @@ Adapters:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -126,12 +128,19 @@ _SHOES_PROMPTS = [
 # ---------------------------------------------------------------------------
 
 def _weights_root() -> Path:
-    """Resolve model weights root: env var MCPT_MODEL_WEIGHTS_ROOT → storage/model-weights/ relative to repo."""
-    import os
+    """Resolve model weights root: env var MCPT_MODEL_WEIGHTS_ROOT → storage/model-weights/ relative to repo.
+
+    File path: app/local_ingestion_pipeline.py
+      parent^1 = app/
+      parent^2 = tracking-service/
+      parent^3 = services/
+      parent^4 = backend/
+      parent^5 = A20-App-119/  ← repo root
+    """
     configured = os.environ.get("MCPT_MODEL_WEIGHTS_ROOT", "").strip()
     if configured:
         return Path(configured)
-    return Path(__file__).parent.parent.parent.parent.parent.parent / "storage" / "model-weights"
+    return Path(__file__).parent.parent.parent.parent.parent / "storage" / "model-weights"
 
 
 class TransReIDHub:

@@ -782,7 +782,7 @@ class TrackletFeaturePipelineProcessor:
         default_factory=_default_appearance_embedding_extractor
     )
     clip_builder: ActionClipBuilder = field(default_factory=ActionClipBuilder)
-    behavior_analyzer: ActionBehaviorAnalyzer = field(default_factory=lambda: __import__("model_adapters", fromlist=["SigLIP2BehaviorAnalyzer"]).SigLIP2BehaviorAnalyzer())
+    behavior_analyzer: ActionBehaviorAnalyzer = field(default_factory=lambda: __import__("app.model_adapters", fromlist=["SigLIP2BehaviorAnalyzer"]).SigLIP2BehaviorAnalyzer())
     semantic_embedder: ActionSemanticEmbedder = field(default_factory=_default_semantic_embedder)
     aggregator: TrackletFeatureAggregator = field(default_factory=TrackletFeatureAggregator)
     stage_execution: TrackletStageExecutionConfig = field(default_factory=TrackletStageExecutionConfig)

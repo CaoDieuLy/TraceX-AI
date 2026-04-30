@@ -206,10 +206,15 @@ class RFDETRPersonDetector:
 
     @staticmethod
     def _try_load_rfdetr():
-        # Checkpoint stored in storage/model-weights/rf-detr/ relative to repo root
-        _here = Path(__file__).resolve()
-        repo_root = _here.parent.parent.parent.parent.parent.parent
-        weights_path = repo_root / "storage" / "model-weights" / "rf-detr" / "rf-detr-xxlarge.pth"
+        # Checkpoint: storage/model-weights/rf-detr/rf-detr-xxlarge.pth
+        # __file__ = app/local_ingestion_pipeline.py → parent^5 = A20-App-119/ (repo root)
+        env_path = os.environ.get("MCPT_RF_DETR_WEIGHTS", "").strip()
+        if env_path:
+            weights_path = Path(env_path)
+        else:
+            _here = Path(__file__).resolve()
+            repo_root = _here.parent.parent.parent.parent.parent  # 5 parents = A20-App-119/
+            weights_path = repo_root / "storage" / "model-weights" / "rf-detr" / "rf-detr-xxlarge.pth"
         weights_str = str(weights_path) if weights_path.exists() else "rf-detr-xxlarge.pth"
 
         for loader in [  # noqa: RET503
