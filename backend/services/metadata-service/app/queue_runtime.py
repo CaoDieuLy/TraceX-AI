@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 import sys
+import time
 from urllib.parse import urlparse
 
 import httpx

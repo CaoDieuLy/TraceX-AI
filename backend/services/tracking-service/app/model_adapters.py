@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from tracklet_feature_pipeline import (
+from .tracklet_feature_pipeline import (
     ActionClip,
     AppearanceAttributeResult,
     AppearanceEmbeddingResult,
