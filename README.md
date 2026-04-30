@@ -63,31 +63,33 @@ Khi đổi máy phải cập nhật 5–6 file, dễ miss, dễ inconsistent.
 ### Cấu trúc mới — Single Source of Truth
 
 ```
-secrets/                          ← GITIGNORED toàn bộ (trừ README, .example)
+secrets/                          ← GITIGNORED toàn bộ (trừ .example)
 ├── master.env                    ← ĐÂY LÀ FILE DUY NHẤT CẦN CHỈNH
 ├── master.env.example            ← Template (committed, không có real value)
 ├── oauth/
 │   ├── oauth2_credentials.json  ← Google OAuth client credentials
 │   └── oauth2_token.pickle      ← Google OAuth refresh token (generated)
-└── (shared.env, ...)            ← Auto-generated bởi sync_secrets.sh, không edit
+└── shared.env                   ← Auto-generated bởi sync_secrets.sh, không edit
 ```
 
-Tất cả file khác (`infra/env/backend.env`, `infra/env/ai.env`, `secret/shared.env`...) được **tự động generate** từ `secrets/master.env` bởi script `scripts/sync_secrets.sh`.
+Tất cả file khác (`infra/env/backend.env`, `infra/env/ai.env`, `secrets/shared.env`) được **tự động generate** từ `secrets/master.env` bởi `scripts/sync_secrets.sh`.
 
 ### Khi chuyển sang máy mới
 
-Chỉ cần **2 thao tác**:
-
 ```bash
-# 1. Copy folder secrets/ từ máy cũ sang máy mới
-scp -r old_machine:/path/to/A20-App-119/secrets/ ./secrets/
-# Hoặc dùng USB, encrypted cloud, etc.
+# Máy CŨ — export secrets thành 1 file
+bash scripts/export_secrets.sh
+# → mcpt_secrets_20260430.tar.gz
 
-# 2. Chạy sync để generate ra tất cả file cần thiết
-bash scripts/sync_secrets.sh
+# Chuyển file đó sang máy mới (download từ LightningAI UI, USB, SCP...)
 
-# Xong. Tất cả infra/env/*.env, secret/shared.env, secrets/shared.env đã được cập nhật.
+# Máy MỚI — import + generate env files
+git clone <REPO_URL> && cd A20-App-119
+bash scripts/import_secrets.sh /path/to/mcpt_secrets_20260430.tar.gz
+bash scripts/sync_secrets.sh --vps
 ```
+
+> **Xem thêm:** [QUICKSTART.md](QUICKSTART.md) để biết flow đầy đủ bước setup lần đầu.
 
 ### Cập nhật một secret (ví dụ: LightningAI URL thay đổi)
 
@@ -113,8 +115,7 @@ Script `scripts/sync_secrets.sh` đọc `secrets/master.env` và cập nhật:
 | `infra/env/backend.env` | `docker compose --env-file` khi chạy local/VPS |
 | `infra/env/ai.env` | `docker compose --env-file` cho ai-service |
 | `infra/env/frontend.env` | `docker compose --env-file` cho frontend |
-| `secret/shared.env` | `shared_secret_runtime.py` — load vào tracking service (LightningAI) |
-| `secrets/shared.env` | Docker volume mount vào container |
+| `secrets/shared.env` | Docker volume mount + `shared_secret_runtime.py` |
 | VPS (với `--vps` flag) | SCP files + restart backend/ai_service |
 
 ### Danh sách tất cả secrets cần điền
@@ -298,7 +299,6 @@ Frontend **không chứa logic AI**. Toàn bộ call đi qua API Gateway.
 | `open_clip` | Load SigLIP2, text/image encode |
 | `transformers` | Load VideoMAE Large |
 | `timm` | Load TransReID ViT-Base backbone |
-| `torchreid` (legacy-engine) | Re-ID framework hỗ trợ TransReID |
 | `opencv-python` | Decode video H.265, frame sampling |
 | `torch` + `torchvision` | Tensor ops, transforms |
 | `numpy` | Vector math, cosine similarity |
@@ -869,7 +869,6 @@ A20-App-119/
 │   ├── config/
 │   │   └── camera_topology.json       ← Hospital camera graph (50 cams, 56 edges)
 │   │
-│   └── legacy-engine/                 ← torchreid framework (dùng bởi TransReID)
 │
 ├── ai_service/
 │   └── aiapp/
@@ -948,7 +947,7 @@ cd A20-App-119
 
 1. Vào [Google Cloud Console](https://console.cloud.google.com) → APIs & Services → Credentials
 2. Tạo OAuth 2.0 Client ID (Desktop App)
-3. Download JSON → lưu vào `secret/oauth/oauth2_credentials.json`
+3. Download JSON → lưu vào `secrets/oauth/oauth2_credentials.json`
 
 Chạy lần đầu để lấy token:
 ```bash
@@ -956,24 +955,24 @@ pip install google-auth-oauthlib google-api-python-client
 python3 -c "
 from google_auth_oauthlib.flow import InstalledAppFlow
 flow = InstalledAppFlow.from_client_secrets_file(
-    'secret/oauth/oauth2_credentials.json',
+    'secrets/oauth/oauth2_credentials.json',
     scopes=['https://www.googleapis.com/auth/drive']
 )
 creds = flow.run_local_server(port=0)
 import pickle
-with open('secret/oauth/oauth2_token.pickle', 'wb') as f:
+with open('secrets/oauth/oauth2_token.pickle', 'wb') as f:
     pickle.load(creds, f)
 "
 # Copy sang secrets/
-cp secret/oauth/oauth2_token.pickle secrets/oauth/oauth2_token.pickle
+# token đã nằm trong secrets/oauth/ sẵn rồi
 ```
 
 ### Bước 4 — Cấu hình môi trường
 
 ```bash
 # Tạo file secret chính
-cp secret/shared.env.example secret/shared.env  # TODO: tạo file .example nếu chưa có
-nano secret/shared.env
+cp secrets/master.env.example secrets/master.env
+nano secrets/master.env
 # Điền: LIGHTNING_API_BASE_URL, TRACKING_SERVICE_URL, DB credentials
 ```
 
@@ -998,7 +997,7 @@ curl -H "Authorization: Bearer <LIGHTNING_API_TOKEN>" \
 
 Sau khi confirm GPU OK, cập nhật URL trong secrets:
 ```bash
-nano secret/shared.env
+nano secrets/master.env
 # LIGHTNING_API_BASE_URL=https://8000-<HASH>.cloudspaces.litng.ai
 # TRACKING_SERVICE_URL=https://8000-<HASH>.cloudspaces.litng.ai
 ```
@@ -1016,7 +1015,7 @@ git clone <REPO_URL> .
 git pull
 
 # Copy secrets (từ local hoặc secure transfer)
-# scp secret/shared.env root@<VPS_IP>:/opt/mcpt/A20-App-119/secret/
+# Dùng: bash scripts/sync_secrets.sh --vps
 
 # Kiểm tra secrets
 bash infra/vps/check-secrets.sh .
@@ -1152,7 +1151,7 @@ curl -X POST http://<VPS_IP>:8000/api/v1/trace/run \
 | `GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID` | `1G6L1d8l...` | ✅ | Folder ID của `Storage/` trên Drive |
 | `GOOGLE_DRIVE_ROOT_FOLDER_ID` | `1gxKBTQ9...` | ✅ | Folder ID của `VinUni/` root |
 
-### `secret/shared.env` — Shared giữa local + LightningAI
+### `secrets/shared.env` — Shared giữa Docker containers + LightningAI
 
 ```env
 LIGHTNING_API_BASE_URL=https://8000-<HASH>.cloudspaces.litng.ai
@@ -1454,8 +1453,7 @@ Bidirectional — mọi edge đều đi được 2 chiều.
 **Fix:**
 ```bash
 # Lấy URL mới từ LightningAI UI → API Builder → Settings → URL
-# Cập nhật secret/shared.env
-nano secret/shared.env
+nano secrets/master.env
 # LIGHTNING_API_BASE_URL=https://8000-<NEW_HASH>.cloudspaces.litng.ai
 # TRACKING_SERVICE_URL=https://8000-<NEW_HASH>.cloudspaces.litng.ai
 
@@ -1483,19 +1481,19 @@ docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env rest
 **Fix:**
 ```bash
 # Xóa token cũ và chạy lại OAuth flow
-rm secret/oauth/oauth2_token.pickle
+rm secrets/oauth/oauth2_token.pickle
 python3 -c "
 from google_auth_oauthlib.flow import InstalledAppFlow
 flow = InstalledAppFlow.from_client_secrets_file(
-    'secret/oauth/oauth2_credentials.json',
+    'secrets/oauth/oauth2_credentials.json',
     scopes=['https://www.googleapis.com/auth/drive']
 )
 creds = flow.run_local_server(port=0)
 import pickle
-with open('secret/oauth/oauth2_token.pickle', 'wb') as f:
+with open('secrets/oauth/oauth2_token.pickle', 'wb') as f:
     pickle.dump(creds, f)
 "
-cp secret/oauth/oauth2_token.pickle secrets/oauth/oauth2_token.pickle
+# token đã nằm trong secrets/oauth/ sẵn rồi
 # Restart backend container để load token mới
 ssh root@<VPS_IP> "docker compose -f /opt/mcpt/A20-App-119/infra/docker-compose.yml \
   --env-file /opt/mcpt/A20-App-119/infra/env/backend.env restart backend"
