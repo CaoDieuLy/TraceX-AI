@@ -7,22 +7,18 @@ GPU → LightningAI. Storage → Google Drive + VPS.
 
 ## Chuyển sang máy mới
 
-**Trên máy cũ** — export secrets thành 1 file mã hoá:
+**Trên máy cũ** — export secrets thành 1 file:
 ```bash
 bash scripts/export_secrets.sh
-# Nhập passphrase → tạo mcpt_secrets_YYYYMMDD.tar.gz.enc
+# → mcpt_secrets_20260430.tar.gz
 ```
 
 **Chuyển file đó sang máy mới** (LightningAI UI download, USB, SCP...):
 ```bash
 # Trên máy mới:
-git clone <REPO_URL>
-cd A20-App-119
-bash scripts/import_secrets.sh /path/to/mcpt_secrets_YYYYMMDD.tar.gz.enc
-# Nhập đúng passphrase → secrets/ được restore
-
-bash scripts/sync_secrets.sh        # generate env files
-bash scripts/sync_secrets.sh --vps  # sync + restart VPS
+git clone <REPO_URL> && cd A20-App-119
+bash scripts/import_secrets.sh /path/to/mcpt_secrets_20260430.tar.gz
+bash scripts/sync_secrets.sh --vps
 ```
 
 **Nếu chuyển LightningAI Studio mới** — thêm bước download model weights (vì shared filesystem khác):
