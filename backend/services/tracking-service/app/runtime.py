@@ -21,43 +21,37 @@ except Exception:
 from .config import settings
 from .cuda_runtime import configure_torch_runtime
 from .execution_plan import resolve_execution_plan
-from .pipeline_profiles import resolve_pipeline_profile
+from .strict_pipeline import get_strict_pipeline
 
 
-def _dict_or_empty(value: object) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-class AccuracyFirstTrackerRuntime:
+class StrictTrackerRuntime:
     def __init__(self) -> None:
-        self.profile = resolve_pipeline_profile(settings.pipeline_profile)
+        self.pipeline = get_strict_pipeline()
 
-    def _resolve_profile(self, candidate_info: dict) -> dict:
-        # Strict mode: always use the single configured pipeline.
-        return resolve_pipeline_profile(settings.pipeline_profile)
+    def _resolve_pipeline(self, candidate_info: dict) -> dict:
+        return get_strict_pipeline()
 
     def build_manifest(
         self,
         candidate_info: dict,
         source_video: str | None,
         output_video_path: Path,
-        profile: dict,
-        hardware_profile: dict,
+        pipeline: dict,
+        detected_hardware: dict,
         execution_plan: dict,
     ) -> dict:
         candidate = dict(candidate_info or {})
         frame_idx = int(candidate.get("frame_idx") or 0)
         bbox = candidate.get("bbox") or candidate.get("representative_bbox") or []
         return {
-            "schema_version": "accuracy_first_tracking_manifest_v1",
+            "schema_version": "strict_tracking_manifest_v1",
             "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "runtime_mode": settings.tracking_runtime_mode,
-            "pipeline_profile": profile["profile"],
-            "pipeline_summary": profile["summary"],
-            "selected_components": profile["components"],
-            "runtime_defaults": profile.get("runtime_defaults", {}),
-            "hyperparameters": profile.get("hyperparameters", {}),
-            "gpu_hardware_profile": hardware_profile,
+            "pipeline_summary": pipeline["summary"],
+            "selected_components": pipeline["components"],
+            "runtime_defaults": pipeline.get("runtime_defaults", {}),
+            "hyperparameters": pipeline.get("hyperparameters", {}),
+            "detected_hardware": detected_hardware,
             "execution_plan": execution_plan,
             "candidate": {
                 "candidate_id": candidate.get("candidate_id"),
@@ -70,8 +64,8 @@ class AccuracyFirstTrackerRuntime:
                 "world_position": candidate.get("world_position"),
                 "top_point_projection": candidate.get("top_point_projection"),
             },
-            "execution_plan": {
-                "detector": "Use RF-DETR profile when model artifacts are available. Avoid NMS post-processing in accuracy-first mode.",
+            "stage_instructions": {
+                "detector": "Use RF-DETR when model artifacts are available. Avoid NMS post-processing in accuracy-first mode.",
                 "tracker": "Apply geometry-aware association, then corrective cascade to revisit ambiguous links.",
                 "reid": "Use SOLIDER global embeddings and KPR part embeddings when keypoints are available.",
                 "semantic_search": "Index fine-grained attributes and rerank with multi-signal ranking ensemble.",
@@ -111,7 +105,7 @@ class AccuracyFirstTrackerRuntime:
                 break
             cv2.putText(
                 frame,
-                f"Accuracy-first tracking | Frame {frame_idx}",
+                f"Strict tracking | Frame {frame_idx}",
                 (12, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -158,23 +152,16 @@ class AccuracyFirstTrackerRuntime:
 
     def run(self, candidate_info: dict, video_database_path: str, output_dir: str) -> dict:
         candidate = dict(candidate_info or {})
-        profile = self._resolve_profile(candidate)
-        hardware_profile, execution_plan = resolve_execution_plan(
-            pipeline_profile=profile,
-            gpu_profile_name=str(candidate.get("gpu_hardware_profile") or settings.gpu_hardware_profile),
-            gpu_profile_overrides=_dict_or_empty(candidate.get("gpu_hardware_overrides")),
-            gpu_count=settings.gpu_count,
-            host_cpu_count=settings.host_cpu_count,
-            host_ram_gb=settings.host_ram_gb,
-        )
+        pipeline = self._resolve_pipeline(candidate)
+        detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
         acceleration_state = configure_torch_runtime(
-            allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
-            cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-            host_cpu_count=settings.host_cpu_count,
+            allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+            cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+            host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
         )
         source_video = self._resolve_source_video(candidate, video_database_path)
         video_id = str(candidate.get("video_id") or "candidate").strip() or "candidate"
-        output_path = Path(output_dir) / f"accuracy_first_{Path(video_id).stem}.avi"
+        output_path = Path(output_dir) / f"strict_{Path(video_id).stem}.avi"
 
         if source_video is None:
             raise FileNotFoundError("Could not resolve source video for tracking output.")
@@ -186,8 +173,8 @@ class AccuracyFirstTrackerRuntime:
             candidate,
             str(source_video) if source_video else None,
             output_path,
-            profile,
-            hardware_profile,
+            pipeline,
+            detected_hardware,
             execution_plan,
         )
         manifest["acceleration_state"] = acceleration_state
@@ -200,8 +187,7 @@ class AccuracyFirstTrackerRuntime:
             "manifest_path": str(manifest_path.resolve()),
             "relative_manifest_path": str(manifest_path),
             "exists": output_path.exists(),
-            "pipeline_profile": profile["profile"],
-            "gpu_hardware_profile": hardware_profile.get("gpu_model"),
+            "detected_hardware": detected_hardware,
             "runtime_mode": settings.tracking_runtime_mode,
             "acceleration_state": acceleration_state,
         }

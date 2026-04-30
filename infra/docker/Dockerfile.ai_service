@@ -12,7 +12,6 @@ COPY backend/services/metadata-service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/services/metadata-service/app ./app
-COPY backend/legacy-engine /workspace/backend/legacy-engine
 COPY shared_secret_runtime.py /workspace/a20-root/shared_secret_runtime.py
 
 WORKDIR /app

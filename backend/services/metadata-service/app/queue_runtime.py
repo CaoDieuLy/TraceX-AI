@@ -1,34 +1,39 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
-import socket
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import sys
+import time
 from urllib.parse import urlparse
 
 import httpx
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload
 from sqlalchemy.orm import Session
 
 from .config import settings
+from .post_move_ingestion import (
+    STORAGE_INGEST_SOURCE_MODE,
+    PostMoveIngestionPolicy,
+    StorageTrackingRequestFactory,
+    StorageTrackingResultAssembler,
+)
+from .drive_storage_ingest import DriveStorageVideoScanner
 from .service import (
+    _is_tracking_startup_timeout_detail,
+    _wait_for_tracking_upstream_ready,
     delete_queue_video_asset,
     get_queue_video_rows,
     upsert_person_candidates,
     upsert_queue_video_asset,
 )
+from .storage_ingest import StorageIngestRegistry, StorageVideoItem, StorageVideoScanner
 
 
 LOGGER = logging.getLogger(__name__)
-VIDEO_EXTENSIONS = {".hevc", ".h265"}
 DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
-DRIVE_SCOPES = ("https://www.googleapis.com/auth/drive",)
-BOOTSTRAP_CAMERA_PATTERN = re.compile(r"Camera_\d{2}")
 
 _HERE = Path(__file__).resolve()
 for candidate in [Path(os.getenv("A20_ROOT", "")).expanduser() if os.getenv("A20_ROOT", "").strip() else None, Path("/workspace/a20-root"), *_HERE.parents]:
@@ -44,10 +49,13 @@ class QueueSyncService:
     def __init__(self) -> None:
         self.local_root = Path(settings.queue_local_root)
         self.local_queue_dir = self.local_root / "local" / settings.google_drive_queue_folder_name
-        self.local_queue_video_dir = self.local_queue_dir / settings.google_drive_h265_folder_name
+        self.local_queue_video_dir = self.local_queue_dir / settings.queue_video_folder_name
         self.local_queue_metadata_dir = self.local_queue_dir / settings.google_drive_metadata_folder_name
-        self.local_import_dir = self.local_root / "local" / settings.google_drive_import_folder_name
-        self.local_download_dir = self.local_root / "tmp" / "downloads"
+        self.storage_ingest_root = Path(settings.storage_ingest_root)
+        self.storage_processed_dir = self.local_queue_dir / settings.storage_ingest_processed_dir_name
+        self.post_move_policy = PostMoveIngestionPolicy()
+        self.storage_request_factory = StorageTrackingRequestFactory(self.post_move_policy)
+        self.storage_result_assembler = StorageTrackingResultAssembler(self.local_queue_metadata_dir)
         self._drive_service = None
         self._drive_layout: dict[str, str] | None = None
 
@@ -58,12 +66,14 @@ class QueueSyncService:
     def ensure_local_layout(self) -> None:
         self.local_queue_video_dir.mkdir(parents=True, exist_ok=True)
         self.local_queue_metadata_dir.mkdir(parents=True, exist_ok=True)
-        self.local_import_dir.mkdir(parents=True, exist_ok=True)
-        self.local_download_dir.mkdir(parents=True, exist_ok=True)
+        self.storage_processed_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _slug(value: str) -> str:
-        return re.sub(r"[^a-zA-Z0-9._-]+", "_", str(value or "").strip()).strip("._-") or "video"
+    def _video_media_type(path_or_name: str | Path) -> str:
+        suffix = Path(str(path_or_name)).suffix.lower()
+        if suffix == ".mp4":
+            return "video/mp4"
+        return "application/octet-stream"
 
     @staticmethod
     def _drive_view_link(file_id: str) -> str:
@@ -77,6 +87,17 @@ class QueueSyncService:
     def _is_remote_endpoint(endpoint_root: str) -> bool:
         host = (urlparse(endpoint_root).hostname or "").strip().lower()
         return host not in {"", "127.0.0.1", "localhost", "tracking-service"}
+
+    @staticmethod
+    def _build_tracking_headers() -> dict[str, str]:
+        token = str(settings.lightning_api_token or "").strip()
+        if not token:
+            return {}
+        header_name = str(settings.lightning_api_auth_header or "Authorization").strip() or "Authorization"
+        auth_prefix = str(settings.lightning_api_auth_prefix or "")
+        if auth_prefix and not auth_prefix.endswith(" "):
+            auth_prefix = f"{auth_prefix} "
+        return {header_name: f"{auth_prefix}{token}".strip()}
 
     def _build_drive_service(self):
         if not settings.google_drive_enabled:
@@ -108,6 +129,27 @@ class QueueSyncService:
         rows = self._query_single(query, fields="id, name")
         return rows[0] if rows else None
 
+    def resolve_drive_source_storage_folder_id(self) -> str:
+        configured_id = str(settings.google_drive_source_storage_folder_id or "").strip()
+        if configured_id:
+            return configured_id
+
+        vinuni_folder_id = (settings.google_drive_vinuni_folder_id or "").strip()
+        root_folder_id = (settings.google_drive_root_folder_id or "").strip()
+        if not vinuni_folder_id and not root_folder_id:
+            raise RuntimeError(
+                "Set GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID or GOOGLE_DRIVE_VINUNI_FOLDER_ID/GOOGLE_DRIVE_ROOT_FOLDER_ID "
+                "to enable Drive-backed storage ingestion."
+            )
+
+        vinuni_id = vinuni_folder_id or self._ensure_folder(root_folder_id, settings.google_drive_vinuni_folder_name)
+        folder = self._find_child_folder(vinuni_id, settings.google_drive_source_storage_folder_name)
+        if folder is None:
+            raise RuntimeError(
+                f"Google Drive source storage folder '{settings.google_drive_source_storage_folder_name}' was not found under VinUni."
+            )
+        return str(folder["id"])
+
     def _ensure_folder(self, parent_id: str, name: str) -> str:
         existing = self._find_child_folder(parent_id, name)
         if existing:
@@ -134,14 +176,12 @@ class QueueSyncService:
 
         vinuni_id = vinuni_folder_id or self._ensure_folder(root_folder_id, settings.google_drive_vinuni_folder_name)
         queue_id = self._ensure_folder(vinuni_id, settings.google_drive_queue_folder_name)
-        import_id = self._ensure_folder(vinuni_id, settings.google_drive_import_folder_name)
-        queue_h265_id = self._ensure_folder(queue_id, settings.google_drive_h265_folder_name)
+        queue_video_id = self._ensure_folder(queue_id, settings.queue_video_folder_name)
         existing_metadata_folder = self._find_child_folder(queue_id, settings.google_drive_metadata_folder_name)
         self._drive_layout = {
             "vinuni_id": vinuni_id,
             "queue_id": queue_id,
-            "import_id": import_id,
-            "queue_h265_id": queue_h265_id,
+            "queue_video_id": queue_video_id,
             "queue_metadata_id": str(existing_metadata_folder["id"]) if existing_metadata_folder else "",
         }
         return self._drive_layout
@@ -176,17 +216,10 @@ class QueueSyncService:
         if path.exists() and path.is_file():
             path.unlink(missing_ok=True)
 
-    def _clear_local_directory(self, target_dir: Path) -> None:
-        if not target_dir.exists():
+    def _delete_queue_owned_video_file(self, row) -> None:
+        if str(getattr(row, "source_mode", "") or "") == STORAGE_INGEST_SOURCE_MODE:
             return
-        for path in target_dir.iterdir():
-            if path.is_file():
-                path.unlink(missing_ok=True)
-
-    def _delete_drive_folder_children(self, folder_id: str) -> None:
-        query = f"'{folder_id}' in parents and trashed = false"
-        for row in self._query_single(query, fields="id, name"):
-            self._delete_drive_file(str(row.get("id") or ""))
+        self._delete_local_file(getattr(row, "local_video_path", None))
 
     def _upload_to_drive(self, local_path: Path, parent_id: str, name: str, mime_type: str) -> dict[str, str]:
         service = self._build_drive_service()
@@ -205,209 +238,159 @@ class QueueSyncService:
             "download_link": str(created.get("webContentLink") or self._drive_download_link(file_id)),
         }
 
-    def _download_drive_file(self, file_id: str, target_path: Path) -> None:
-        service = self._build_drive_service()
-        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        with target_path.open("wb") as handle:
-            downloader = MediaIoBaseDownload(handle, request)
-            done = False
-            while not done:
-                _status, done = downloader.next_chunk()
-
     def _request_tracking_processing(
         self,
         *,
-        source_path: Path | None = None,
-        source_drive_file_id: str | None = None,
-        source_filename: str | None = None,
-        camera_id: str | None,
-        recorded_start: datetime | None,
-        output_basename: str | None,
-        source_mode: str,
-        upload_outputs_to_drive: bool = False,
-        destination_video_folder_id: str | None = None,
-        destination_metadata_folder_id: str | None = None,
-    ) -> dict:
-        endpoint_root = settings.tracking_service_url.rstrip("/")
-        if settings.tracking_service_prefer_local and settings.tracking_service_local_url:
-            try:
-                local_url = settings.tracking_service_local_url.rstrip("/")
-                parsed_host = local_url.split("://", 1)[-1].split("/", 1)[0]
-                host, _, raw_port = parsed_host.partition(":")
-                port = int(raw_port or 80)
-                with socket.create_connection((host, port), timeout=1.5):
-                    endpoint_root = local_url
-            except Exception:
-                endpoint_root = settings.tracking_service_url.rstrip("/")
-
-        if source_path is not None and self._is_remote_endpoint(endpoint_root):
-            return self._request_tracking_processing_upload(
-                source_path=source_path,
-                source_filename=source_filename or source_path.name,
-                camera_id=camera_id,
-                recorded_start=recorded_start,
-                output_basename=output_basename,
-                source_mode=source_mode,
-            )
-
-        payload = {
-            "source_path": str(source_path) if source_path is not None else None,
-            "source_drive_file_id": source_drive_file_id,
-            "source_filename": source_filename,
-            "camera_id": camera_id,
-            "recorded_start": recorded_start.isoformat() if recorded_start else None,
-            "output_video_dir": str(self.local_queue_video_dir) if not upload_outputs_to_drive else None,
-            "output_metadata_dir": str(self.local_queue_metadata_dir) if not upload_outputs_to_drive else None,
-            "output_basename": output_basename,
-            "destination_video_folder_id": destination_video_folder_id,
-            "destination_metadata_folder_id": destination_metadata_folder_id,
-            "upload_outputs_to_drive": upload_outputs_to_drive,
-            "metadata": {
-                "source_mode": source_mode,
-                "pipeline_profile": "accuracy_first",
-            },
-        }
-        endpoint = f"{endpoint_root}/api/v1/ingestion/process"
-        headers: dict[str, str] = {}
-        if settings.lightning_api_token:
-            headers[settings.lightning_api_auth_header] = f"{settings.lightning_api_auth_prefix}{settings.lightning_api_token}"
-        with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
-            response = client.post(endpoint, json=payload, headers=headers or None)
-            response.raise_for_status()
-            return response.json()
-
-    def _request_tracking_processing_upload(
-        self,
-        *,
-        source_path: Path,
+        source_url: str,
         source_filename: str,
         camera_id: str | None,
         recorded_start: datetime | None,
         output_basename: str | None,
         source_mode: str,
+        metadata_extra: dict | None = None,
     ) -> dict:
         endpoint_root = settings.tracking_service_url.rstrip("/")
-        endpoint = f"{endpoint_root}/api/v1/ingestion/upload"
-        headers: dict[str, str] = {}
-        if settings.lightning_api_token:
-            headers[settings.lightning_api_auth_header] = f"{settings.lightning_api_auth_prefix}{settings.lightning_api_token}"
+        remote_endpoint = self._is_remote_endpoint(endpoint_root)
 
-        data = {
-            "source_filename": source_filename,
-            "camera_id": camera_id or "",
-            "recorded_start": recorded_start.isoformat() if recorded_start else "",
-            "output_basename": output_basename or "",
-            "metadata": json.dumps(
-                {
-                    "source_mode": source_mode,
-                    "pipeline_profile": "accuracy_first",
-                }
-            ),
+        ingestion_metadata = {
+            "source_mode": source_mode,
         }
-        with source_path.open("rb") as handle:
-            files = {"file": (source_filename, handle, "video/h265")}
-            with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
-                response = client.post(endpoint, data=data, files=files, headers=headers or None)
+        if isinstance(metadata_extra, dict):
+            ingestion_metadata.update(metadata_extra)
+
+        payload = {
+            "source_url": source_url,
+            "source_filename": source_filename,
+            "camera_id": camera_id,
+            "recorded_start": recorded_start.isoformat() if recorded_start else None,
+            "output_video_dir": str(self.local_queue_video_dir) if not remote_endpoint else None,
+            "output_metadata_dir": str(self.local_queue_metadata_dir) if not remote_endpoint else None,
+            "output_basename": output_basename,
+            "metadata": ingestion_metadata,
+        }
+        endpoint = f"{endpoint_root}/api/v1/ingestion/process"
+        headers = self._build_tracking_headers()
+        LOGGER.info(
+            "Requesting tracking ingestion source_filename=%s camera_id=%s endpoint=%s",
+            source_filename,
+            camera_id,
+            endpoint,
+        )
+        max_attempts = max(int(settings.tracking_startup_retry_attempts), 1)
+        last_exc: Exception | None = None
+        context = f"ingestion:{source_filename}"
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if remote_endpoint:
+                    _wait_for_tracking_upstream_ready(context=context)
+                with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
+                    response = client.post(endpoint, json=payload, headers=headers or None)
+                if response.is_error:
+                    detail = response.text[:2000]
+                    LOGGER.error(
+                        "Tracking ingestion failed source_filename=%s camera_id=%s status=%s body=%s",
+                        source_filename,
+                        camera_id,
+                        response.status_code,
+                        detail,
+                    )
+                    if (
+                        remote_endpoint
+                        and attempt < max_attempts
+                        and _is_tracking_startup_timeout_detail(detail)
+                    ):
+                        LOGGER.warning(
+                            "Retrying tracking ingestion after startup timeout source_filename=%s attempt=%s",
+                            source_filename,
+                            attempt,
+                        )
+                        time.sleep(max(2, int(settings.tracking_startup_poll_interval_seconds)))
+                        continue
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                LOGGER.info(
+                    "Tracking ingestion completed source_filename=%s camera_id=%s people=%s",
+                    source_filename,
+                    camera_id,
+                    data.get("person_count"),
+                )
+                return data
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    raise
+            except RuntimeError as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    raise
+            time.sleep(0.8 * attempt)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"Tracking ingestion failed for {source_filename}")
 
     @staticmethod
-    def _write_local_metadata_artifact(metadata_path: Path, video_payload: dict, people: list[dict]) -> None:
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"video": video_payload, "people": people}
-        metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _drive_public_download_url(file_id: str) -> str:
+        """Return the public direct-download URL for a Google Drive file.
 
-    def _process_local_source_item(self, source_path: Path, source_mode: str) -> dict:
-        recorded_start = None
-        camera_id = source_path.stem
-        output_basename = f"{source_path.stem}{source_path.suffix}"
+        Uses drive.usercontent.google.com — Google's current recommended
+        endpoint for large public file downloads (no confirmation page).
+        Works when the file is shared as 'Anyone with the link can view'.
+        """
+        return f"https://drive.usercontent.google.com/download?id={file_id}&export=download&authuser=0"
+
+    def _process_storage_video_item(self, item: StorageVideoItem) -> dict:
+        """Send one storage/camera/date MP4 to tracking and persist local queue artifacts."""
+
+        task = self.storage_request_factory.build(item)
+        source_drive_file_id = task.source_drive_file_id
+        if not source_drive_file_id:
+            raise ValueError(
+                f"Storage ingest requires a Google Drive file id for direct source_url delivery. "
+                f"Got none for {task.source_filename}."
+            )
+        source_url = self._drive_public_download_url(source_drive_file_id)
+
+        endpoint_root = settings.tracking_service_url.rstrip("/")
+        remote_endpoint = self._is_remote_endpoint(endpoint_root)
         result = self._request_tracking_processing(
-            source_path=source_path,
-            camera_id=camera_id,
-            recorded_start=recorded_start,
-            output_basename=output_basename,
-            source_mode=source_mode,
+            source_url=source_url,
+            source_filename=task.source_filename,
+            camera_id=task.camera_id,
+            recorded_start=task.recorded_at,
+            output_basename=task.output_basename,
+            source_mode=task.source_mode,
+            metadata_extra=task.metadata,
         )
+
+        processed = self.storage_result_assembler.assemble(item, result, task.source_mode)
         return {
-            "result": result,
-            "source_filename": source_path.name,
-            "source_mode": source_mode,
-            "source_path": source_path,
+            "result": processed.result,
+            "source_filename": processed.source_filename,
+            "source_mode": processed.source_mode,
+            "source_item": processed.source_item,
+            "remote_endpoint": remote_endpoint,
         }
 
-    def _process_import_drive_item(self, import_file: dict) -> dict:
-        original_name = str(import_file.get("name") or "imported_video.h265")
-        source_file_id = str(import_file["id"])
-        recorded_start = datetime.now(timezone.utc).replace(microsecond=0)
-        camera_id = self._slug(Path(original_name).stem)
-        original_suffix = Path(original_name).suffix.lower()
-        output_basename = f"{camera_id}_{recorded_start.strftime('%Y%m%dT%H%M%SZ')}{original_suffix}"
-        downloaded_source_path = self.local_download_dir / original_name
-        self._download_drive_file(source_file_id, downloaded_source_path)
-        result = self._request_tracking_processing_upload(
-            source_path=downloaded_source_path,
-            source_filename=original_name,
-            camera_id=camera_id,
-            recorded_start=recorded_start,
-            output_basename=output_basename,
-            source_mode="google_drive_import",
-        )
-        local_queue_video_path = self.local_queue_video_dir / output_basename
-        local_queue_video_path.parent.mkdir(parents=True, exist_ok=True)
-        if downloaded_source_path.resolve() != local_queue_video_path.resolve():
-            downloaded_source_path.replace(local_queue_video_path)
-        video_payload = dict(result.get("video") or {})
-        video_payload["metadata_path"] = str(self.local_queue_metadata_dir / f"{Path(output_basename).stem}.json")
-        local_metadata_path = Path(video_payload["metadata_path"])
-        self._write_local_metadata_artifact(local_metadata_path, video_payload, list(result.get("people") or []))
-        result["compressed_path"] = str(local_queue_video_path)
-        result["metadata_path"] = str(local_metadata_path)
-        result["video"] = video_payload
-        return {
-            "result": result,
-            "source_filename": original_name,
-            "source_mode": "google_drive_import",
-            "source_file_id": source_file_id,
-        }
-
-    def list_import_files(self) -> list[dict]:
-        layout = self.ensure_drive_layout()
-        query = f"'{layout['import_id']}' in parents and trashed = false and mimeType != '{DRIVE_FOLDER_MIME_TYPE}'"
-        rows = self._query_single(query, fields="id, name, mimeType, createdTime")
-        supported = [row for row in rows if Path(str(row.get("name") or "")).suffix.lower() in VIDEO_EXTENSIONS]
-        supported.sort(key=lambda item: str(item.get("createdTime") or ""))
-        return supported
-
-    def _clear_queue_state(self, session: Session, clear_remote: bool) -> None:
-        rows = get_queue_video_rows(session)
-        if clear_remote:
-            layout = self.ensure_drive_layout()
-            self._delete_drive_folder_children(layout["queue_h265_id"])
-            if layout.get("queue_metadata_id"):
-                self._delete_drive_folder_children(layout["queue_metadata_id"])
-        for row in rows:
-            self._delete_local_file(row.local_video_path)
-            self._delete_local_file(row.local_metadata_path)
-            delete_queue_video_asset(session, row.video_id)
-        self._clear_local_directory(self.local_queue_video_dir)
-        self._clear_local_directory(self.local_queue_metadata_dir)
-        self._clear_local_directory(self.local_download_dir)
-        session.commit()
-
-    def _append_processed_result(self, session: Session, result: dict, source_filename: str | None, source_mode: str) -> list[str]:
+    def _append_processed_result(
+        self,
+        session: Session,
+        result: dict,
+        source_filename: str | None,
+        source_mode: str,
+        *,
+        publish_to_drive: bool | None = None,
+    ) -> list[str]:
         current_rows = get_queue_video_rows(session)
         video = result["video"]
         people = result.get("people") or []
         compressed_path_value = result.get("compressed_path")
         metadata_path_value = result.get("metadata_path")
-        layout = self.ensure_drive_layout()
 
         for row in list(current_rows):
             if row.video_id == str(video["video_id"]):
                 self._delete_drive_file(row.drive_video_file_id)
                 self._delete_drive_file(row.drive_metadata_file_id)
-                self._delete_local_file(row.local_video_path)
+                self._delete_queue_owned_video_file(row)
                 self._delete_local_file(row.local_metadata_path)
                 delete_queue_video_asset(session, row.video_id)
                 current_rows.remove(row)
@@ -417,7 +400,7 @@ class QueueSyncService:
             oldest = current_rows.pop(0)
             self._delete_drive_file(oldest.drive_video_file_id)
             self._delete_drive_file(oldest.drive_metadata_file_id)
-            self._delete_local_file(oldest.local_video_path)
+            self._delete_queue_owned_video_file(oldest)
             self._delete_local_file(oldest.local_metadata_path)
             delete_queue_video_asset(session, oldest.video_id)
             evicted_video_ids.append(oldest.video_id)
@@ -429,16 +412,35 @@ class QueueSyncService:
         drive_video_file_id = str(result.get("drive_video_file_id") or "").strip() or None
         drive_metadata_file_id = None
         drive_video_link = str(result.get("drive_video_link") or "").strip() or None
-        compressed_name = Path(str(compressed_path_value or source_filename or "queue-video.h265")).stem
+        compressed_name = Path(str(compressed_path_value or source_filename or "queue-video.mp4")).stem
+        should_publish_to_drive = bool(settings.google_drive_enabled) if publish_to_drive is None else bool(publish_to_drive)
         if drive_video_file_id and drive_video_link:
             uploaded_video = {"file_id": drive_video_file_id, "view_link": drive_video_link}
-        else:
+            storage_backend = "google_drive_local_metadata"
+        elif should_publish_to_drive:
+            layout = self.ensure_drive_layout()
             if not compressed_path_value or not metadata_path_value:
                 raise RuntimeError(
                     "Tracking result missing both Drive output links and local output paths."
                 )
             compressed_path = Path(str(compressed_path_value))
-            uploaded_video = self._upload_to_drive(compressed_path, layout["queue_h265_id"], compressed_path.name, "video/h265")
+            uploaded_video = self._upload_to_drive(
+                compressed_path,
+                layout["queue_video_id"],
+                compressed_path.name,
+                self._video_media_type(compressed_path.name),
+            )
+            storage_backend = "google_drive_local_metadata"
+        else:
+            if not compressed_path_value or not metadata_path_value:
+                raise RuntimeError(
+                    "Tracking result missing both Drive output links and local output paths."
+                )
+            uploaded_video = {
+                "file_id": None,
+                "view_link": f"/api/v1/queue/videos/{video['video_id']}/file",
+            }
+            storage_backend = "local_queue_storage"
         metadata_link = f"/api/v1/queue/videos/{video['video_id']}/metadata"
 
         upsert_queue_video_asset(
@@ -449,103 +451,102 @@ class QueueSyncService:
             queue_position=len(current_rows),
             available_link_video=uploaded_video["view_link"],
             available_link_metadata=metadata_link,
-            storage_backend="google_drive_local_metadata",
+            storage_backend=storage_backend,
             source_filename=source_filename,
             source_mode=source_mode,
-            drive_video_file_id=uploaded_video["file_id"],
+            drive_video_file_id=uploaded_video.get("file_id"),
             drive_metadata_file_id=drive_metadata_file_id,
             local_video_path=str(compressed_path_value or ""),
-            local_metadata_path=str(metadata_path_value or ""),
+            local_metadata_path=None,
             raw_video_metadata=video,
         )
-        upsert_person_candidates(session, people, str(metadata_path_value or ""))
+        upsert_person_candidates(session, people, None)
         session.commit()
         return evicted_video_ids
 
-    def bootstrap_from_source_dir(
-        self,
-        session: Session,
-        *,
-        source_dir: str | Path,
-        limit: int = 31,
-        reset_remote_queue: bool = True,
-        delete_source_after_import: bool = False,
-    ) -> dict:
+    def process_storage_queue(self, session: Session) -> dict:
         self.ensure_local_layout()
-        self.ensure_drive_layout()
-        if reset_remote_queue:
-            self._clear_queue_state(session, clear_remote=True)
+        if not settings.storage_ingest_enabled:
+            return {
+                "processed_videos": 0,
+                "imported_source_files": [],
+                "evicted_video_ids": [],
+            }
 
-        source_root = Path(source_dir).expanduser()
-        if not source_root.exists():
-            raise FileNotFoundError(f"Missing bootstrap source dir: {source_root}")
-        if not source_root.is_dir():
-            raise NotADirectoryError(f"Bootstrap source path must be a directory: {source_root}")
-
-        source_videos = sorted(
-            path
-            for path in source_root.iterdir()
-            if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS and BOOTSTRAP_CAMERA_PATTERN.fullmatch(path.stem)
-        )[:limit]
-
-        processed_videos = 0
-        people_indexed = 0
-        evicted_video_ids: list[str] = []
-        parallel_jobs = self._parallel_jobs(len(source_videos), settings.queue_parallel_jobs)
-        results: list[dict] = []
-        with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
-            for item in executor.map(lambda path: self._process_local_source_item(path, "bootstrap_dataset"), source_videos):
-                results.append(item)
-
-        for item in results:
-            result = item["result"]
-            evicted_video_ids.extend(
-                self._append_processed_result(
-                    session,
-                    result,
-                    source_filename=item["source_filename"],
-                    source_mode=item["source_mode"],
-                )
+        registry = StorageIngestRegistry(self.storage_processed_dir)
+        if str(settings.storage_ingest_source_backend or "filesystem").strip().lower() == "google_drive":
+            scanner = DriveStorageVideoScanner(
+                drive_service=self._build_drive_service(),
+                source_storage_root_id=self.resolve_drive_source_storage_folder_id(),
+                registry=registry,
+                min_file_age_seconds=settings.storage_ingest_min_file_age_seconds,
             )
-            if delete_source_after_import:
-                Path(item["source_path"]).unlink(missing_ok=True)
-            processed_videos += 1
-            people_indexed += int(result.get("person_count") or 0)
-
-        return {
-            "processed_videos": processed_videos,
-            "queue_size": len(get_queue_video_rows(session)),
-            "people_indexed": people_indexed,
-            "evicted_video_ids": evicted_video_ids,
-        }
-
-    def process_import_queue(self, session: Session) -> dict:
-        self.ensure_local_layout()
-        self.ensure_drive_layout()
+        else:
+            scanner = StorageVideoScanner(
+                storage_root=self.storage_ingest_root,
+                registry=registry,
+                min_file_age_seconds=settings.storage_ingest_min_file_age_seconds,
+            )
+        storage_items = scanner.list_pending(limit=settings.storage_ingest_batch_size)
 
         processed_videos = 0
         imported_source_files: list[str] = []
         evicted_video_ids: list[str] = []
-        import_files = self.list_import_files()
-        parallel_jobs = self._parallel_jobs(len(import_files), settings.queue_parallel_jobs)
-        results: list[dict] = []
-        with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
-            for item in executor.map(self._process_import_drive_item, import_files):
-                results.append(item)
 
-        for item in results:
-            result = item["result"]
+        def _process_and_save(item: StorageVideoItem) -> None:
+            nonlocal processed_videos
+            result_dict = self._process_storage_video_item(item)
+            result = result_dict["result"]
+            remote = result_dict.get("remote_endpoint", False)
             evicted_video_ids.extend(
                 self._append_processed_result(
                     session,
                     result,
-                    source_filename=item["source_filename"],
-                    source_mode=item["source_mode"],
+                    source_filename=result_dict["source_filename"],
+                    source_mode=result_dict["source_mode"],
+                    publish_to_drive=bool(settings.google_drive_enabled) and not remote,
                 )
             )
-            self._delete_drive_file(item["source_file_id"])
-            imported_source_files.append(item["source_filename"])
+            registry.mark_processed(result_dict["source_item"], result)
+            imported_source_files.append(str(result_dict["source_item"].relative_path))
             processed_videos += 1
+            LOGGER.info(
+                "Saved to DB: %s people=%s (%d/%d)",
+                result_dict["source_filename"],
+                len((result.get("people") or [])),
+                processed_videos,
+                len(storage_items),
+            )
+
+        if storage_items:
+            # First item runs solo to warm up the tracking service before parallel load
+            _process_and_save(storage_items[0])
+            remaining = storage_items[1:]
+            if remaining:
+                parallel_jobs = self._parallel_jobs(len(remaining), settings.queue_parallel_jobs)
+                with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
+                    for item in executor.map(self._process_storage_video_item, remaining):
+                        result = item["result"]
+                        remote = item.get("remote_endpoint", False)
+                        evicted_video_ids.extend(
+                            self._append_processed_result(
+                                session,
+                                result,
+                                source_filename=item["source_filename"],
+                                source_mode=item["source_mode"],
+                                publish_to_drive=bool(settings.google_drive_enabled) and not remote,
+                            )
+                        )
+                        registry.mark_processed(item["source_item"], result)
+                        imported_source_files.append(str(item["source_item"].relative_path))
+                        processed_videos += 1
+                        LOGGER.info(
+                            "Saved to DB: %s people=%s (%d/%d)",
+                            item["source_filename"],
+                            len((result.get("people") or [])),
+                            processed_videos,
+                            len(storage_items),
+                        )
 
         return {
             "processed_videos": processed_videos,
@@ -553,20 +554,24 @@ class QueueSyncService:
             "evicted_video_ids": evicted_video_ids,
         }
 
-
 def run_queue_sync_forever(session_factory, poll_interval_seconds: int | None = None) -> None:
     import time
 
     service = QueueSyncService()
     interval = max(int(poll_interval_seconds or settings.queue_poll_interval_seconds), 5)
-    LOGGER.info("Starting Google Drive queue worker with %ss polling interval", interval)
+    LOGGER.info(
+        "Starting queue worker with %ss polling interval; storage_ingest=%s root=%s",
+        interval,
+        settings.storage_ingest_enabled,
+        service.storage_ingest_root,
+    )
 
     while True:
         session = session_factory()
         try:
-            result = service.process_import_queue(session)
+            result = service.process_storage_queue(session)
             if result["processed_videos"]:
-                LOGGER.info("Processed %s new import file(s)", result["processed_videos"])
+                LOGGER.info("Processed %s new storage video(s)", result["processed_videos"])
         except Exception:
             LOGGER.exception("Queue sync iteration failed")
             session.rollback()

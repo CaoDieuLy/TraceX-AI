@@ -13,7 +13,16 @@ METADATA_PID=$!
 # Brief wait for metadata to bind (health is optional)
 sleep 3
 
+QUEUE_PID=""
+if [ "${STORAGE_INGEST_ENABLED:-true}" != "false" ]; then
+  python -m metadata_app.queue_worker &
+  QUEUE_PID=$!
+fi
+
 cleanup() {
+  if [ -n "$QUEUE_PID" ]; then
+    kill "$QUEUE_PID" 2>/dev/null || true
+  fi
   if [ -n "$METADATA_PID" ]; then
     kill "$METADATA_PID" 2>/dev/null || true
   fi

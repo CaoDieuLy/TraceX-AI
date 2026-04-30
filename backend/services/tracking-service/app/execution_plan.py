@@ -1,34 +1,49 @@
 from __future__ import annotations
 
-from .hardware_profiles import resolve_hardware_profile
+from .hardware_runtime import resolve_detected_hardware
 
 
-def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_count: int, host_cpu_count: int, host_ram_gb: int) -> dict:
-    physical_gpu_count = max(int(gpu_count), 0)
-    service_processes = int(hardware_profile.get("service_processes", 1))
+def build_execution_plan(*, pipeline_spec: dict, detected_hardware: dict) -> dict:
+    physical_gpu_count = max(int(detected_hardware.get("gpu_count") or 0), 0)
+    host_cpu_count = max(int(detected_hardware.get("host_cpu_count") or 1), 1)
+    host_ram_gb = max(int(detected_hardware.get("host_ram_gb") or 1), 1)
+    service_processes = int(detected_hardware.get("service_processes", 1))
     if physical_gpu_count > 1:
         service_processes = max(service_processes, physical_gpu_count)
-    gpu_streams = int(hardware_profile.get("gpu_streams", 2))
+    gpu_streams = int(detected_hardware.get("gpu_streams", 2))
     scale = max(physical_gpu_count, 1)
     available_cpu = max(host_cpu_count - 2, 1)
-    decode_workers = min(int(hardware_profile.get("cpu_decode_workers", 4)) * scale, available_cpu)
-    crop_workers = min(int(hardware_profile.get("cpu_crop_workers", 4)) * scale, available_cpu)
-    metadata_workers = min(int(hardware_profile.get("metadata_workers", 2)) * scale, max(available_cpu // 2, 1))
-    prefetch_queue_size = int(hardware_profile.get("prefetch_queue_size", 32))
+    decode_workers = min(int(detected_hardware.get("cpu_decode_workers", 4)) * scale, available_cpu)
+    crop_workers = min(int(detected_hardware.get("cpu_crop_workers", 4)) * scale, available_cpu)
+    metadata_workers = min(int(detected_hardware.get("metadata_workers", 2)) * scale, max(available_cpu // 2, 1))
+    prefetch_queue_size = int(detected_hardware.get("prefetch_queue_size", 32))
     if host_ram_gb < 48:
         prefetch_queue_size = max(prefetch_queue_size // 2, 16)
     parallel_video_jobs = min(
-        int(hardware_profile.get("exchange_max_workers", 1)) * scale,
+        int(detected_hardware.get("exchange_max_workers", 1)) * scale,
         max(host_cpu_count, 1),
     )
+    if physical_gpu_count > 0:
+        detector_placement = f"gpu_stream_0_{detected_hardware.get('detector_precision', 'fp16')}"
+        reid_placement = f"gpu_stream_1_{detected_hardware.get('reid_precision', 'fp16')}"
+        semantic_placement = (
+            f"gpu_stream_2_{detected_hardware.get('vlm_precision', 'fp16')}"
+            if gpu_streams >= 3
+            else "shared_gpu_stream"
+        )
+    else:
+        detector_placement = "cpu_inference_path"
+        reid_placement = "cpu_inference_path"
+        semantic_placement = "cpu_inference_path"
 
     return {
         "hardware": {
-            "gpu_profile": hardware_profile.get("gpu_model"),
+            "gpu_model": detected_hardware.get("gpu_model"),
             "gpu_count": physical_gpu_count,
             "host_cpu_count": host_cpu_count,
             "host_ram_gb": host_ram_gb,
-            "resolved_profile_name": hardware_profile.get("resolved_profile_name"),
+            "detection_mode": detected_hardware.get("detection_mode"),
+            "detected_gpu_names": detected_hardware.get("detected_gpu_names", []),
         },
         "process_model": {
             "api_processes": 1,
@@ -44,24 +59,24 @@ def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_
             "parallel_video_jobs": parallel_video_jobs,
         },
         "batching": {
-            "detector_batch_size": int(hardware_profile.get("detector_batch_size", 8)),
-            "reid_batch_size": int(hardware_profile.get("reid_batch_size", 64)),
-            "vlm_batch_size": int(hardware_profile.get("vlm_batch_size", 8)),
-            "embedding_batch_size": int(hardware_profile.get("embedding_batch_size", 64)),
+            "detector_batch_size": int(detected_hardware.get("detector_batch_size", 8)),
+            "reid_batch_size": int(detected_hardware.get("reid_batch_size", 64)),
+            "vlm_batch_size": int(detected_hardware.get("vlm_batch_size", 8)),
+            "embedding_batch_size": int(detected_hardware.get("embedding_batch_size", 64)),
         },
         "memory": {
-            "pin_memory": bool(hardware_profile.get("pin_memory", True)),
-            "non_blocking_transfers": bool(hardware_profile.get("non_blocking_transfers", True)),
-            "channels_last": bool(hardware_profile.get("channels_last", True)),
-            "allow_tf32": bool(hardware_profile.get("allow_tf32", True)),
-            "cudnn_benchmark": bool(hardware_profile.get("cudnn_benchmark", True)),
+            "pin_memory": bool(detected_hardware.get("pin_memory", True)),
+            "non_blocking_transfers": bool(detected_hardware.get("non_blocking_transfers", True)),
+            "channels_last": bool(detected_hardware.get("channels_last", True)),
+            "allow_tf32": bool(detected_hardware.get("allow_tf32", True)),
+            "cudnn_benchmark": bool(detected_hardware.get("cudnn_benchmark", True)),
         },
         "stage_placement": {
             "decode": "cpu_thread_pool",
             "crop_extraction": "cpu_thread_pool",
-            "detector": f"gpu_stream_0_{hardware_profile.get('detector_precision', 'fp16')}",
-            "reid": f"gpu_stream_1_{hardware_profile.get('reid_precision', 'fp16')}",
-            "semantic_vlm": f"gpu_stream_2_{hardware_profile.get('vlm_precision', 'fp16')}" if gpu_streams >= 3 else "shared_gpu_stream",
+            "detector": detector_placement,
+            "reid": reid_placement,
+            "semantic_vlm": semantic_placement,
             "geometry_and_rerank": "cpu_vectorized",
             "vector_db": "cpu_io_bound",
         },
@@ -70,33 +85,16 @@ def build_execution_plan(*, pipeline_profile: dict, hardware_profile: dict, gpu_
             "Batch crops before ReID and VLM inference instead of per-frame calls.",
             "Keep vector search post-processing on CPU to preserve GPU time for detector/ReID/VLM.",
             "Use one GPU process per physical GPU unless you have measured a better replication strategy.",
-            f"Primary profile selected: {pipeline_profile['profile']}.",
+            "Fixed strict pipeline selected.",
         ],
-        "notes": hardware_profile.get("execution_notes", []),
+        "notes": detected_hardware.get("execution_notes", []),
     }
 
 
-def resolve_execution_plan(
-    *,
-    pipeline_profile: dict,
-    gpu_profile_name: str,
-    gpu_profile_overrides: dict | None,
-    gpu_count: int,
-    host_cpu_count: int,
-    host_ram_gb: int,
-) -> tuple[dict, dict]:
-    hardware_profile = resolve_hardware_profile(
-        gpu_profile_name,
-        gpu_profile_overrides,
-        gpu_count=gpu_count,
-        host_cpu_count=host_cpu_count,
-        host_ram_gb=host_ram_gb,
-    )
+def resolve_execution_plan(*, pipeline_spec: dict) -> tuple[dict, dict]:
+    detected_hardware = resolve_detected_hardware()
     plan = build_execution_plan(
-        pipeline_profile=pipeline_profile,
-        hardware_profile=hardware_profile,
-        gpu_count=gpu_count,
-        host_cpu_count=host_cpu_count,
-        host_ram_gb=host_ram_gb,
+        pipeline_spec=pipeline_spec,
+        detected_hardware=detected_hardware,
     )
-    return hardware_profile, plan
+    return detected_hardware, plan

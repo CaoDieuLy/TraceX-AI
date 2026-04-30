@@ -4,6 +4,7 @@ Gateway không gọi trực tiếp TRACKING_SERVICE_URL.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -14,15 +15,29 @@ from pydantic import BaseModel, Field
 from app.database import SessionLocal
 from app.service import rank_candidates
 
+from .http_client import close_http_client, init_http_client
+from .runtime_contract import build_tracking_runtime_contract
 from .tracking_upstream import proxy_get_bytes, proxy_get_json, proxy_post_json
 
-app = FastAPI(title="MCPT AI Service", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_http_client()
+    yield
+    await close_http_client()
+
+
+app = FastAPI(title="MCPT AI Service", version="1.0.0", lifespan=lifespan)
 
 
 class InternalSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     top_k: int = Field(default=10, ge=1, le=50)
     offset: int = Field(default=0, ge=0)
+    # Hard constraints (Phase 1)
+    camera_ids: list[str] | None = Field(default=None, description="Zone filter: list of camera IDs")
+    time_from: str | None = Field(default=None, description="ISO datetime lower bound")
+    time_to: str | None = Field(default=None, description="ISO datetime upper bound")
 
 
 class SearchResultItem(BaseModel):
@@ -70,7 +85,14 @@ def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
 
     session = SessionLocal()
     try:
-        ranked = rank_candidates(session=session, query_text=payload.query.strip(), limit=ranked_limit)
+        ranked = rank_candidates(
+            session=session,
+            query_text=payload.query.strip(),
+            limit=ranked_limit,
+            camera_ids=payload.camera_ids,
+            time_from=payload.time_from,
+            time_to=payload.time_to,
+        )
     except httpx.HTTPStatusError as exc:
         upstream_detail = (exc.response.text or "").strip()
         raise HTTPException(
@@ -94,10 +116,10 @@ def internal_search(payload: InternalSearchRequest) -> InternalSearchResponse:
 # --- Proxy nội bộ: gateway gọi, ai_service gọi tiếp tới Lightning/tracking ---
 
 
-@app.get("/internal/tracking/v1/pipeline/config")
-async def internal_tracking_pipeline_config(request: Request) -> Any:
-    """Gateway goi endpoint nay de doc cau hinh pipeline tu tracking upstream."""
-    return await proxy_get_json("api/v1/pipeline/config", request)
+@app.get("/internal/tracking/v1/runtime-config")
+async def internal_tracking_runtime_config(request: Request) -> Any:
+    """Return the fixed deployed contract without depending on upstream support."""
+    return build_tracking_runtime_contract()
 
 
 @app.post("/internal/tracking/v1/ai/process")

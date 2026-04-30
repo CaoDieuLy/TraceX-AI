@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 SAFE_SELF_CALL_ENDPOINT = "/api/v1/ai/worker"
 
 
+def _video_media_type(path: Path) -> str:
+    if path.suffix.lower() == ".mp4":
+        return "video/mp4"
+    return "application/octet-stream"
+
+
 class LightningAIError(Exception):
     """Base exception for Lightning AI API errors."""
 
@@ -80,7 +86,7 @@ class LightningAIClient:
         video_id: str | None = None,
         video_title: str | None = None,
         metadata: dict[str, Any] | None = None,
-        gpu_hardware_profile: dict[str, Any] | None = None,
+        detected_hardware: dict[str, Any] | None = None,
         execution_plan: dict[str, Any] | None = None,
         acceleration_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -94,7 +100,7 @@ class LightningAIClient:
             video_id: Optional video ID
             video_title: Optional video title
             metadata: Additional metadata
-            gpu_hardware_profile: GPU hardware configuration
+            detected_hardware: Auto-detected hardware description
             execution_plan: Execution plan details
             acceleration_state: Acceleration state info
 
@@ -103,7 +109,7 @@ class LightningAIClient:
                 - status: "completed", "failed", etc.
                 - job_id: Lightning AI job ID
                 - summary: Processing summary
-                - compressed_video_path: Path to output .h265 file (may be URL)
+                - compressed_video_path: Path to output .mp4 file (may be URL)
                 - metadata: Additional metadata from AI
                 - raw_response: Full raw response
 
@@ -124,8 +130,8 @@ class LightningAIClient:
         # Optional fields
         if video_title is not None:
             data["video_title"] = video_title
-        if gpu_hardware_profile:
-            data["gpu_hardware_profile"] = json.dumps(gpu_hardware_profile)
+        if detected_hardware:
+            data["detected_hardware"] = json.dumps(detected_hardware)
         if execution_plan:
             data["execution_plan"] = json.dumps(execution_plan)
         if acceleration_state:
@@ -146,7 +152,7 @@ class LightningAIClient:
                     "file": (
                         Path(video_path).name,
                         video_handle,
-                        "video/h265",
+                        _video_media_type(Path(video_path)),
                     )
                 }
                 with httpx.Client(timeout=self.timeout) as client:

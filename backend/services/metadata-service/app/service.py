@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import cv2
 import httpx
@@ -87,23 +88,101 @@ def _tracking_service_url(path: str) -> str:
     return settings.tracking_service_url.rstrip("/") + "/" + path.lstrip("/")
 
 
+def _tracking_service_is_remote() -> bool:
+    host = (urlparse(settings.tracking_service_url).hostname or "").strip().lower()
+    return host not in {"", "127.0.0.1", "localhost", "tracking-service"}
+
+
+def _is_tracking_startup_timeout_detail(detail: str) -> bool:
+    text = str(detail or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "api startup timed out",
+        "startup timed out",
+        "cold start",
+        "warming up",
+        "service unavailable",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _wait_for_tracking_upstream_ready(*, context: str) -> None:
+    if not _tracking_service_is_remote():
+        return
+
+    health_url = _tracking_service_url("/health")
+    deadline = time.monotonic() + max(int(settings.tracking_startup_max_wait_seconds), 1)
+    poll_interval = max(int(settings.tracking_startup_poll_interval_seconds), 1)
+    timeout_seconds = max(int(settings.tracking_health_timeout_seconds), 1)
+    last_error: str | None = None
+    attempt = 0
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        try:
+            with httpx.Client(timeout=float(timeout_seconds)) as client:
+                response = client.get(health_url, headers=_tracking_service_headers())
+            if response.is_success:
+                if attempt > 1:
+                    logger.info("Tracking upstream ready after %s health check attempts for %s", attempt, context)
+                return
+            last_error = f"status={response.status_code} body={response.text[:200]}"
+            logger.info("Tracking upstream not ready yet for %s: %s", context, last_error)
+        except httpx.HTTPError as exc:
+            last_error = str(exc)
+            logger.info("Tracking upstream health probe failed for %s: %s", context, exc)
+        time.sleep(poll_interval)
+
+    raise RuntimeError(
+        f"Tracking upstream was not ready within {settings.tracking_startup_max_wait_seconds}s for {context}. "
+        f"Last error: {last_error or 'unknown'}"
+    )
+
+
 def _post_tracking_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    max_attempts = 3
+    max_attempts = max(int(settings.tracking_startup_retry_attempts), 1)
     timeout_seconds = float(settings.tracking_request_timeout_seconds)
     last_exc: Exception | None = None
+    context = f"POST {path}"
     for attempt in range(1, max_attempts + 1):
         try:
+            _wait_for_tracking_upstream_ready(context=context)
             with httpx.Client(timeout=timeout_seconds) as client:
                 response = client.post(
                     _tracking_service_url(path),
                     json=payload,
                     headers=_tracking_service_headers(),
                 )
-                response.raise_for_status()
-                return response.json()
+            if response.is_error:
+                detail = response.text[:2000]
+                if attempt < max_attempts and _is_tracking_startup_timeout_detail(detail):
+                    logger.warning(
+                        "Tracking upstream cold start during %s attempt=%s status=%s detail=%s",
+                        context,
+                        attempt,
+                        response.status_code,
+                        detail,
+                    )
+                    time.sleep(max(2, int(settings.tracking_startup_poll_interval_seconds)))
+                    continue
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPStatusError as exc:
             last_exc = exc
             # Retry transient upstream/server-side failures, otherwise fail fast.
+            if (
+                attempt < max_attempts
+                and _is_tracking_startup_timeout_detail(exc.response.text)
+            ):
+                logger.warning(
+                    "Retrying tracking request after startup timeout for %s attempt=%s status=%s",
+                    context,
+                    attempt,
+                    exc.response.status_code,
+                )
+                time.sleep(max(2, int(settings.tracking_startup_poll_interval_seconds)))
+                continue
             if exc.response.status_code < 500 or attempt >= max_attempts:
                 raise
         except httpx.HTTPError as exc:
@@ -136,12 +215,7 @@ def _public_api_url(path: str | None) -> str | None:
 
 def _candidate_search_document(person: dict) -> str:
     parts: list[str] = []
-    for key in (
-        "search_text",
-        "appearance_summary",
-        "person_caption",
-        "caption",
-    ):
+    for key in ("search_text", "appearance_summary"):
         text = str(person.get(key) or "").strip()
         if text:
             parts.append(text)
@@ -203,14 +277,19 @@ def candidate_to_payload(candidate: PersonCandidate, queue_video: QueueVideoAsse
         "bbox": bbox,
         "search_text": candidate.search_text,
         "metadata_path": candidate.metadata_path,
-        "appearance_summary": raw_metadata.get("appearance_summary") or raw_metadata.get("person_caption"),
+        "attribute_summary": raw_metadata.get("attribute_summary"),
+        "appearance_summary": raw_metadata.get("appearance_summary"),
+        "attribute_embedding_vector": raw_metadata.get("attribute_embedding_vector") if isinstance(raw_metadata.get("attribute_embedding_vector"), list) else [],
+        "appearance_embedding_vector": raw_metadata.get("appearance_embedding_vector") if isinstance(raw_metadata.get("appearance_embedding_vector"), list) else [],
         "semantic_attributes": _coerce_string_list(raw_metadata.get("semantic_attributes")),
+        "embedding_vector": raw_metadata.get("embedding_vector") if isinstance(raw_metadata.get("embedding_vector"), list) else [],
         "visibility_scores": _coerce_mapping(raw_metadata.get("visibility_scores")),
         "world_position": raw_metadata.get("world_position") or raw_metadata.get("top_point_projection"),
-        "reid_profile": raw_metadata.get("reid_profile"),
-        "pipeline_profile": raw_metadata.get("pipeline_profile"),
         "score": raw_metadata.get("score"),
+        "timeline": raw_metadata.get("timeline") if isinstance(raw_metadata.get("timeline"), list) else [],
         "matched_segments": raw_metadata.get("matched_segments") or [],
+        "action_semantic_embedding": _coerce_mapping(raw_metadata.get("action_semantic_embedding")),
+        "tracklet_feature_pipeline": _coerce_mapping(raw_metadata.get("tracklet_feature_pipeline")),
         "available_link_video": queue_video.available_link_video if queue_video else None,
         "available_link_metadata": queue_video.available_link_metadata if queue_video else None,
         "drive_video_file_id": queue_video.drive_video_file_id if queue_video else None,
@@ -247,15 +326,19 @@ def _candidate_raw_metadata_subset(raw_metadata: object) -> dict[str, Any]:
     reduced: dict[str, Any] = {}
 
     for key in (
+        "attribute_summary",
         "appearance_summary",
-        "person_caption",
-        "caption",
-        "reid_profile",
-        "pipeline_profile",
         "score",
+        "action_semantic_embedding",
+        "tracklet_feature_pipeline",
     ):
         value = payload.get(key)
         if value not in (None, "", [], {}):
+            reduced[key] = value
+
+    for key in ("attribute_embedding_vector", "appearance_embedding_vector"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
             reduced[key] = value
 
     semantic_attributes = _coerce_string_list(payload.get("semantic_attributes"))
@@ -302,17 +385,19 @@ def candidate_to_ranking_payload(candidate: PersonCandidate, queue_video: QueueV
         "bbox": bbox,
         "search_text": candidate.search_text,
         "metadata_path": candidate.metadata_path,
-        "appearance_summary": reduced_raw_metadata.get("appearance_summary") or reduced_raw_metadata.get("person_caption"),
+        "attribute_summary": reduced_raw_metadata.get("attribute_summary"),
+        "appearance_summary": reduced_raw_metadata.get("appearance_summary"),
+        "attribute_embedding_vector": reduced_raw_metadata.get("attribute_embedding_vector") if isinstance(reduced_raw_metadata.get("attribute_embedding_vector"), list) else [],
+        "appearance_embedding_vector": reduced_raw_metadata.get("appearance_embedding_vector") if isinstance(reduced_raw_metadata.get("appearance_embedding_vector"), list) else [],
         "semantic_attributes": _coerce_string_list(reduced_raw_metadata.get("semantic_attributes")),
         "visibility_scores": _coerce_mapping(reduced_raw_metadata.get("visibility_scores")),
         "world_position": reduced_raw_metadata.get("world_position"),
-        "reid_profile": reduced_raw_metadata.get("reid_profile"),
-        "pipeline_profile": reduced_raw_metadata.get("pipeline_profile"),
         "score": reduced_raw_metadata.get("score"),
-        "embedding_vector": raw_metadata.get("embedding_vector"),
-        "candidate_vector": raw_metadata.get("candidate_vector"),
-        "itself_features": raw_metadata.get("itself_features"),
+        "embedding_vector": raw_metadata.get("embedding_vector") if isinstance(raw_metadata.get("embedding_vector"), list) else [],
+        "timeline": reduced_raw_metadata.get("timeline") if isinstance(reduced_raw_metadata.get("timeline"), list) else [],
         "matched_segments": reduced_raw_metadata.get("matched_segments") or [],
+        "action_semantic_embedding": _coerce_mapping(reduced_raw_metadata.get("action_semantic_embedding")),
+        "tracklet_feature_pipeline": _coerce_mapping(reduced_raw_metadata.get("tracklet_feature_pipeline")),
         "available_link_video": queue_video.available_link_video if queue_video else None,
         "available_link_metadata": queue_video.available_link_metadata if queue_video else None,
         "drive_video_file_id": queue_video.drive_video_file_id if queue_video else None,
@@ -333,18 +418,17 @@ def _remote_ranking_shortlist_limit(limit: int) -> int:
 
 
 def _candidate_embedding_values(candidate: dict[str, Any]) -> list[float]:
-    for key in ("embedding_vector", "candidate_vector", "itself_features"):
-        values = candidate.get(key)
-        if not isinstance(values, list) or not values:
-            continue
-        vector: list[float] = []
-        try:
-            for value in values:
-                vector.append(float(value))
-        except (TypeError, ValueError):
-            continue
-        if vector:
-            return vector
+    values = candidate.get("embedding_vector")
+    if not isinstance(values, list) or not values:
+        return []
+    vector: list[float] = []
+    try:
+        for value in values:
+            vector.append(float(value))
+    except (TypeError, ValueError):
+        return []
+    if vector:
+        return vector
     return []
 
 
@@ -976,20 +1060,36 @@ def build_candidate_preview_image(session: Session, candidate_id: str) -> Path:
         return _build_metadata_only_candidate_preview(row, raw_metadata, preview_path)
 
 
-def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[dict]:
+def rank_candidates(
+    session: Session,
+    query_text: str,
+    limit: int = 5,
+    camera_ids: list[str] | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+) -> list[dict]:
     """
-    Rank candidate bang luong strict:
-    1) lay candidate moi nhat tu DB,
-    2) prefilter local de giam tap tim kiem,
-    3) goi tracking_service /api/v1/candidates/search de semantic rank.
-    Khong co fallback local khi upstream loi.
+    Rank candidate — 5-phase pipeline:
+    1) Hard filter DB by camera_ids (zone) if provided
+    2) Local prefilter to reduce candidate set
+    3) Call tracking_service /api/v1/candidates/search with CLIP encoding + hybrid scoring
+    No fallback local when upstream fails.
     """
     cleaned_query = query_text.strip()
     if not cleaned_query:
         return []
 
     bounded_limit = max(1, min(limit, 50))
+
+    # Phase 1 — Hard filter at DB level: camera zone
     statement = select(PersonCandidate).order_by(PersonCandidate.updated_at.desc(), PersonCandidate.id.desc())
+    if camera_ids:
+        cam_lower = [c.lower().strip() for c in camera_ids if c.strip()]
+        if cam_lower:
+            statement = statement.where(
+                func.lower(PersonCandidate.camera_id).in_(cam_lower)
+            )
+
     rows = session.scalars(statement).all()
     if not rows:
         return []
@@ -1003,14 +1103,20 @@ def rank_candidates(session: Session, query_text: str, limit: int = 5) -> list[d
         shortlist_limit=shortlist_limit,
     )
 
-    response = _post_tracking_json(
-        "/api/v1/candidates/search",
-        {
-            "query_text": cleaned_query,
-            "candidates": candidates,
-            "limit": bounded_limit,
-        },
-    )
+    # Phase 3-5 — Send to tracking service with full context
+    payload: dict = {
+        "query_text": cleaned_query,
+        "candidates": candidates,
+        "limit": bounded_limit,
+    }
+    if camera_ids:
+        payload["camera_ids"] = camera_ids
+    if time_from:
+        payload["time_from"] = time_from
+    if time_to:
+        payload["time_to"] = time_to
+
+    response = _post_tracking_json("/api/v1/candidates/search", payload)
     items = response.get("items")
     if not isinstance(items, list):
         raise RuntimeError("Tracking service did not return a valid items list.")
@@ -1038,125 +1144,6 @@ def get_overview(session: Session) -> dict:
     }
 
 
-def import_legacy_metadata(session: Session) -> dict:
-    """
-    Import person candidates từ Google Drive Metadata folder (Queue) vào PostgreSQL.
-    Trong production, metadata được sinh bởi ingestion pipeline và đã có trong DB qua queue worker.
-    Endpoint này chỉ dùng để migrate/restore từ Drive nếu cần.
-    """
-    if settings.google_drive_enabled:
-        # Đọc từ Google Drive Metadata folder
-        from .queue_runtime import QueueSyncService
-
-        qs = QueueSyncService()
-        drive_service = qs._build_drive_service()
-        layout = qs.ensure_drive_layout()
-        metadata_folder_id = layout["queue_metadata_id"]
-
-        # Query tất cả JSON files trong Metadata folder
-        query = f"'{metadata_folder_id}' in parents and trashed = false and mimeType='application/json'"
-        files = drive_service.files().list(q=query, fields="files(id, name)").execute().get("files", [])
-
-        imported_count = 0
-        updated_count = 0
-        file_count = len(files)
-
-        for file_meta in files:
-            file_id = file_meta["id"]
-            filename = file_meta["name"]
-            # Download file content
-            import io
-            request = drive_service.files().get_media(fileId=file_id)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            content = fh.getvalue().decode("utf-8")
-            payload = json.loads(content)
-            # Import persons from this metadata file
-            for person in payload.get("people") or []:
-                if not isinstance(person, dict):
-                    continue
-                candidate_id = str(person.get("candidate_id") or "").strip()
-                if not candidate_id:
-                    continue
-
-                existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
-                values = {
-                    "candidate_id": candidate_id,
-                    "camera_id": person.get("camera_id"),
-                    "video_id": person.get("video_id"),
-                    "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
-                    "human_key": person.get("human_key"),
-                    "frame_idx": int(person.get("frame_idx") or 0),
-                    "search_text": _candidate_search_document(person),
-                    "metadata_path": f"drive://{file_id}/{filename}",
-                    "raw_metadata": person,
-                }
-
-                if existing:
-                    for key, value in values.items():
-                        setattr(existing, key, value)
-                    updated_count += 1
-                else:
-                    session.add(PersonCandidate(**values))
-                    imported_count += 1
-
-        session.commit()
-        return {
-            "imported_count": imported_count,
-            "updated_count": updated_count,
-            "file_count": file_count,
-        }
-    else:
-        # Fallback: đọc từ local LEGACY_METADATA_DIR (development only)
-        metadata_root = Path(settings.legacy_metadata_dir)
-        metadata_root.mkdir(parents=True, exist_ok=True)
-
-        imported_count = 0
-        updated_count = 0
-        file_count = 0
-
-        for metadata_path in sorted(metadata_root.glob("*.json")):
-            file_count += 1
-            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-            for person in payload.get("people") or []:
-                if not isinstance(person, dict):
-                    continue
-                candidate_id = str(person.get("candidate_id") or "").strip()
-                if not candidate_id:
-                    continue
-
-                existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
-                values = {
-                    "candidate_id": candidate_id,
-                    "camera_id": person.get("camera_id"),
-                    "video_id": person.get("video_id"),
-                    "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
-                    "human_key": person.get("human_key"),
-                    "frame_idx": int(person.get("frame_idx") or 0),
-                    "search_text": _candidate_search_document(person),
-                    "metadata_path": str(metadata_path),
-                    "raw_metadata": person,
-                }
-
-                if existing:
-                    for key, value in values.items():
-                        setattr(existing, key, value)
-                    updated_count += 1
-                else:
-                    session.add(PersonCandidate(**values))
-                    imported_count += 1
-
-        session.commit()
-        return {
-            "imported_count": imported_count,
-            "updated_count": updated_count,
-            "file_count": file_count,
-        }
-
-
 def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> dict[str, int]:
     existing_candidates = int(session.scalar(select(func.count()).select_from(PersonCandidate)) or 0)
     existing_queue_videos = int(session.scalar(select(func.count()).select_from(QueueVideoAsset)) or 0)
@@ -1171,7 +1158,7 @@ def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> 
     local_root = Path(settings.queue_local_root)
     queue_root = local_root / "local" / settings.google_drive_queue_folder_name
     metadata_root = queue_root / settings.google_drive_metadata_folder_name
-    video_root = queue_root / settings.google_drive_h265_folder_name
+    video_root = queue_root / settings.queue_video_folder_name
     metadata_root.mkdir(parents=True, exist_ok=True)
     video_root.mkdir(parents=True, exist_ok=True)
 
@@ -1196,7 +1183,7 @@ def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> 
         if not local_video_path.is_absolute():
             local_video_path = (PROJECT_ROOT / local_video_path).resolve()
         if not local_video_path.exists():
-            fallback_video_path = video_root / f"{metadata_path.stem}.h265"
+            fallback_video_path = video_root / f"{metadata_path.stem}.mp4"
             if fallback_video_path.exists():
                 local_video_path = fallback_video_path
 
@@ -1205,7 +1192,7 @@ def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> 
             or video_payload.get("camera_id")
             or metadata_path.stem
         ).strip()
-        source_filename = Path(title).name if title else f"{metadata_path.stem}.h265"
+        source_filename = Path(title).name if title else f"{metadata_path.stem}.mp4"
         available_link_video = f"/api/v1/queue/videos/{video_id}/file"
         available_link_metadata = f"/api/v1/queue/videos/{video_id}/metadata"
 
@@ -1315,10 +1302,10 @@ def _queue_video_path_candidates(row: QueueVideoAsset) -> list[Path]:
                     pass
 
     if source_filename:
-        push(PROJECT_ROOT / "storage" / "queue" / "local" / "Queue" / ".h265" / source_filename)
-        push(Path("/workspace/storage/queue/local/Queue/.h265") / source_filename)
+        push(PROJECT_ROOT / "storage" / "queue" / "local" / "Queue" / settings.queue_video_folder_name / source_filename)
+        push(Path("/workspace/storage/queue/local/Queue") / settings.queue_video_folder_name / source_filename)
         if A20_ROOT:
-            push(A20_ROOT / "storage" / "queue" / "local" / "Queue" / ".h265" / source_filename)
+            push(A20_ROOT / "storage" / "queue" / "local" / "Queue" / settings.queue_video_folder_name / source_filename)
 
     return candidates
 
@@ -1328,7 +1315,7 @@ def _download_drive_video_to_cache(row: QueueVideoAsset) -> Path | None:
     if not drive_file_id:
         return None
 
-    suffix = Path(str(row.source_filename or row.video_id or drive_file_id)).suffix or ".h265"
+    suffix = Path(str(row.source_filename or row.video_id or drive_file_id)).suffix or ".mp4"
     target_path = _preview_source_cache_root() / f"{_slugify(drive_file_id)}{suffix}"
     if target_path.exists() and target_path.stat().st_size > 0:
         return target_path
@@ -1655,7 +1642,7 @@ def delete_queue_video_asset(session: Session, video_id: str) -> None:
     session.flush()
 
 
-def upsert_person_candidates(session: Session, people: list[dict], metadata_path: str) -> dict[str, int]:
+def upsert_person_candidates(session: Session, people: list[dict], metadata_path: str | None = None) -> dict[str, int]:
     imported_count = 0
     updated_count = 0
 
@@ -1688,3 +1675,4 @@ def upsert_person_candidates(session: Session, people: list[dict], metadata_path
 
     session.flush()
     return {"imported_count": imported_count, "updated_count": updated_count}
+

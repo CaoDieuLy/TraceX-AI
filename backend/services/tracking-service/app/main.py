@@ -1,6 +1,9 @@
 import json
-from datetime import datetime
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+import asyncio
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -20,21 +23,113 @@ from .schemas import (
 from .config import settings
 from .service import (
     build_tracking_video_remote,
-    get_pipeline_config,
+    get_runtime_config,
     process_video_ingestion,
     process_video_query,
-    process_video_query_worker,
     resolve_tracking_artifact_paths,
     run_tracking,
     search_candidates_remote,
 )
 
-app = FastAPI(title="MCPT Tracking Service", version="2.0.0")
+logger = logging.getLogger(__name__)
+_warmup_task: asyncio.Task | None = None
+_warmup_state: dict[str, object] = {
+    "enabled": bool(settings.startup_warmup_enabled),
+    "status": "pending",
+    "ready": False,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+}
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _set_warmup_state(**updates: object) -> None:
+    _warmup_state.update(updates)
+
+
+def _warmup_snapshot() -> dict[str, object]:
+    return dict(_warmup_state)
+
+
+def _warmup_models() -> None:
+    """
+    Pre-load tất cả AI models vào GPU memory khi service start.
+    Đảm bảo latency thấp cho request đầu tiên của user.
+    Models: RF-DETR 2XLarge, TransReID ViT-Base, VideoMAE Large, SigLIP2 ViT-L-16-512.
+    """
+    from .model_adapters import SigLIP2ModelHub, TransReIDHub, VideoMAEHub
+
+    logger.info("[warmup] Pre-loading AI models into GPU memory...")
+
+    # SigLIP2 — dùng cho attribute zero-shot + action embedding + query encoding
+    try:
+        hub = SigLIP2ModelHub()
+        hub._ensure_loaded()
+        logger.info("[warmup] SigLIP2 ViT-L-16-512 ready")
+    except Exception as exc:
+        logger.error("[warmup] SigLIP2 failed: %s", exc)
+
+    # TransReID — dùng cho appearance Re-ID embedding
+    try:
+        hub = TransReIDHub()
+        hub._ensure_loaded()
+        logger.info("[warmup] TransReID ViT-Base ready")
+    except Exception as exc:
+        logger.error("[warmup] TransReID failed: %s", exc)
+
+    # VideoMAE — dùng cho action recognition
+    try:
+        hub = VideoMAEHub()
+        hub._ensure_loaded()
+        logger.info("[warmup] VideoMAE Large ready")
+    except Exception as exc:
+        logger.error("[warmup] VideoMAE failed: %s", exc)
+
+    # RF-DETR — dùng cho person detection (heaviest model, load cuối)
+    try:
+        from .local_ingestion_pipeline import RFDETRPersonDetector
+        det = RFDETRPersonDetector()
+        det._ensure_loaded()
+        logger.info("[warmup] RF-DETR 2XLarge ready")
+    except Exception as exc:
+        logger.error("[warmup] RF-DETR failed: %s", exc)
+
+    logger.info("[warmup] All models pre-loaded. Service ready for requests.")
+
+
+def _run_warmup_models() -> None:
+    _set_warmup_state(status="running", ready=False, started_at=_utcnow_iso(), finished_at=None, last_error=None)
+    try:
+        _warmup_models()
+    except Exception as exc:  # pragma: no cover
+        logger.exception("[warmup] Background warmup failed")
+        _set_warmup_state(status="failed", ready=False, finished_at=_utcnow_iso(), last_error=str(exc))
+        return
+    _set_warmup_state(status="completed", ready=True, finished_at=_utcnow_iso(), last_error=None)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _warmup_task
+    if settings.startup_warmup_enabled:
+        _warmup_task = asyncio.create_task(asyncio.to_thread(_run_warmup_models))
+    else:
+        _set_warmup_state(status="disabled", ready=False)
+    yield
+    if _warmup_task is not None and not _warmup_task.done():
+        _warmup_task.cancel()
+
+
+app = FastAPI(title="MCPT Tracking Service", version="2.0.0", lifespan=lifespan)
 
 
 @app.get("/")
 def root() -> dict:
-    config = get_pipeline_config()
+    config = get_runtime_config()
     return {
         "status": "ok",
         "service": "tracking-service",
@@ -45,20 +140,29 @@ def root() -> dict:
 
 @app.get("/health")
 def healthcheck() -> dict:
-    return {"status": "ok", "service": "tracking-service"}
-
-
-@app.get("/api/v1/pipeline/config")
-def pipeline_config() -> dict:
-    return get_pipeline_config()
-
-
-@app.get("/api/v1/pipeline/hardware")
-def pipeline_hardware() -> dict:
-    config = get_pipeline_config()
+    warmup = _warmup_snapshot()
     return {
-        "gpu_hardware_profile": config.get("gpu_hardware_profile"),
+        "status": "ok",
+        "service": "tracking-service",
+        "ready": bool(warmup.get("ready")),
+        "warmup": warmup,
+    }
+
+
+@app.get("/api/v1/runtime-config")
+def runtime_config() -> dict:
+    config = get_runtime_config()
+    config["warmup"] = _warmup_snapshot()
+    return config
+
+
+@app.get("/api/v1/runtime-config/hardware")
+def runtime_config_hardware() -> dict:
+    config = get_runtime_config()
+    return {
+        "detected_hardware": config.get("detected_hardware"),
         "execution_plan": config.get("execution_plan"),
+        "warmup": _warmup_snapshot(),
     }
 
 
@@ -75,27 +179,13 @@ async def ai_worker(
     query_text: str = Form(default=""),
     video_title: str | None = Form(default=None),
     metadata: str | None = Form(default=None),
-    gpu_hardware_profile: str | None = Form(default=None),
+    detected_hardware: str | None = Form(default=None),
     execution_plan: str | None = Form(default=None),
     acceleration_state: str | None = Form(default=None),
 ) -> dict:
-    worker_input_dir = Path(settings.ingestion_work_root) / "remote-ai-inputs"
-    worker_input_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(file.filename or "").suffix or ".bin"
-    local_input_path = worker_input_dir / f"{(video_id or 'query-video').strip() or 'query-video'}-{query_id or 'worker'}{suffix}"
-    local_input_path.write_bytes(await file.read())
-    return process_video_query_worker(
-        {
-            "query_id": query_id,
-            "video_id": video_id,
-            "video_title": video_title,
-            "query_text": query_text,
-            "source_path": str(local_input_path),
-            "metadata": metadata,
-            "gpu_hardware_profile": gpu_hardware_profile,
-            "execution_plan": execution_plan,
-            "acceleration_state": acceleration_state,
-        }
+    raise HTTPException(
+        status_code=501,
+        detail="AI worker upload endpoint not supported in strict pipeline mode. Use /api/v1/ingestion/process with source_url instead.",
     )
 
 
@@ -106,53 +196,37 @@ def tracking_run(payload: TrackingRequest) -> dict:
 
 @app.post("/api/v1/ingestion/process", response_model=VideoIngestionResponse)
 def ingestion_process(payload: VideoIngestionRequest) -> dict:
-    return process_video_ingestion(payload.model_dump())
-
-
-@app.post("/api/v1/ingestion/upload", response_model=VideoIngestionResponse)
-async def ingestion_upload(
-    file: UploadFile = File(...),
-    source_filename: str | None = Form(default=None),
-    camera_id: str | None = Form(default=None),
-    recorded_start: str | None = Form(default=None),
-    output_basename: str | None = Form(default=None),
-    metadata: str | None = Form(default=None),
-) -> dict:
-    upload_root = Path(settings.ingestion_work_root) / "uploaded-ingestion-inputs"
-    upload_root.mkdir(parents=True, exist_ok=True)
-    filename = source_filename or file.filename or "upload.h265"
-    local_input_path = upload_root / filename
-    local_input_path.write_bytes(await file.read())
-
-    parsed_recorded_start = None
-    if recorded_start:
-        normalized = recorded_start.strip().replace("Z", "+00:00")
-        parsed_recorded_start = datetime.fromisoformat(normalized)
-
-    parsed_metadata = {}
-    if metadata:
-        try:
-            payload = json.loads(metadata)
-        except ValueError:
-            payload = {}
-        if isinstance(payload, dict):
-            parsed_metadata = payload
-
-    return process_video_ingestion(
-        {
-            "source_path": str(local_input_path),
-            "source_filename": filename,
-            "camera_id": camera_id,
-            "recorded_start": parsed_recorded_start,
-            "output_basename": output_basename,
-            "metadata": parsed_metadata,
-        }
-    )
+    try:
+        return process_video_ingestion(payload.model_dump())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Video ingestion failed for source_filename=%s camera_id=%s",
+            payload.source_filename,
+            payload.camera_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": type(exc).__name__,
+                "message": str(exc),
+                "source_filename": payload.source_filename,
+                "camera_id": payload.camera_id,
+            },
+        ) from exc
 
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)
 def candidate_search(payload: CandidateSearchRequest) -> dict:
-    return search_candidates_remote(payload.query_text, payload.candidates, payload.limit)
+    return search_candidates_remote(
+        payload.query_text,
+        payload.candidates,
+        payload.limit,
+        camera_ids=payload.camera_ids,
+        time_from=payload.time_from,
+        time_to=payload.time_to,
+    )
 
 
 @app.post("/api/v1/candidates/track", response_model=CandidateTrackResponse)

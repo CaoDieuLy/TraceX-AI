@@ -24,9 +24,18 @@ A20_ROOT = _detect_a20_root()
 if A20_ROOT and str(A20_ROOT) not in sys.path:
     sys.path.insert(0, str(A20_ROOT))
 
-PROJECT_ROOT = Path(
-    os.getenv("PROJECT_ROOT", str(_HERE.parent.parent.parent.parent.parent))
-).resolve()
+def _resolve_project_root() -> Path:
+    repo_root = _HERE.parent.parent.parent.parent.parent.resolve()
+    raw_value = os.getenv("PROJECT_ROOT", "").strip()
+    if raw_value:
+        candidate = Path(raw_value).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (repo_root / candidate).resolve()
+        if resolved.exists():
+            return resolved
+    return repo_root
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 loaded_envs: list[Path] = []
 
@@ -77,15 +86,16 @@ class Settings(BaseSettings):
     app_name: str = "mcpt-metadata-service"
     api_prefix: str = "/api/v1"
     database_url: str = _build_default_database_url()
-    legacy_metadata_dir: str = str(PROJECT_ROOT / "backend" / "legacy-engine" / "data" / "metadata")
     tracking_service_url: str = "http://tracking-service:8000"
-    tracking_service_local_url: str = "http://127.0.0.1:8000"
-    tracking_service_prefer_local: bool = False
     public_api_base_url: str = os.getenv("NEXT_PUBLIC_API_GATEWAY_URL", "").strip()
     lightning_api_token: str = ""
     lightning_api_auth_header: str = "Authorization"
     lightning_api_auth_prefix: str = "Bearer "
     tracking_request_timeout_seconds: int = 1800
+    tracking_health_timeout_seconds: int = 20
+    tracking_startup_max_wait_seconds: int = 600
+    tracking_startup_poll_interval_seconds: int = 15
+    tracking_startup_retry_attempts: int = 2
     jwt_secret_key: str = os.getenv("JWT_SECRET_KEY", "")
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
@@ -96,19 +106,26 @@ class Settings(BaseSettings):
     tracking_output_root: str = str(PROJECT_ROOT / "storage" / "tracking-output")
     default_storage_backend: str = "local_volume"
     queue_local_root: str = str(PROJECT_ROOT / "storage" / "queue")
+    queue_video_folder_name: str = "Videos"
     queue_max_size: int = 32
     queue_poll_interval_seconds: int = 30
-    queue_parallel_jobs: int = 4
+    queue_parallel_jobs: int = 3
     queue_download_workers: int = 4
+    storage_ingest_enabled: bool = True
+    storage_ingest_root: str = str(PROJECT_ROOT / "storage")
+    storage_ingest_source_backend: str = "filesystem"
+    storage_ingest_batch_size: int = 50
+    storage_ingest_min_file_age_seconds: int = 2
+    storage_ingest_processed_dir_name: str = "ProcessedStorage"
     google_drive_enabled: bool = False
     google_drive_oauth_credentials_file: str = str(default_oauth_credentials_file)
     google_drive_oauth_token_file: str = str(default_oauth_token_file)
     google_drive_root_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_name: str = "VinUni"
+    google_drive_source_storage_folder_id: str = ""
+    google_drive_source_storage_folder_name: str = "Storage"
     google_drive_queue_folder_name: str = "Storage"
-    google_drive_import_folder_name: str = "Temp"
-    google_drive_h265_folder_name: str = ".h265"
     google_drive_metadata_folder_name: str = "Metadata"
     google_drive_make_public: bool = True
 
@@ -116,3 +133,24 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _normalize_runtime_path(raw_value: str, fallback_relative_path: str) -> str:
+    raw_text = str(raw_value or "").strip()
+    candidate = Path(raw_text).expanduser()
+    if not str(candidate):
+        return str((PROJECT_ROOT / fallback_relative_path).resolve())
+    if candidate.is_absolute():
+        if candidate.exists():
+            return str(candidate.resolve())
+        if os.name != "nt":
+            return str(candidate)
+        resolved = candidate.resolve()
+        return str((PROJECT_ROOT / fallback_relative_path).resolve()) if raw_text.startswith(("/workspace", "\\workspace")) else str(resolved)
+    return str((PROJECT_ROOT / candidate).resolve())
+
+
+settings.video_storage_root = _normalize_runtime_path(settings.video_storage_root, "storage/videos")
+settings.tracking_output_root = _normalize_runtime_path(settings.tracking_output_root, "storage/tracking-output")
+settings.queue_local_root = _normalize_runtime_path(settings.queue_local_root, "storage/queue")
+settings.storage_ingest_root = _normalize_runtime_path(settings.storage_ingest_root, "storage")

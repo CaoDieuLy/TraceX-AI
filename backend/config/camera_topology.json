@@ -1,0 +1,1152 @@
+{
+  "_source": "hospital_topology_demo_configs_final",
+  "_note": "Real hospital camera topology — 50 cameras, bidirectional edges",
+  "cameras": {
+    "cam01": {
+      "name": "Cổng chính ngoài trời",
+      "building": "A",
+      "floor": 1,
+      "area_group": "entrance",
+      "area_name": "Cổng chính",
+      "zone_type": "entrance",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam02": {
+      "name": "Khu drop-off",
+      "building": "A",
+      "floor": 1,
+      "area_group": "entrance",
+      "area_name": "Khu trả khách",
+      "zone_type": "entrance",
+      "view_direction": "toward_lobby",
+      "is_active": true
+    },
+    "cam03": {
+      "name": "Lối vào bãi xe",
+      "building": "A",
+      "floor": 1,
+      "area_group": "parking",
+      "area_name": "Lối vào bãi xe",
+      "zone_type": "parking",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam04": {
+      "name": "Bãi xe khu A",
+      "building": "A",
+      "floor": 1,
+      "area_group": "parking",
+      "area_name": "Bãi xe A",
+      "zone_type": "parking",
+      "view_direction": "north",
+      "is_active": true
+    },
+    "cam05": {
+      "name": "Bãi xe khu B",
+      "building": "A",
+      "floor": 1,
+      "area_group": "parking",
+      "area_name": "Bãi xe B",
+      "zone_type": "parking",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam06": {
+      "name": "Lối đi từ bãi xe vào sảnh",
+      "building": "A",
+      "floor": 1,
+      "area_group": "parking",
+      "area_name": "Lối đi bãi xe",
+      "zone_type": "corridor",
+      "view_direction": "toward_lobby",
+      "is_active": true
+    },
+    "cam07": {
+      "name": "Sảnh chính cửa vào",
+      "building": "A",
+      "floor": 1,
+      "area_group": "lobby",
+      "area_name": "Sảnh chính",
+      "zone_type": "lobby",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam08": {
+      "name": "Sảnh chính trung tâm",
+      "building": "A",
+      "floor": 1,
+      "area_group": "lobby",
+      "area_name": "Sảnh chính",
+      "zone_type": "lobby",
+      "view_direction": "center",
+      "is_active": true
+    },
+    "cam09": {
+      "name": "Quầy lễ tân",
+      "building": "A",
+      "floor": 1,
+      "area_group": "reception",
+      "area_name": "Lễ tân",
+      "zone_type": "reception",
+      "view_direction": "front",
+      "is_active": true
+    },
+    "cam10": {
+      "name": "Khu đăng ký khám",
+      "building": "A",
+      "floor": 1,
+      "area_group": "reception",
+      "area_name": "Đăng ký khám",
+      "zone_type": "reception",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam11": {
+      "name": "Khu chờ sảnh",
+      "building": "A",
+      "floor": 1,
+      "area_group": "lobby_waiting",
+      "area_name": "Khu chờ sảnh",
+      "zone_type": "waiting_area",
+      "view_direction": "west",
+      "is_active": true
+    },
+    "cam12": {
+      "name": "Lối ra sảnh chính",
+      "building": "A",
+      "floor": 1,
+      "area_group": "lobby",
+      "area_name": "Lối ra sảnh",
+      "zone_type": "exit",
+      "view_direction": "outward",
+      "is_active": true
+    },
+    "cam13": {
+      "name": "Lối vào hành lang tầng 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "corridor_1f",
+      "area_name": "Hành lang tầng 1",
+      "zone_type": "corridor",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam14": {
+      "name": "Hành lang tầng 1 đoạn 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "corridor_1f",
+      "area_name": "Hành lang tầng 1",
+      "zone_type": "corridor",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam15": {
+      "name": "Hành lang tầng 1 đoạn 2",
+      "building": "A",
+      "floor": 1,
+      "area_group": "corridor_1f",
+      "area_name": "Hành lang tầng 1",
+      "zone_type": "corridor",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam16": {
+      "name": "Hành lang tầng 1 đoạn 3",
+      "building": "A",
+      "floor": 1,
+      "area_group": "corridor_1f",
+      "area_name": "Hành lang tầng 1",
+      "zone_type": "corridor",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam17": {
+      "name": "Nút giao hành lang tầng 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "corridor_1f",
+      "area_name": "Nút giao tầng 1",
+      "zone_type": "corridor",
+      "view_direction": "center",
+      "is_active": true
+    },
+    "cam18": {
+      "name": "Hành lang khu khám bệnh",
+      "building": "A",
+      "floor": 1,
+      "area_group": "clinic",
+      "area_name": "Khu khám bệnh",
+      "zone_type": "corridor",
+      "view_direction": "north",
+      "is_active": true
+    },
+    "cam19": {
+      "name": "Khu chờ khám 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "clinic",
+      "area_name": "Khu chờ khám",
+      "zone_type": "waiting_area",
+      "view_direction": "north",
+      "is_active": true
+    },
+    "cam20": {
+      "name": "Khu chờ khám 2",
+      "building": "A",
+      "floor": 1,
+      "area_group": "clinic",
+      "area_name": "Khu chờ khám",
+      "zone_type": "waiting_area",
+      "view_direction": "south",
+      "is_active": true
+    },
+    "cam21": {
+      "name": "Lối vào phòng khám 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "clinic",
+      "area_name": "Phòng khám 1",
+      "zone_type": "clinic",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam22": {
+      "name": "Lối vào phòng khám 2",
+      "building": "A",
+      "floor": 1,
+      "area_group": "clinic",
+      "area_name": "Phòng khám 2",
+      "zone_type": "clinic",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam23": {
+      "name": "Hành lang xét nghiệm",
+      "building": "A",
+      "floor": 1,
+      "area_group": "lab",
+      "area_name": "Khu xét nghiệm",
+      "zone_type": "corridor",
+      "view_direction": "south",
+      "is_active": true
+    },
+    "cam24": {
+      "name": "Khu chờ xét nghiệm",
+      "building": "A",
+      "floor": 1,
+      "area_group": "lab",
+      "area_name": "Khu chờ xét nghiệm",
+      "zone_type": "waiting_area",
+      "view_direction": "north",
+      "is_active": true
+    },
+    "cam25": {
+      "name": "Lối vào phòng xét nghiệm",
+      "building": "A",
+      "floor": 1,
+      "area_group": "lab",
+      "area_name": "Phòng xét nghiệm",
+      "zone_type": "lab",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam26": {
+      "name": "Hành lang chẩn đoán hình ảnh",
+      "building": "A",
+      "floor": 1,
+      "area_group": "imaging",
+      "area_name": "Khu chẩn đoán hình ảnh",
+      "zone_type": "corridor",
+      "view_direction": "south",
+      "is_active": true
+    },
+    "cam27": {
+      "name": "Khu chờ chẩn đoán hình ảnh",
+      "building": "A",
+      "floor": 1,
+      "area_group": "imaging",
+      "area_name": "Khu chờ chẩn đoán",
+      "zone_type": "waiting_area",
+      "view_direction": "north",
+      "is_active": true
+    },
+    "cam28": {
+      "name": "Lối vào phòng chụp",
+      "building": "A",
+      "floor": 1,
+      "area_group": "imaging",
+      "area_name": "Phòng chụp",
+      "zone_type": "imaging",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam29": {
+      "name": "Lối vào nhà thuốc",
+      "building": "A",
+      "floor": 1,
+      "area_group": "pharmacy",
+      "area_name": "Lối vào nhà thuốc",
+      "zone_type": "corridor",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam30": {
+      "name": "Nhà thuốc",
+      "building": "A",
+      "floor": 1,
+      "area_group": "pharmacy",
+      "area_name": "Nhà thuốc",
+      "zone_type": "pharmacy",
+      "view_direction": "front",
+      "is_active": true
+    },
+    "cam31": {
+      "name": "Thang máy tầng 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "vertical",
+      "area_name": "Thang máy tầng 1",
+      "zone_type": "elevator",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam32": {
+      "name": "Cầu thang tầng 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "vertical",
+      "area_name": "Cầu thang tầng 1",
+      "zone_type": "stairs",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam33": {
+      "name": "Thang máy tầng 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "vertical",
+      "area_name": "Thang máy tầng 2",
+      "zone_type": "elevator",
+      "view_direction": "outward",
+      "is_active": true
+    },
+    "cam34": {
+      "name": "Cầu thang tầng 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "vertical",
+      "area_name": "Cầu thang tầng 2",
+      "zone_type": "stairs",
+      "view_direction": "outward",
+      "is_active": true
+    },
+    "cam35": {
+      "name": "Nút giao tầng 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "corridor_2f",
+      "area_name": "Nút giao tầng 2",
+      "zone_type": "corridor",
+      "view_direction": "center",
+      "is_active": true
+    },
+    "cam36": {
+      "name": "Hành lang nội trú đoạn 1",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward",
+      "area_name": "Hành lang nội trú",
+      "zone_type": "corridor",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam37": {
+      "name": "Hành lang nội trú đoạn 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward",
+      "area_name": "Hành lang nội trú",
+      "zone_type": "corridor",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam38": {
+      "name": "Khu y tá tầng 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward",
+      "area_name": "Khu y tá",
+      "zone_type": "nurse_station",
+      "view_direction": "front",
+      "is_active": true
+    },
+    "cam39": {
+      "name": "Khu chờ nội trú",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward",
+      "area_name": "Khu chờ nội trú",
+      "zone_type": "waiting_area",
+      "view_direction": "north",
+      "is_active": true
+    },
+    "cam40": {
+      "name": "Lối vào phòng bệnh 201",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward",
+      "area_name": "Phòng bệnh 201",
+      "zone_type": "ward",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam41": {
+      "name": "Lối vào phòng bệnh 202",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward",
+      "area_name": "Phòng bệnh 202",
+      "zone_type": "ward",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam42": {
+      "name": "Lối vào phòng bệnh 203",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward",
+      "area_name": "Phòng bệnh 203",
+      "zone_type": "ward",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam43": {
+      "name": "Hành lang phụ tầng 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward_side",
+      "area_name": "Hành lang phụ",
+      "zone_type": "corridor",
+      "view_direction": "west",
+      "is_active": true
+    },
+    "cam44": {
+      "name": "Kho vật tư tầng 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward_side",
+      "area_name": "Kho vật tư",
+      "zone_type": "storage",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam45": {
+      "name": "Lối ra tầng 2",
+      "building": "A",
+      "floor": 2,
+      "area_group": "ward_side",
+      "area_name": "Lối ra tầng 2",
+      "zone_type": "exit",
+      "view_direction": "outward",
+      "is_active": true
+    },
+    "cam46": {
+      "name": "Lối vào cấp cứu",
+      "building": "A",
+      "floor": 1,
+      "area_group": "emergency",
+      "area_name": "Cấp cứu",
+      "zone_type": "entrance",
+      "view_direction": "inward",
+      "is_active": true
+    },
+    "cam47": {
+      "name": "Sảnh cấp cứu",
+      "building": "A",
+      "floor": 1,
+      "area_group": "emergency",
+      "area_name": "Sảnh cấp cứu",
+      "zone_type": "lobby",
+      "view_direction": "center",
+      "is_active": true
+    },
+    "cam48": {
+      "name": "Hành lang cấp cứu",
+      "building": "A",
+      "floor": 1,
+      "area_group": "emergency",
+      "area_name": "Hành lang cấp cứu",
+      "zone_type": "corridor",
+      "view_direction": "east",
+      "is_active": true
+    },
+    "cam49": {
+      "name": "Khu chờ cấp cứu",
+      "building": "A",
+      "floor": 1,
+      "area_group": "emergency",
+      "area_name": "Khu chờ cấp cứu",
+      "zone_type": "waiting_area",
+      "view_direction": "north",
+      "is_active": true
+    },
+    "cam50": {
+      "name": "Lối kết nối cấp cứu vào tầng 1",
+      "building": "A",
+      "floor": 1,
+      "area_group": "emergency",
+      "area_name": "Nối cấp cứu",
+      "zone_type": "corridor",
+      "view_direction": "toward_corridor",
+      "is_active": true
+    }
+  },
+  "zones": [
+    {
+      "camera_id": "cam07",
+      "zone_id": "cam07_entry_bottom",
+      "zone_type": "entry",
+      "side_label": "bottom"
+    },
+    {
+      "camera_id": "cam07",
+      "zone_id": "cam07_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    },
+    {
+      "camera_id": "cam07",
+      "zone_id": "cam07_exit_left",
+      "zone_type": "exit",
+      "side_label": "left"
+    },
+    {
+      "camera_id": "cam08",
+      "zone_id": "cam08_entry_left",
+      "zone_type": "entry",
+      "side_label": "left"
+    },
+    {
+      "camera_id": "cam08",
+      "zone_id": "cam08_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    },
+    {
+      "camera_id": "cam08",
+      "zone_id": "cam08_exit_bottom",
+      "zone_type": "exit",
+      "side_label": "bottom"
+    },
+    {
+      "camera_id": "cam09",
+      "zone_id": "cam09_entry_left",
+      "zone_type": "entry",
+      "side_label": "left"
+    },
+    {
+      "camera_id": "cam09",
+      "zone_id": "cam09_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    },
+    {
+      "camera_id": "cam13",
+      "zone_id": "cam13_entry_left",
+      "zone_type": "entry",
+      "side_label": "left"
+    },
+    {
+      "camera_id": "cam13",
+      "zone_id": "cam13_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    },
+    {
+      "camera_id": "cam17",
+      "zone_id": "cam17_entry_left",
+      "zone_type": "entry",
+      "side_label": "left"
+    },
+    {
+      "camera_id": "cam17",
+      "zone_id": "cam17_exit_top",
+      "zone_type": "exit",
+      "side_label": "top"
+    },
+    {
+      "camera_id": "cam17",
+      "zone_id": "cam17_exit_bottom",
+      "zone_type": "exit",
+      "side_label": "bottom"
+    },
+    {
+      "camera_id": "cam17",
+      "zone_id": "cam17_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    },
+    {
+      "camera_id": "cam31",
+      "zone_id": "cam31_elevator_door",
+      "zone_type": "exit",
+      "side_label": "center"
+    },
+    {
+      "camera_id": "cam33",
+      "zone_id": "cam33_elevator_door",
+      "zone_type": "entry",
+      "side_label": "center"
+    },
+    {
+      "camera_id": "cam35",
+      "zone_id": "cam35_entry_left",
+      "zone_type": "entry",
+      "side_label": "left"
+    },
+    {
+      "camera_id": "cam35",
+      "zone_id": "cam35_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    },
+    {
+      "camera_id": "cam37",
+      "zone_id": "cam37_entry_left",
+      "zone_type": "entry",
+      "side_label": "left"
+    },
+    {
+      "camera_id": "cam37",
+      "zone_id": "cam37_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    },
+    {
+      "camera_id": "cam47",
+      "zone_id": "cam47_entry_bottom",
+      "zone_type": "entry",
+      "side_label": "bottom"
+    },
+    {
+      "camera_id": "cam47",
+      "zone_id": "cam47_exit_right",
+      "zone_type": "exit",
+      "side_label": "right"
+    }
+  ],
+  "edges": [
+    {
+      "from": "cam01",
+      "to": "cam07",
+      "connectivity_type": "entrance_to_lobby",
+      "min_seconds": 10.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 25.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam02",
+      "to": "cam07",
+      "connectivity_type": "dropoff_to_lobby",
+      "min_seconds": 5.0,
+      "max_seconds": 45.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam03",
+      "to": "cam04",
+      "connectivity_type": "parking_internal",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam04",
+      "to": "cam05",
+      "connectivity_type": "parking_internal",
+      "min_seconds": 10.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 35.0,
+      "confidence": 0.85
+    },
+    {
+      "from": "cam05",
+      "to": "cam06",
+      "connectivity_type": "parking_to_walkway",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam06",
+      "to": "cam07",
+      "connectivity_type": "walkway_to_lobby",
+      "min_seconds": 20.0,
+      "max_seconds": 150.0,
+      "typical_seconds": 60.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam07",
+      "to": "cam08",
+      "connectivity_type": "lobby_internal",
+      "min_seconds": 5.0,
+      "max_seconds": 45.0,
+      "typical_seconds": 15.0,
+      "confidence": 0.98
+    },
+    {
+      "from": "cam08",
+      "to": "cam09",
+      "connectivity_type": "lobby_to_reception",
+      "min_seconds": 5.0,
+      "max_seconds": 45.0,
+      "typical_seconds": 15.0,
+      "confidence": 0.97
+    },
+    {
+      "from": "cam09",
+      "to": "cam10",
+      "connectivity_type": "reception_to_registration",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.96
+    },
+    {
+      "from": "cam10",
+      "to": "cam11",
+      "connectivity_type": "registration_to_waiting",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam11",
+      "to": "cam12",
+      "connectivity_type": "waiting_to_lobby_exit",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.85
+    },
+    {
+      "from": "cam08",
+      "to": "cam13",
+      "connectivity_type": "lobby_to_corridor",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam13",
+      "to": "cam14",
+      "connectivity_type": "corridor_same_floor",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.96
+    },
+    {
+      "from": "cam14",
+      "to": "cam15",
+      "connectivity_type": "corridor_same_floor",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.96
+    },
+    {
+      "from": "cam15",
+      "to": "cam16",
+      "connectivity_type": "corridor_same_floor",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.96
+    },
+    {
+      "from": "cam16",
+      "to": "cam17",
+      "connectivity_type": "corridor_to_junction",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.96
+    },
+    {
+      "from": "cam17",
+      "to": "cam18",
+      "connectivity_type": "junction_to_clinic_branch",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.92
+    },
+    {
+      "from": "cam18",
+      "to": "cam19",
+      "connectivity_type": "clinic_corridor_to_waiting",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam19",
+      "to": "cam20",
+      "connectivity_type": "clinic_waiting_internal",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam20",
+      "to": "cam21",
+      "connectivity_type": "waiting_to_clinic_room",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam20",
+      "to": "cam22",
+      "connectivity_type": "waiting_to_clinic_room",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam17",
+      "to": "cam23",
+      "connectivity_type": "junction_to_lab_branch",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.92
+    },
+    {
+      "from": "cam23",
+      "to": "cam24",
+      "connectivity_type": "lab_corridor_to_waiting",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam24",
+      "to": "cam25",
+      "connectivity_type": "lab_waiting_to_room",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam17",
+      "to": "cam26",
+      "connectivity_type": "junction_to_imaging_branch",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 40.0,
+      "confidence": 0.88
+    },
+    {
+      "from": "cam26",
+      "to": "cam27",
+      "connectivity_type": "imaging_corridor_to_waiting",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.93
+    },
+    {
+      "from": "cam27",
+      "to": "cam28",
+      "connectivity_type": "imaging_waiting_to_room",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam17",
+      "to": "cam29",
+      "connectivity_type": "junction_to_pharmacy_branch",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 40.0,
+      "confidence": 0.86
+    },
+    {
+      "from": "cam29",
+      "to": "cam30",
+      "connectivity_type": "pharmacy_entrance_to_counter",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam17",
+      "to": "cam31",
+      "connectivity_type": "junction_to_elevator_f1",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam17",
+      "to": "cam32",
+      "connectivity_type": "junction_to_stairs_f1",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam31",
+      "to": "cam33",
+      "connectivity_type": "elevator_vertical",
+      "min_seconds": 60.0,
+      "max_seconds": 420.0,
+      "typical_seconds": 180.0,
+      "confidence": 0.75
+    },
+    {
+      "from": "cam32",
+      "to": "cam34",
+      "connectivity_type": "stairs_vertical",
+      "min_seconds": 60.0,
+      "max_seconds": 300.0,
+      "typical_seconds": 150.0,
+      "confidence": 0.8
+    },
+    {
+      "from": "cam33",
+      "to": "cam35",
+      "connectivity_type": "elevator_to_floor2_junction",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam34",
+      "to": "cam35",
+      "connectivity_type": "stairs_to_floor2_junction",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam35",
+      "to": "cam36",
+      "connectivity_type": "floor2_junction_to_ward_corridor",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam36",
+      "to": "cam37",
+      "connectivity_type": "ward_corridor",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam37",
+      "to": "cam38",
+      "connectivity_type": "corridor_to_nurse_station",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam38",
+      "to": "cam39",
+      "connectivity_type": "nurse_station_to_waiting",
+      "min_seconds": 5.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 30.0,
+      "confidence": 0.85
+    },
+    {
+      "from": "cam37",
+      "to": "cam40",
+      "connectivity_type": "corridor_to_ward_room",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam37",
+      "to": "cam41",
+      "connectivity_type": "corridor_to_ward_room",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam37",
+      "to": "cam42",
+      "connectivity_type": "corridor_to_ward_room",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam39",
+      "to": "cam43",
+      "connectivity_type": "waiting_to_side_corridor",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.8
+    },
+    {
+      "from": "cam43",
+      "to": "cam44",
+      "connectivity_type": "side_corridor_to_storage",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.75
+    },
+    {
+      "from": "cam43",
+      "to": "cam45",
+      "connectivity_type": "side_corridor_to_exit",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.85
+    },
+    {
+      "from": "cam46",
+      "to": "cam47",
+      "connectivity_type": "emergency_entrance_to_lobby",
+      "min_seconds": 5.0,
+      "max_seconds": 45.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.95
+    },
+    {
+      "from": "cam47",
+      "to": "cam48",
+      "connectivity_type": "emergency_lobby_to_corridor",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.94
+    },
+    {
+      "from": "cam48",
+      "to": "cam49",
+      "connectivity_type": "emergency_corridor_to_waiting",
+      "min_seconds": 5.0,
+      "max_seconds": 60.0,
+      "typical_seconds": 20.0,
+      "confidence": 0.9
+    },
+    {
+      "from": "cam48",
+      "to": "cam50",
+      "connectivity_type": "emergency_corridor_to_main_corridor",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.86
+    },
+    {
+      "from": "cam50",
+      "to": "cam13",
+      "connectivity_type": "emergency_to_main_corridor_connection",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.82
+    },
+    {
+      "from": "cam47",
+      "to": "cam08",
+      "connectivity_type": "emergency_lobby_to_main_lobby_possible",
+      "min_seconds": 30.0,
+      "max_seconds": 240.0,
+      "typical_seconds": 90.0,
+      "confidence": 0.55
+    },
+    {
+      "from": "cam12",
+      "to": "cam01",
+      "connectivity_type": "lobby_exit_to_main_gate",
+      "min_seconds": 10.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 35.0,
+      "confidence": 0.8
+    },
+    {
+      "from": "cam12",
+      "to": "cam02",
+      "connectivity_type": "lobby_exit_to_dropoff",
+      "min_seconds": 10.0,
+      "max_seconds": 90.0,
+      "typical_seconds": 35.0,
+      "confidence": 0.8
+    },
+    {
+      "from": "cam30",
+      "to": "cam12",
+      "connectivity_type": "pharmacy_to_lobby_exit",
+      "min_seconds": 20.0,
+      "max_seconds": 180.0,
+      "typical_seconds": 75.0,
+      "confidence": 0.75
+    },
+    {
+      "from": "cam45",
+      "to": "cam33",
+      "connectivity_type": "floor2_exit_to_elevator",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.7
+    },
+    {
+      "from": "cam45",
+      "to": "cam34",
+      "connectivity_type": "floor2_exit_to_stairs",
+      "min_seconds": 10.0,
+      "max_seconds": 120.0,
+      "typical_seconds": 45.0,
+      "confidence": 0.7
+    }
+  ],
+  "defaults": {
+    "max_hop_seconds": 300,
+    "pedestrian_speed_mps": 1.2,
+    "unknown_camera_max_seconds": 120,
+    "use_bidirectional": true
+  }
+}

@@ -3,14 +3,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_DIR="$SCRIPT_DIR"
-REPO_ROOT="$(cd "$SERVICE_DIR/../../../.." && pwd)"
+REPO_ROOT="$(cd "$SERVICE_DIR/../../.." && pwd)"
 SECRETS_ROOT="${MCPT_SECRETS_ROOT:-$REPO_ROOT/secrets}"
 SHARED_ENV_FILE="${MCPT_SHARED_ENV_FILE:-$SECRETS_ROOT/shared.env}"
 
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export PIP_DISABLE_PIP_VERSION_CHECK="${PIP_DISABLE_PIP_VERSION_CHECK:-1}"
+export PROJECT_ROOT="${PROJECT_ROOT:-$REPO_ROOT}"
+export INGESTION_WORK_ROOT="${INGESTION_WORK_ROOT:-$REPO_ROOT/storage/tracking-ingestion}"
 export MCPT_SECRETS_ROOT="$SECRETS_ROOT"
 export MCPT_SHARED_ENV_FILE="$SHARED_ENV_FILE"
+
+# Model weights — tất cả đã có sẵn trên shared filesystem, không cần download khi user request
+STUDIO_ROOT="$(cd "$REPO_ROOT/.." && pwd)"  # /teamspace/studios/this_studio
+export MCPT_MODEL_WEIGHTS_ROOT="$REPO_ROOT/storage/model-weights"
+export MCPT_RF_DETR_WEIGHTS="$REPO_ROOT/storage/model-weights/rf-detr/rf-detr-xxlarge.pth"
+export MCPT_TRANSREID_WEIGHTS="$REPO_ROOT/storage/model-weights/transreid-reid/transformer_120.pth"
+export MCPT_VIDEOMAE_WEIGHTS="$REPO_ROOT/storage/model-weights/videomae-action"
+
+# HuggingFace cache — SigLIP2 đã download tại đây (3.4GB, không download lại)
+export HF_HOME="${HF_HOME:-$STUDIO_ROOT/.cache/huggingface}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$STUDIO_ROOT/.cache/huggingface/hub}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
 
 echo "[start_api_builder] repo_root=$REPO_ROOT"
 echo "[start_api_builder] service_dir=$SERVICE_DIR"
@@ -78,12 +92,6 @@ checks = [
     ("psycopg2", "psycopg2-binary"),
     ("torch", "torch"),
     ("torchvision", "torchvision"),
-    ("ultralytics", "ultralytics"),
-    ("sentence_transformers", "sentence-transformers"),
-    ("open_clip", "open-clip-torch"),
-    ("chromadb", "chromadb"),
-    ("transformers", "transformers"),
-    ("timm", "timm"),
     ("pandas", "pandas"),
     ("sklearn", "scikit-learn"),
     ("scipy", "scipy"),

@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir -r /tmp/metadata-req.txt -r /tmp/gateway-req.txt
 
 COPY backend/services/metadata-service/app /app/metadata_app
 COPY backend/services/api-gateway/app /app/gateway_app
-COPY backend/legacy-engine /workspace/backend/legacy-engine
 COPY shared_secret_runtime.py /workspace/a20-root/shared_secret_runtime.py
 
 COPY infra/docker/backend_entrypoint.sh /app/entrypoint.sh

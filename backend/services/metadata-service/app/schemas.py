@@ -119,14 +119,19 @@ class CandidateResponse(BaseModel):
     bbox: list[int] = Field(default_factory=list)
     search_text: str | None = None
     metadata_path: str | None = None
+    attribute_summary: str | None = None
     appearance_summary: str | None = None
+    attribute_embedding_vector: list[float] = Field(default_factory=list)
+    appearance_embedding_vector: list[float] = Field(default_factory=list)
     semantic_attributes: list[str] = Field(default_factory=list)
+    embedding_vector: list[float] = Field(default_factory=list)
     visibility_scores: dict[str, Any] = Field(default_factory=dict)
     world_position: dict[str, Any] | None = None
-    reid_profile: str | None = None
-    pipeline_profile: str | None = None
     score: float | None = None
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
     matched_segments: list[dict[str, Any]] = Field(default_factory=list)
+    action_semantic_embedding: dict[str, Any] = Field(default_factory=dict)
+    tracklet_feature_pipeline: dict[str, Any] = Field(default_factory=dict)
     available_link_video: str | None = None
     available_link_metadata: str | None = None
     local_video_path: str | None = None
@@ -142,12 +147,6 @@ class CandidateResponse(BaseModel):
 class CandidateListResponse(BaseModel):
     count: int
     items: list[CandidateResponse]
-
-
-class ImportResponse(BaseModel):
-    imported_count: int
-    updated_count: int
-    file_count: int
 
 
 class QueueVideoResponse(BaseModel):
@@ -172,20 +171,6 @@ class QueueVideoResponse(BaseModel):
 class QueueVideoListResponse(BaseModel):
     count: int
     items: list[QueueVideoResponse]
-
-
-class QueueBootstrapRequest(BaseModel):
-    source_dir: str = Field(min_length=1, max_length=4096)
-    limit: int = Field(default=31, ge=1, le=500)
-    reset_remote_queue: bool = True
-    delete_source_after_import: bool = False
-
-
-class QueueBootstrapResponse(BaseModel):
-    processed_videos: int
-    queue_size: int
-    people_indexed: int
-    evicted_video_ids: list[str] = Field(default_factory=list)
 
 
 class QueueProcessResponse(BaseModel):

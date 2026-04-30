@@ -4,7 +4,7 @@ import os
 import sys
 
 _here = Path(__file__).parent
-REPO_ROOT = _here.parent.parent.parent.parent.parent
+REPO_ROOT = _here.parent.parent.parent.parent.resolve()
 A20_ROOT = REPO_ROOT
 if str(A20_ROOT) not in sys.path:
     sys.path.insert(0, str(A20_ROOT))
@@ -46,15 +46,23 @@ try:
 except ImportError:
     pass
 
-# Compute PROJECT_ROOT from env or file location
-PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", _here.parent.parent.parent.parent))
+def _resolve_project_root() -> Path:
+    raw_value = os.getenv("PROJECT_ROOT", "").strip()
+    if raw_value:
+        candidate = Path(raw_value).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (REPO_ROOT / candidate).resolve()
+        if resolved.exists():
+            return resolved
+    return REPO_ROOT
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 
 class Settings(BaseSettings):
     app_name: str = "mcpt-tracking-service"
 
     # Paths - auto-detect from PROJECT_ROOT
-    legacy_root: str = str(PROJECT_ROOT / "backend" / "legacy-engine")
     ingestion_work_root: str = str(PROJECT_ROOT / "storage" / "tracking-ingestion")
     video_conversion_output_dir: str = str(PROJECT_ROOT / "storage" / "video-conversion")
     video_download_output_dir: str = str(PROJECT_ROOT / "storage" / "tracking-outputs")
@@ -62,6 +70,7 @@ class Settings(BaseSettings):
 
     # Camera calibration for 3D world projection
     camera_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "camera_calibration.json")
+    world_projection_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "world_projection_calibration.json")
 
     # PostgreSQL
     postgres_host: str = "localhost"
@@ -78,24 +87,18 @@ class Settings(BaseSettings):
     google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
     google_drive_vinuni_folder_name: str = "VinUni"
     google_drive_queue_folder_name: str = "Storage"
-    google_drive_import_folder_name: str = "Temp"
-    google_drive_h265_folder_name: str = ".h265"
     google_drive_metadata_folder_name: str = "Metadata"
 
     tracking_runtime_mode: str = "production_ready"
-    pipeline_profile: str = "rfdetr_ocmctrack_solider_kpr_itself_hota"
     tracking_hyperparameter_overrides_json: str = ""  # disabled in strict mode
-    gpu_hardware_profile: str = "auto"
-    gpu_hardware_overrides_json: str = ""
-    gpu_count: int = 1
-    host_cpu_count: int = 16
-    host_ram_gb: int = 64
     uvicorn_workers: int = 1
 
     ffmpeg_crf: int = 28
     ffmpeg_preset: str = "medium"
     ffmpeg_audio_codec: str = "aac"
     ffmpeg_overwrite_output: bool = False
+    ingestion_default_sample_fps: int = 5
+    ingestion_reuse_downloaded_mp4: bool = True
 
     lightning_api_base_url: str = ""
     lightning_api_endpoint: str = "/api/v1/ai/worker"
@@ -105,6 +108,7 @@ class Settings(BaseSettings):
     lightning_timeout_seconds: int = 180
     download_remote_outputs: bool = False
     cleanup_remote_query_inputs: bool = True
+    startup_warmup_enabled: bool = True
 
     enable_trackeval: bool = True
     enable_geometry_gating: bool = True
@@ -117,3 +121,29 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _normalize_runtime_path(raw_value: str, fallback_relative_path: str) -> str:
+    raw_text = str(raw_value or "").strip()
+    candidate = Path(raw_text).expanduser()
+    if not str(candidate):
+        return str((PROJECT_ROOT / fallback_relative_path).resolve())
+    if candidate.is_absolute():
+        if candidate.exists():
+            return str(candidate.resolve())
+        if os.name != "nt":
+            return str(candidate)
+        resolved = candidate.resolve()
+        return str((PROJECT_ROOT / fallback_relative_path).resolve()) if raw_text.startswith(("/workspace", "\\workspace")) else str(resolved)
+    return str((PROJECT_ROOT / candidate).resolve())
+
+
+settings.ingestion_work_root = _normalize_runtime_path(settings.ingestion_work_root, "storage/tracking-ingestion")
+settings.video_conversion_output_dir = _normalize_runtime_path(settings.video_conversion_output_dir, "storage/video-conversion")
+settings.video_download_output_dir = _normalize_runtime_path(settings.video_download_output_dir, "storage/tracking-outputs")
+settings.tracking_artifact_root = _normalize_runtime_path(settings.tracking_artifact_root, "storage/tracking-artifacts")
+settings.camera_calibration_path = _normalize_runtime_path(settings.camera_calibration_path, "backend/config/camera_calibration.json")
+settings.world_projection_calibration_path = _normalize_runtime_path(
+    settings.world_projection_calibration_path,
+    "backend/config/world_projection_calibration.json",
+)

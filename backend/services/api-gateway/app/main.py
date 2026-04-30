@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -9,16 +10,24 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .config import settings
+from .http_client import close_http_client, get_http_client, init_http_client
 from .services.ai_client import (
     search_internal,
     tracking_ai_process as ai_tracking_process,
     tracking_artifact_bytes,
     tracking_artifact_manifest as ai_tracking_artifact_manifest,
-    tracking_pipeline_config,
+    tracking_runtime_config,
     tracking_run as ai_tracking_run,
 )
 
-app = FastAPI(title="MCPT API Gateway", version="2.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_http_client()
+    yield
+    await close_http_client()
+
+
+app = FastAPI(title="MCPT API Gateway", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -71,31 +80,27 @@ def require_auth_header(request: Request) -> None:
 
 
 async def _get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        return response.json()
+    response = await get_http_client().get(url, params=params, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
 
 async def _post_json(url: str, payload: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.post(url, json=payload or {}, headers=headers)
-        response.raise_for_status()
-        return response.json()
+    response = await get_http_client().post(url, json=payload or {}, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
 
 async def _patch_json(url: str, payload: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.patch(url, json=payload or {}, headers=headers)
-        response.raise_for_status()
-        return response.json()
+    response = await get_http_client().patch(url, json=payload or {}, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
 
 async def _get_bytes(url: str, headers: dict[str, str] | None = None) -> tuple[bytes, str]:
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-        return response.content, response.headers.get("content-type", "application/octet-stream")
+    response = await get_http_client().get(url, headers=headers)
+    response.raise_for_status()
+    return response.content, response.headers.get("content-type", "application/octet-stream")
 
 
 def _to_search_item(video: dict[str, Any]) -> SearchResultItem:
@@ -161,7 +166,6 @@ def _build_segment_description(segment_payload: dict[str, Any], fallback: str) -
         return fallback
     candidates = [
         segment_payload.get("description"),
-        segment_payload.get("person_caption"),
         segment_payload.get("appearance_summary"),
         segment_payload.get("search_text"),
     ]
@@ -315,7 +319,7 @@ async def videos_by_id(video_id: str, request: Request, _auth: None = Depends(re
 async def overview() -> dict:
     try:
         metadata = await _get_json(f"{settings.metadata_service_url}/api/v1/overview")
-        ai = await tracking_pipeline_config(request_headers=None)
+        ai = await tracking_runtime_config(request_headers=None)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Downstream service error: {exc}") from exc
     return {"metadata": metadata, "ai": ai}
@@ -415,20 +419,19 @@ async def create_video(
         content = await file.read()
         files = {"file": (file.filename or "video.bin", content, file.content_type or "application/octet-stream")}
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            response = await client.post(
-                f"{settings.metadata_service_url}/api/v1/videos",
-                data=data,
-                files=files,
-                headers=_forward_auth_headers(request),
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+    try:
+        response = await get_http_client().post(
+            f"{settings.metadata_service_url}/api/v1/videos",
+            data=data,
+            files=files,
+            headers=_forward_auth_headers(request),
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
 @app.get("/api/v1/videos")
@@ -513,14 +516,6 @@ async def ai_process(payload: dict[str, Any], request: Request) -> dict:
         raise HTTPException(status_code=502, detail=f"Tracking service error: {exc}") from exc
 
 
-@app.post("/api/v1/candidates/import-legacy")
-async def import_legacy() -> dict:
-    try:
-        return await _post_json(f"{settings.metadata_service_url}/api/v1/candidates/import-legacy")
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
-
-
 @app.get("/api/v1/candidates")
 async def candidates(
     query: str | None = Query(default=None),
@@ -581,6 +576,34 @@ async def candidate_track(payload: dict[str, Any], request: Request) -> dict:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
+@app.post("/api/v1/trace/run")
+async def trace_run(payload: dict[str, Any], request: Request) -> dict:
+    try:
+        return await _post_json(
+            f"{settings.metadata_service_url}/api/v1/trace/run",
+            payload,
+            headers=_forward_auth_headers(request),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
+@app.post("/api/v1/trace/feedback")
+async def trace_feedback(payload: dict[str, Any], request: Request) -> dict:
+    try:
+        return await _post_json(
+            f"{settings.metadata_service_url}/api/v1/trace/feedback",
+            payload,
+            headers=_forward_auth_headers(request),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
+
+
 @app.get("/api/v1/queue/videos")
 async def queue_videos() -> dict:
     try:
@@ -612,20 +635,10 @@ async def queue_video_file(video_id: str) -> Response:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
-@app.post("/api/v1/queue/bootstrap")
-async def queue_bootstrap(payload: dict[str, Any]) -> dict:
+@app.post("/api/v1/queue/process-storage")
+async def queue_process_storage(payload: dict[str, Any] | None = None) -> dict:
     try:
-        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/bootstrap", payload)
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
-
-
-@app.post("/api/v1/queue/process-imports")
-async def queue_process_imports(payload: dict[str, Any] | None = None) -> dict:
-    try:
-        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/process-imports", payload or {})
+        return await _post_json(f"{settings.metadata_service_url}/api/v1/queue/process-storage", payload or {})
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:

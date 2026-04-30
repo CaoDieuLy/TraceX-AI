@@ -1,11 +1,18 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(sshpass -p xVrqU6Dg@VhAcj4 ssh -o StrictHostKeyChecking=no root@103.72.56.139 ' *)",
+      "Bash(python3 -c ' *)"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "AI_TOOL_NAME=claude python3 scripts/log_hook.py"
+            "command": "AI_TOOL_NAME=claude python3 scripts/log_hook.py",
+            "async": true
           }
         ]
       }
@@ -16,7 +23,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AI_TOOL_NAME=claude python3 scripts/log_hook.py"
+            "command": "AI_TOOL_NAME=claude python3 scripts/log_hook.py",
+            "async": true
           }
         ]
       }
@@ -26,7 +34,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AI_TOOL_NAME=claude python3 scripts/log_hook.py"
+            "command": "AI_TOOL_NAME=claude python3 scripts/log_hook.py",
+            "async": true
           }
         ]
       }

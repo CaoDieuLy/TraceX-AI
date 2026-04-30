@@ -47,14 +47,15 @@ Chi duoc phep 1 pipeline duy nhat:
 - ReID: `SOLIDER + KPR`
 - semantic search: `ITSELF`
 - evaluation: `TrackEval HOTA`
+- tracklet metadata pipeline sau quality scoring: mot pipeline thong nhat cho `attribute`, `appearance`, `action`
 
 Cam cac hanh vi sau:
-- Them profile moi, cho phep user select profile.
-- Them fallback sang profile/model cu.
+- Them pipeline/model select moi.
+- Them fallback sang model cu.
 - Mo lai override hyperparameters tu payload/env theo kieu da bi khoa.
 
 File enforce chinh:
-- `backend/services/tracking-service/app/pipeline_profiles.py`
+- `backend/services/tracking-service/app/strict_pipeline.py`
 - `backend/services/tracking-service/app/config.py`
 - `backend/services/tracking-service/app/runtime.py`
 - `backend/services/tracking-service/app/ingestion_runtime.py`
@@ -67,7 +68,7 @@ File enforce chinh:
 > Muc tieu: tranh lam vo strict pipeline hoac pha vo bien gioi BE/AI.
 
 ### Nhom A - Khoa pipeline (sửa cần lưu ý)
-- `backend/services/tracking-service/app/pipeline_profiles.py`
+- `backend/services/tracking-service/app/strict_pipeline.py`
 - `backend/services/tracking-service/app/runtime.py`
 - `backend/services/tracking-service/app/ingestion_runtime.py`
 - `backend/services/tracking-service/app/config.py`
@@ -98,15 +99,15 @@ Da chen comment/docstring truc tiep vao code cho cac ham quan trong:
 - `ai_service/aiapp/main.py`
   - `_to_result_item`: chuan hoa payload candidate thanh schema on dinh tra ve gateway.
   - `internal_search`: dau vao search noi bo, goi rank + phan trang.
-  - `internal_tracking_pipeline_config`, `internal_tracking_ai_process`, `internal_tracking_run`, `internal_tracking_artifact`, `internal_tracking_artifact_manifest`: vai tro proxy tracking/lightning.
-- `backend/services/tracking-service/app/pipeline_profiles.py`
-  - `resolve_pipeline_profile`: enforce 1 pipeline duy nhat, cam override.
+  - `internal_tracking_runtime_config`, `internal_tracking_ai_process`, `internal_tracking_run`, `internal_tracking_artifact`, `internal_tracking_artifact_manifest`: vai tro proxy tracking/lightning.
+- `backend/services/tracking-service/app/strict_pipeline.py`
+  - `get_strict_pipeline`: tra ve duy nhat 1 pipeline co dinh, khong expose co che chon stack.
 - `backend/services/metadata-service/app/service.py`
   - `rank_candidates`: luong rank strict va nguyen tac khong fallback local khi upstream loi.
 
 ## 6) Lenh chay du an (local, dung thu tu)
 
-Chay tai root repo `D:\AI\project\A20-App-119`.
+Chay tai root repo cua stack deploy, noi co `backend/`, `frontend/`, `ai_service/`, `infra/`.
 
 ### Khoi dong/rebuild stack
 ```powershell
@@ -165,7 +166,7 @@ Luu y:
 ## 8) Checklist cho nguoi phat trien tiep theo
 
 - Khong dua logic model cot loi ve gateway/frontend.
-- Khong mo lai profile/fallback cu.
+- Khong mo lai stack/fallback cu.
 - Moi thay doi lien quan pipeline phai cap nhat tai lieu nay + test end-to-end `search`.
 - Neu can doi ha tang docker/env, phai giu nguyen ten service network (`backend`, `ai_service`, `postgres`, `frontend`) de tranh vo wiring.
 

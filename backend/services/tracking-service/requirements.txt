@@ -13,23 +13,13 @@ psycopg2-binary==2.9.10
 watchdog==6.0.0
 python-dotenv==1.0.0
 
-# ─── SOTA 2026: Edge-First Detection (YOLO26-X) ─────────────────
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch>=2.3.0
 torchvision>=0.18.0
-ultralytics>=8.3.0  # YOLO26 official
-supervision==0.25.0  # tracking utilities
 
-# ─── SOTA 2026: CLIP-ReID (Edge-friendly) ───────────────────────
-sentence-transformers>=3.0.0
-open-clip-torch>=2.24.0  # CLIP backbone for ReID
-chromadb>=0.5.0
-
-# ─── SOTA 2026: Vision-Language (ITSELF-lite) ───────────────────
+rfdetr[plus]>=0.2.0
 transformers>=4.40.0
-timm>=1.0.0
-
-# ─── Utilities ───────────────────────────────────────────────────
+timm>=0.9.16
 pandas>=2.2.3
 scikit-learn>=1.5.0
 scipy>=1.13.0

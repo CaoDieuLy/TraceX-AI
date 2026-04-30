@@ -4,10 +4,8 @@ import json
 import logging
 import re
 import shutil
-import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,16 +19,12 @@ from .config import settings
 from .cuda_runtime import configure_torch_runtime
 from .execution_plan import resolve_execution_plan
 from .ingestion_runtime import VideoIngestionRuntime
-from .legacy_runtime import LEGACY_ROOT
-from .pipeline_profiles import resolve_pipeline_profile
-from .runtime import AccuracyFirstTrackerRuntime
+
+from .runtime import StrictTrackerRuntime
+from .strict_pipeline import get_strict_pipeline
 
 logger = logging.getLogger(__name__)
-ALREADY_COMPRESSED_SUFFIXES = {".h265", ".hevc"}
-_SHARED_TEXT_MODEL = None
-_SHARED_TEXT_TOKENIZER = None
-_SHARED_TEXT_DEVICE = None
-_SHARED_TEXT_MODEL_LOCK = threading.Lock()
+INGESTION_VIDEO_SUFFIXES = {".mp4"}
 
 
 def _dict_or_empty(value: object) -> dict:
@@ -83,55 +77,15 @@ def _candidate_payload_view(candidate: dict) -> dict:
         "semantic_attributes",
         "visibility_scores",
         "world_position",
+        "timeline",
         "matched_segments",
+        "action_semantic_embedding",
+        "tracklet_feature_pipeline",
         "embedding_vector",
-        "candidate_vector",
-        "itself_features",
     ):
         if payload.get(key) not in (None, "", []):
             merged[key] = payload.get(key)
     return merged
-
-
-def _get_text_model_components() -> tuple[object, object, str]:
-    global _SHARED_TEXT_MODEL
-    global _SHARED_TEXT_TOKENIZER
-    global _SHARED_TEXT_DEVICE
-
-    if _SHARED_TEXT_MODEL is not None and _SHARED_TEXT_TOKENIZER is not None and _SHARED_TEXT_DEVICE is not None:
-        return _SHARED_TEXT_MODEL, _SHARED_TEXT_TOKENIZER, _SHARED_TEXT_DEVICE
-
-    with _SHARED_TEXT_MODEL_LOCK:
-        if _SHARED_TEXT_MODEL is None or _SHARED_TEXT_TOKENIZER is None or _SHARED_TEXT_DEVICE is None:
-            import open_clip
-
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            model, _, _preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
-            model = model.to(device)
-            model.eval()
-            tokenizer = open_clip.get_tokenizer("ViT-B-32")
-            _SHARED_TEXT_MODEL = model
-            _SHARED_TEXT_TOKENIZER = tokenizer
-            _SHARED_TEXT_DEVICE = device
-    return _SHARED_TEXT_MODEL, _SHARED_TEXT_TOKENIZER, _SHARED_TEXT_DEVICE
-
-
-def _compute_query_embedding(query_text: str) -> np.ndarray | None:
-    cleaned_query = str(query_text or "").strip()
-    if not cleaned_query:
-        return None
-    try:
-        model, tokenizer, device = _get_text_model_components()
-        text_tokens = tokenizer([cleaned_query]).to(device)
-        autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if device == "cuda" else nullcontext()
-        with torch.inference_mode():
-            with autocast_ctx:
-                query_emb = model.encode_text(text_tokens)
-            query_emb = query_emb / query_emb.norm(dim=-1, keepdim=True)
-        return query_emb.detach().cpu().numpy()[0].astype(np.float32)
-    except Exception as exc:
-        logger.warning("Failed to compute query embedding: %s", exc)
-        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -218,14 +172,6 @@ def _rank_candidate_itself(
     return round(final_score, 6)
 
 
-def _rank_candidate(query_text: str, candidate: dict) -> float:
-    """Legacy wrapper - now uses ITSELF ranking"""
-    # In edge-first mode, we don't have pre-computed query embedding
-    # Fall back to semantic-only ranking (or compute on-the-fly if needed)
-    return round(_semantic_overlap_itself(query_text, candidate), 6)
-
-
-
 def _tokenize(text: str) -> set[str]:
     return {token for token in re.findall(r"[a-zA-Z0-9_]+", str(text or "").lower()) if len(token) >= 2}
 
@@ -238,7 +184,7 @@ def _coerce_string_list(values: object) -> list[str]:
 
 def _candidate_search_document(person: dict) -> str:
     parts: list[str] = []
-    for key in ("search_text", "appearance_summary", "person_caption", "caption"):
+    for key in ("search_text", "appearance_summary"):
         text = str(person.get(key) or "").strip()
         if text:
             parts.append(text)
@@ -338,16 +284,15 @@ def _precompute_candidate_embedding_scores(query_embedding: np.ndarray | None, c
 
 
 def _candidate_embedding_values(candidate: dict) -> list[float]:
-    for key in ("embedding_vector", "candidate_vector", "itself_features"):
-        values = candidate.get(key)
-        if not isinstance(values, list) or not values:
-            continue
-        try:
-            vector = [float(value) for value in values]
-        except (TypeError, ValueError):
-            continue
-        if vector:
-            return vector
+    values = candidate.get("embedding_vector")
+    if not isinstance(values, list) or not values:
+        return []
+    try:
+        vector = [float(value) for value in values]
+    except (TypeError, ValueError):
+        return []
+    if vector:
+        return vector
     return []
 
 
@@ -480,39 +425,13 @@ def _summarize_matches(query_text: str, video_id: str, matches: list[dict], pers
     )
 
 
-def _build_worker_match(
-    candidate: dict,
-    query_text: str,
-    query_embedding: np.ndarray | None = None,
-) -> dict:
-    match = dict(candidate)
-    match["search_text"] = _candidate_search_document(candidate)
-    match["semantic_overlap"] = round(_semantic_overlap_itself(query_text, candidate), 6)
-    match["score"] = _rank_candidate_itself(query_text, query_embedding, candidate)
-    match["matched_segments"] = _extract_candidate_segments(candidate)
-    return match
-
-
-def _summarize_matches(query_text: str, video_id: str, matches: list[dict], person_count: int) -> str:
-    if not matches:
-        return f"Processed video '{video_id}' and generated metadata for {person_count} people, but no strong match was found for '{query_text}'."
-    best = matches[0]
-    camera_id = str(best.get("camera_id") or video_id or "unknown-camera")
-    track_id = str(best.get("track_id") or "?")
-    score = float(best.get("score") or 0.0)
-    return (
-        f"Processed video '{video_id}' and found {len(matches)} likely matches for '{query_text}'. "
-        f"Best match: camera {camera_id}, track {track_id}, score {score:.3f}."
-    )
-
-
 def _resolve_query_source_path(storage_path: str, video_id: str | None = None) -> Path:
     source = str(storage_path or "").strip()
     if not source:
         raise ValueError("storage_path is required")
     if source.startswith(("http://", "https://")):
         parsed = urlparse(source)
-        suffix = Path(parsed.path).suffix or ".h265"
+        suffix = Path(parsed.path).suffix or ".mp4"
         target_dir = Path(settings.ingestion_work_root) / "query-inputs"
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{(video_id or 'query-video').strip() or 'query-video'}-{uuid4().hex}{suffix}"
@@ -525,7 +444,7 @@ def _resolve_query_source_path(storage_path: str, video_id: str | None = None) -
 
 
 def _prepare_remote_query_video(source_path: Path, video_id: str | None = None) -> Path:
-    if source_path.suffix.lower() in ALREADY_COMPRESSED_SUFFIXES:
+    if source_path.suffix.lower() in INGESTION_VIDEO_SUFFIXES:
         conversion_dir = Path(settings.video_conversion_output_dir)
         conversion_dir.mkdir(parents=True, exist_ok=True)
         target_path = conversion_dir / f"{(video_id or source_path.stem).strip() or source_path.stem}{source_path.suffix.lower()}"
@@ -533,7 +452,7 @@ def _prepare_remote_query_video(source_path: Path, video_id: str | None = None) 
             shutil.copy2(source_path, target_path)
         return target_path
     raise ValueError(
-        f"Only pre-encoded .h265/.hevc inputs are supported for query processing. Got: {source_path.name}"
+        f"Only .mp4 inputs are supported for query processing. Got: {source_path.name}"
     )
 
 
@@ -550,55 +469,30 @@ def _cleanup_remote_query_files(*paths: Path | None) -> None:
             logger.debug("Skipped cleanup for %s: %s", path, exc)
 
 
-def _load_env_profile_overrides() -> dict:
-    # Strict mode: hyperparameter overrides are disabled.
-    return {}
-
-
-def _load_env_hardware_overrides() -> dict:
-    raw = settings.gpu_hardware_overrides_json.strip()
-    if not raw:
-        return {}
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _resolve_profile_from_payload(default_profile: str, metadata: dict | None = None, overrides: dict | None = None) -> dict:
-    # Strict mode: ignore payload/env profile overrides and force the configured pipeline.
-    return resolve_pipeline_profile(default_profile)
+def _strict_pipeline_spec() -> dict:
+    return get_strict_pipeline()
 
 
 @lru_cache(maxsize=1)
-def get_pipeline_config() -> dict:
+def get_runtime_config() -> dict:
     mode = "remote" if settings.lightning_api_base_url else "local"
-    profile = _resolve_profile_from_payload(settings.pipeline_profile)
-    hardware_profile, execution_plan = resolve_execution_plan(
-        pipeline_profile=profile,
-        gpu_profile_name=settings.gpu_hardware_profile,
-        gpu_profile_overrides=_load_env_hardware_overrides(),
-        gpu_count=settings.gpu_count,
-        host_cpu_count=settings.host_cpu_count,
-        host_ram_gb=settings.host_ram_gb,
-    )
+    pipeline = _strict_pipeline_spec()
+    detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
     acceleration_state = configure_torch_runtime(
-        allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
-        cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-        host_cpu_count=settings.host_cpu_count,
+        allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+        cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+        host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
     )
     return {
         "provider": "lightningai",
         "mode": mode,
         "runtime_mode": settings.tracking_runtime_mode,
-        "pipeline_profile": profile["profile"],
-        "pipeline_summary": profile["summary"],
-        "validated_on": profile["validated_on"],
-        "components": profile["components"],
-        "hyperparameters": profile.get("hyperparameters", {}),
-        "runtime_defaults": profile.get("runtime_defaults", {}),
-        "gpu_hardware_profile": hardware_profile,
+        "pipeline_summary": pipeline["summary"],
+        "validated_on": pipeline["validated_on"],
+        "components": pipeline["components"],
+        "hyperparameters": pipeline.get("hyperparameters", {}),
+        "runtime_defaults": pipeline.get("runtime_defaults", {}),
+        "detected_hardware": detected_hardware,
         "execution_plan": execution_plan,
         "acceleration_state": acceleration_state,
         "enable_trackeval": settings.enable_trackeval,
@@ -606,13 +500,12 @@ def get_pipeline_config() -> dict:
         "enable_corrective_cascade": settings.enable_corrective_cascade,
         "lightning_api_base_url": settings.lightning_api_base_url or None,
         "lightning_api_endpoint": settings.lightning_api_endpoint,
-        "legacy_root": str(LEGACY_ROOT),
     }
 
 
 @lru_cache(maxsize=1)
-def get_runtime() -> AccuracyFirstTrackerRuntime:
-    return AccuracyFirstTrackerRuntime()
+def get_runtime() -> StrictTrackerRuntime:
+    return StrictTrackerRuntime()
 
 
 @lru_cache(maxsize=1)
@@ -658,7 +551,6 @@ def _download_file(url: str, output_path: str, timeout: int = 180) -> None:
         if src.resolve() != dst.resolve():
             logger.info(f"Copying {src} to {dst}")
             dst.parent.mkdir(parents=True, exist_ok=True)
-            import shutil
 
             shutil.copy2(src, dst)
         else:
@@ -672,26 +564,19 @@ def process_video_query(payload: dict) -> dict:
     video_id = str(payload.get("video_id") or "").strip()
     query_id = payload.get("query_id")
     metadata = _json_dict_or_empty(payload.get("metadata"))
-    profile = _resolve_profile_from_payload(settings.pipeline_profile, metadata=metadata)
-    hardware_profile, execution_plan = resolve_execution_plan(
-        pipeline_profile=profile,
-        gpu_profile_name=str(metadata.get("gpu_hardware_profile") or settings.gpu_hardware_profile),
-        gpu_profile_overrides=_dict_or_empty(metadata.get("gpu_hardware_overrides")) or _load_env_hardware_overrides(),
-        gpu_count=settings.gpu_count,
-        host_cpu_count=settings.host_cpu_count,
-        host_ram_gb=settings.host_ram_gb,
-    )
+    pipeline = _strict_pipeline_spec()
+    detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
     acceleration_state = configure_torch_runtime(
-        allow_tf32=bool(hardware_profile.get("allow_tf32", True)),
-        cudnn_benchmark=bool(hardware_profile.get("cudnn_benchmark", True)),
-        host_cpu_count=settings.host_cpu_count,
+        allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
+        cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
+        host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
     )
     file_exists = bool(storage_path)
 
     if not settings.lightning_api_base_url.strip():
         raise RuntimeError(
             "LIGHTNING_API_BASE_URL is required in strict pipeline mode. "
-            "Local fallback processing is disabled."
+            "Local substitute processing is disabled."
         )
 
     # Remote mode: use Lightning AI
@@ -699,23 +584,23 @@ def process_video_query(payload: dict) -> dict:
     from .gpu_client import get_lightning_client
 
     input_path: Path | None = None
-    h265_path: Path | None = None
+    prepared_video_path: Path | None = None
     try:
         input_path = _resolve_query_source_path(storage_path, video_id=video_id or None)
         file_exists = input_path.exists()
-        h265_path = _prepare_remote_query_video(input_path, video_id=video_id or input_path.stem)
-        logger.info(f"Video prepared for Lightning AI: {h265_path}")
+        prepared_video_path = _prepare_remote_query_video(input_path, video_id=video_id or input_path.stem)
+        logger.info(f"Video prepared for Lightning AI: {prepared_video_path}")
 
         # Step 2: Call Lightning AI
         client = get_lightning_client()
         ai_response = client.process_video(
-            video_path=h265_path,
+            video_path=prepared_video_path,
             query_text=query_text,
             query_id=query_id,
             video_id=video_id,
             video_title=payload.get("video_title"),
             metadata=metadata,
-            gpu_hardware_profile=hardware_profile,
+            detected_hardware=detected_hardware,
             execution_plan=execution_plan,
             acceleration_state=acceleration_state,
         )
@@ -731,7 +616,7 @@ def process_video_query(payload: dict) -> dict:
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 # Generate output filename
-                output_filename = f"{video_id or input_path.stem}_tracked.h265"
+                output_filename = f"{video_id or input_path.stem}_tracked.mp4"
                 downloaded_output_path = output_dir / output_filename
 
                 # Download file
@@ -751,7 +636,7 @@ def process_video_query(payload: dict) -> dict:
             "status": ai_response["status"],
             "provider": "lightningai",
             "mode": "remote",
-            "gpu_hardware_profile": hardware_profile,
+            "detected_hardware": detected_hardware,
             "acceleration_state": acceleration_state,
             "query_id": query_id,
             "video_id": video_id,
@@ -784,144 +669,373 @@ def process_video_query(payload: dict) -> dict:
             "summary": f"Error processing video: {str(e)}",
             "file_exists": file_exists,
             "processed_at": processed_at,
-            "gpu_hardware_profile": hardware_profile,
+            "detected_hardware": detected_hardware,
             "acceleration_state": acceleration_state,
             "raw_response": {"error": str(e)},
         }
     finally:
         cleanup_targets: list[Path] = []
-        if h265_path is not None and h265_path.exists():
+        if prepared_video_path is not None and prepared_video_path.exists():
             try:
-                if input_path is None or h265_path.resolve() != input_path.resolve():
-                    cleanup_targets.append(h265_path)
+                if input_path is None or prepared_video_path.resolve() != input_path.resolve():
+                    cleanup_targets.append(prepared_video_path)
             except Exception:
-                cleanup_targets.append(h265_path)
+                cleanup_targets.append(prepared_video_path)
         if input_path is not None and "query-inputs" in input_path.parts:
             cleanup_targets.append(input_path)
         _cleanup_remote_query_files(*cleanup_targets)
 
 
-def process_video_query_worker(payload: dict) -> dict:
-    processed_at = datetime.now(timezone.utc)
-    query_id = str(payload.get("query_id") or uuid4())
-    video_id = str(payload.get("video_id") or "").strip() or query_id
-    query_text = str(payload.get("query_text") or "").strip()
-    source_path = str(payload.get("source_path") or "").strip()
-    metadata = _json_dict_or_empty(payload.get("metadata"))
-    worker_metadata = dict(metadata)
-    worker_metadata["pipeline_profile"] = settings.pipeline_profile
+# ═══════════════════════════════════════════════════════════════
+# Phase 1-5: Full Search Pipeline
+# ═══════════════════════════════════════════════════════════════
 
-    job_root = Path(settings.ingestion_work_root) / "query-workers" / query_id
-    output_video_dir = job_root / "videos"
-    output_metadata_dir = job_root / "metadata"
-    output_basename = f"{Path(source_path).stem or video_id}.h265"
+_ATTRIBUTE_KEYWORDS: dict[str, list[str]] = {
+    "gender": ["male", "female", "man", "woman", "boy", "girl", "nam", "nữ"],
+    "age_group": ["child", "adult", "elderly", "young", "old", "trẻ em", "người lớn", "người già"],
+    "shirt": ["shirt", "áo", "jacket", "hoodie", "sweater", "top"],
+    "pants": ["pants", "quần", "shorts", "skirt", "jeans"],
+    "shoes": ["shoes", "giày", "sneaker", "boot", "sandal", "dép"],
+    "bag": ["bag", "túi", "backpack", "balo", "luggage", "vali"],
+    "hat": ["hat", "cap", "mũ", "helmet"],
+}
 
-    ingestion_result = process_video_ingestion(
-        {
-            "source_path": source_path,
-            "camera_id": video_id,
-            "output_video_dir": str(output_video_dir),
-            "output_metadata_dir": str(output_metadata_dir),
-            "output_basename": output_basename,
-            "metadata": worker_metadata,
-        }
-    )
+_ACTION_KEYWORDS: list[str] = [
+    "run", "walk", "stand", "sit", "fall", "jump", "carry", "push", "pull",
+    "chạy", "đi", "đứng", "ngồi", "ngã", "nhảy", "mang", "đẩy",
+    "throw", "fight", "loiter", "enter", "exit", "pick", "drop",
+]
 
-    people = ingestion_result.get("people") or []
+_COLOR_KEYWORDS: list[str] = [
+    "red", "blue", "green", "black", "white", "yellow", "orange", "purple",
+    "pink", "brown", "gray", "grey", "đỏ", "xanh", "đen", "trắng", "vàng",
+]
 
-    query_embedding = _compute_query_embedding(query_text)
 
-    ranked_matches = [
-        _build_worker_match(person, query_text, query_embedding)
-        for person in people
-        if isinstance(person, dict)
-    ]
-    ranked_matches.sort(
-        key=lambda item: (
-            -float(item.get("score") or 0.0),
-            -float(item.get("semantic_overlap") or 0.0),
-            int(item.get("frame_idx") or 0),
-        )
-    )
-    matched_candidates = ranked_matches[:5]
-    matched_segments = [segment for candidate in matched_candidates for segment in candidate.get("matched_segments") or []][:10]
+def _parse_query_intent(query_text: str) -> dict:
+    """Phase 2: Extract attribute tags and action intent from query."""
+    lower = query_text.lower()
+    tokens = set(re.findall(r"[a-zA-Zàáảãạăắặẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]+", lower))
+
+    attributes: dict[str, list[str]] = {}
+    for attr, keywords in _ATTRIBUTE_KEYWORDS.items():
+        matched = [kw for kw in keywords if kw in lower]
+        if matched:
+            attributes[attr] = matched
+
+    colors = [c for c in _COLOR_KEYWORDS if c in lower]
+    if colors:
+        attributes["colors"] = colors
+
+    actions = [a for a in _ACTION_KEYWORDS if a in lower]
 
     return {
-        "status": "completed",
-        "provider": "lightningai",
-        "mode": "worker",
-        "query_id": query_id,
-        "video_id": video_id,
-        "job_id": query_id,
-        "summary": _summarize_matches(query_text, video_id, matched_candidates, int(ingestion_result.get("person_count") or 0)),
-        "compressed_video_path": ingestion_result.get("compressed_path"),
-        "metadata_path": ingestion_result.get("metadata_path"),
-        "processed_at": processed_at.isoformat(),
-        "metadata": {
-            "query_text": query_text,
-            "person_count": ingestion_result.get("person_count"),
-            "matched_candidates": matched_candidates,
-            "matched_segments": matched_segments,
-            "video": ingestion_result.get("video"),
-            "processing_backend": ingestion_result.get("processing_backend"),
-            "gpu_hardware_profile": ingestion_result.get("gpu_hardware_profile"),
-            "acceleration_state": ingestion_result.get("acceleration_state"),
-        },
+        "raw_query": query_text,
+        "tokens": tokens,
+        "attributes": attributes,
+        "actions": actions,
+        "has_action_intent": len(actions) > 0,
+        "has_appearance_intent": len(attributes) > 0 or len(colors) > 0,
     }
 
 
-def search_candidates_remote(query_text: str, candidates: list[dict], limit: int = 5) -> dict:
+def _encode_query_clip(query_text: str) -> np.ndarray | None:
+    """
+    Phase 2: Encode query text with SigLIP2 ViT-L-16-512 → 1024-dim L2-normalised vector.
+
+    SigLIP2 text and image features share the same embedding space, enabling
+    direct cosine similarity between query text and appearance embeddings.
+    Returns None if encoding fails — scoring gracefully degrades to lexical only.
+    """
+    try:
+        from .model_adapters import SigLIP2ModelHub
+        hub = SigLIP2ModelHub()
+        feats = hub.text_features([query_text])  # [1, 1024]
+        vec = feats[0].astype(np.float32)
+        norm = float(np.linalg.norm(vec))
+        return vec / norm if norm > 1e-8 else None
+    except Exception as exc:
+        logger.warning("SigLIP2 query encoding failed: %s", exc)
+        return None
+
+
+def _hard_filter_candidates(
+    candidates: list[dict],
+    camera_ids: list[str] | None,
+    time_from: str | None,
+    time_to: str | None,
+) -> list[dict]:
+    """Phase 3 — Hard filter: remove candidates outside time window or camera zone."""
+    if not camera_ids and not time_from and not time_to:
+        return candidates
+
+    result = []
+    tf = datetime.fromisoformat(time_from) if time_from else None
+    tt = datetime.fromisoformat(time_to) if time_to else None
+    cam_set = {c.lower().strip() for c in (camera_ids or [])} if camera_ids else None
+
+    for c in candidates:
+        if cam_set:
+            cam = str(c.get("camera_id") or "").lower().strip()
+            if cam and cam not in cam_set:
+                continue
+
+        if tf or tt:
+            timeline = c.get("timeline")
+            if isinstance(timeline, list) and timeline:
+                start = None
+                for seg in timeline:
+                    if isinstance(seg, dict) and seg.get("start_second") is not None:
+                        try:
+                            recorded_start = c.get("recorded_start") or ""
+                            if recorded_start:
+                                base = datetime.fromisoformat(str(recorded_start))
+                                seg_time = base.replace(tzinfo=timezone.utc) + timedelta(seconds=float(seg["start_second"]))
+                                start = seg_time
+                                break
+                        except Exception:
+                            pass
+                if start:
+                    if tf and start < tf.replace(tzinfo=timezone.utc):
+                        continue
+                    if tt and start > tt.replace(tzinfo=timezone.utc):
+                        continue
+        result.append(c)
+    return result
+
+
+def _score_attribute_match(query_intent: dict, candidate: dict) -> float:
+    """Phase 3 — Metadata match: +score for each matching attribute, -0.03 for mismatch."""
+    if not query_intent["attributes"] and not query_intent["actions"]:
+        return 0.0
+
+    attrs_query = query_intent["attributes"]
+    search_doc = (_candidate_search_document(candidate) + " " + str(candidate.get("search_text") or "")).lower()
+    semantic_attrs = [str(a).lower() for a in _coerce_string_list(candidate.get("semantic_attributes"))]
+    full_text = search_doc + " " + " ".join(semantic_attrs)
+
+    score = 0.0
+    matched = 0
+    total = 0
+
+    for attr_type, keywords in attrs_query.items():
+        total += 1
+        if any(kw in full_text for kw in keywords):
+            score += 0.12
+            matched += 1
+        else:
+            score -= 0.03
+
+    for action in query_intent["actions"]:
+        total += 1
+        if action in full_text:
+            score += 0.10
+            matched += 1
+
+    return round(score, 6)
+
+
+def _rank_candidate_multimodal(
+    query_text: str,
+    query_clip_embed: np.ndarray | None,
+    query_intent: dict,
+    candidate: dict,
+) -> float:
+    """
+    Phase 3+4: Hybrid multi-modal scoring.
+
+    Weights:
+      W_app  = 0.42  — CLIP text vs attribute_embedding_vector (768-dim)
+      W_act  = 0.20  — CLIP text vs action_semantic_embedding (768-dim)
+      W_meta = 0.18  — Attribute keyword match
+      W_sem  = 0.12  — Token Jaccard semantic overlap
+      W_vis  = 0.05  — Visibility bonus
+      W_world= 0.03  — World position bonus
+    """
+    view = _candidate_payload_view(candidate)
+
+    # --- Appearance similarity (CLIP text vs CLIP image attributes) ---
+    app_sim = 0.0
+    if query_clip_embed is not None:
+        attr_embed = view.get("attribute_embedding_vector")
+        if isinstance(attr_embed, list) and len(attr_embed) == query_clip_embed.shape[0]:
+            app_sim = _embedding_similarity(query_clip_embed, attr_embed)
+
+    # --- Action similarity (CLIP text vs ITSELF action embedding) ---
+    act_sim = 0.0
+    if query_clip_embed is not None and query_intent["has_action_intent"]:
+        action_embed_data = view.get("action_semantic_embedding")
+        if isinstance(action_embed_data, dict):
+            action_vec = action_embed_data.get("embedding_vector")
+        else:
+            action_vec = None
+        if isinstance(action_vec, list) and len(action_vec) == query_clip_embed.shape[0]:
+            act_sim = _embedding_similarity(query_clip_embed, action_vec)
+
+    # --- Attribute metadata match ---
+    meta_score = _score_attribute_match(query_intent, view)
+
+    # --- Token Jaccard ---
+    sem_overlap = _semantic_overlap_itself(query_text, view)
+
+    # --- Visibility & world bonus ---
+    vis_bonus = _visibility_bonus(view)
+    world_bonus = _world_position_bonus(view)
+
+    final = (
+        app_sim   * 0.42 +
+        act_sim   * 0.20 +
+        meta_score* 0.18 +
+        sem_overlap* 0.12 +
+        vis_bonus  * 0.05 +
+        world_bonus* 0.03
+    )
+    return round(final, 6)
+
+
+def _deduplicate_cross_camera(
+    scored: list[tuple[float, dict]],
+    similarity_threshold: float = 0.85,
+    per_camera_limit: int = 2,
+) -> list[dict]:
+    """
+    Phase 5: Cluster candidates by embedding similarity across cameras.
+    Each identity cluster contributes at most 1 representative to results.
+    """
+    if not scored:
+        return []
+
+    clusters: list[list[int]] = []
+    assigned = [False] * len(scored)
+    embed_cache: dict[int, np.ndarray | None] = {}
+
+    def get_embed(idx: int) -> np.ndarray | None:
+        if idx not in embed_cache:
+            vec = scored[idx][1].get("embedding_vector")
+            if isinstance(vec, list) and vec:
+                arr = np.array(vec, dtype=np.float32)
+                norm = np.linalg.norm(arr)
+                embed_cache[idx] = arr / norm if norm > 1e-8 else None
+            else:
+                embed_cache[idx] = None
+        return embed_cache[idx]
+
+    for i in range(len(scored)):
+        if assigned[i]:
+            continue
+        cluster = [i]
+        assigned[i] = True
+        ei = get_embed(i)
+        if ei is not None:
+            for j in range(i + 1, len(scored)):
+                if assigned[j]:
+                    continue
+                ej = get_embed(j)
+                if ej is not None and ei.shape == ej.shape:
+                    sim = float(np.dot(ei, ej))
+                    if sim >= similarity_threshold:
+                        cluster.append(j)
+                        assigned[j] = True
+        clusters.append(cluster)
+
+    result = []
+    cam_counts: dict[str, int] = {}
+    for cluster in clusters:
+        best_idx = cluster[0]
+        enriched = dict(scored[best_idx][1])
+        enriched["score"] = round(scored[best_idx][0], 6)
+        if len(cluster) > 1:
+            enriched["cross_camera_matches"] = [
+                {"candidate_id": scored[idx][1].get("candidate_id"), "camera_id": scored[idx][1].get("camera_id")}
+                for idx in cluster[1:]
+            ]
+        cam = str(enriched.get("camera_id") or "")
+        if cam and cam_counts.get(cam, 0) >= per_camera_limit:
+            continue
+        cam_counts[cam] = cam_counts.get(cam, 0) + 1
+        result.append(enriched)
+
+    return result
+
+
+def search_candidates_remote(
+    query_text: str,
+    candidates: list[dict],
+    limit: int = 5,
+    camera_ids: list[str] | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+    weights: dict | None = None,
+) -> dict:
+    """
+    Full 5-phase search pipeline:
+    1. Parse query intent (attributes, actions)
+    2. Encode query with CLIP ViT-L/14 (768-dim)
+    3. Hard filter (camera zone + time window) + Hybrid scoring
+    4. Weighted fusion: app(0.42) + act(0.20) + meta(0.18) + sem(0.12) + vis(0.05) + world(0.03)
+    5. Cross-camera deduplication + diversity Top-k
+    """
     cleaned_query = str(query_text or "").strip()
     if not cleaned_query:
         return {"query_text": cleaned_query, "count": 0, "items": []}
 
-    query_embedding = _compute_query_embedding(cleaned_query)
-    embedding_scores = _precompute_candidate_embedding_scores(query_embedding, candidates)
-    ranked: list[dict] = []
-    for index, candidate in enumerate(candidates):
-        if not isinstance(candidate, dict):
-            continue
-        candidate_view = _candidate_payload_view(candidate)
-        score = _rank_candidate_itself(
-            cleaned_query,
-            query_embedding,
-            candidate_view,
-            precomputed_embedding_similarity=embedding_scores.get(index),
-        )
-        if score <= 0:
-            continue
-        enriched = dict(candidate)
-        enriched["score"] = score
-        if not enriched.get("matched_segments"):
-            enriched["matched_segments"] = _normalize_tracking_segments(candidate_view, limit=3)
-        ranked.append(enriched)
+    bounded_limit = max(1, min(int(limit or 5), 50))
+    normalized_candidates = [c for c in candidates if isinstance(c, dict)]
+    if not normalized_candidates:
+        return {"query_text": cleaned_query, "count": 0, "items": []}
 
-    ranked.sort(
-        key=lambda item: (
-            -float(item.get("score") or 0.0),
-            str(item.get("camera_id") or ""),
-            str(item.get("track_id") or ""),
-            str(item.get("candidate_id") or ""),
-        )
+    # Phase 1+2: Parse intent & encode query
+    query_intent = _parse_query_intent(cleaned_query)
+    query_clip_embed = _encode_query_clip(cleaned_query)
+    logger.info(
+        "Query parsed: attributes=%s actions=%s clip_encoded=%s candidates=%d",
+        list(query_intent["attributes"].keys()),
+        query_intent["actions"],
+        query_clip_embed is not None,
+        len(normalized_candidates),
     )
-    limited = ranked[: max(1, min(limit, 50))]
-    return {"query_text": cleaned_query, "count": len(limited), "items": limited}
+
+    # Phase 3a: Hard filter
+    filtered = _hard_filter_candidates(normalized_candidates, camera_ids, time_from, time_to)
+    logger.info("After hard filter: %d/%d candidates", len(filtered), len(normalized_candidates))
+
+    # Phase 3b+4: Hybrid scoring per candidate
+    scored: list[tuple[float, dict]] = []
+    for candidate in filtered:
+        candidate_view = _candidate_payload_view(candidate)
+        score = _rank_candidate_multimodal(cleaned_query, query_clip_embed, query_intent, candidate_view)
+        enriched = dict(candidate)
+        enriched["search_text"] = _candidate_search_document(candidate_view)
+        enriched["semantic_overlap"] = round(_semantic_overlap_itself(cleaned_query, candidate_view), 6)
+        if not isinstance(enriched.get("matched_segments"), list) or not enriched.get("matched_segments"):
+            enriched["matched_segments"] = _normalize_tracking_segments(candidate_view, limit=3)
+        if not isinstance(enriched.get("timeline"), list) and isinstance(candidate_view.get("timeline"), list):
+            enriched["timeline"] = candidate_view.get("timeline")
+        scored.append((score, enriched))
+
+    scored.sort(key=lambda x: (-x[0], str(x[1].get("video_id") or ""), str(x[1].get("candidate_id") or "")))
+
+    # Phase 5: Cross-camera dedup + diversity Top-k
+    items = _deduplicate_cross_camera(scored, per_camera_limit=max(1, bounded_limit // 5 + 1))
+    items = items[:bounded_limit]
+
+    return {"query_text": cleaned_query, "count": len(items), "items": items}
 
 
 def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> Path:
-    runtime = get_ingestion_runtime()
     source_root = _artifact_root() / artifact_id / "sources"
     source_root.mkdir(parents=True, exist_ok=True)
 
     drive_file_id = str(candidate.get("drive_video_file_id") or "").strip()
     if drive_file_id:
+        public_url = f"https://drive.google.com/uc?id={drive_file_id}&export=download&confirm=t"
         filename = Path(
             str(candidate.get("source_filename") or candidate.get("video_title") or candidate.get("candidate_id") or drive_file_id)
         ).name
         if not Path(filename).suffix:
-            filename = f"{filename}.h265"
+            filename = f"{filename}.mp4"
         target_path = source_root / filename
-        runtime._download_drive_file(drive_file_id, target_path)
+        _download_file(public_url, str(target_path))
         return target_path
 
     for key in ("available_link_video", "storage_path", "local_video_path"):
@@ -929,7 +1043,7 @@ def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> 
         if not value:
             continue
         if value.startswith(("http://", "https://")):
-            suffix = Path(urlparse(value).path).suffix or ".h265"
+            suffix = Path(urlparse(value).path).suffix or ".mp4"
             target_path = source_root / f"{_tracking_slug(candidate.get('candidate_id') or 'candidate')}{suffix}"
             _download_file(value, str(target_path))
             return target_path
@@ -1117,16 +1231,12 @@ def run_tracking(candidate_info: dict) -> dict:
 def process_video_ingestion(payload: dict) -> dict:
     runtime = get_ingestion_runtime()
     return runtime.process_video(
-        source_path=str(payload.get("source_path") or "").strip() or None,
-        source_drive_file_id=str(payload.get("source_drive_file_id") or "").strip() or None,
+        source_url=str(payload.get("source_url") or "").strip(),
         source_filename=str(payload.get("source_filename") or "").strip() or None,
         camera_id=payload.get("camera_id"),
         recorded_start=payload.get("recorded_start"),
         output_video_dir=payload.get("output_video_dir"),
         output_metadata_dir=payload.get("output_metadata_dir"),
         output_basename=payload.get("output_basename"),
-        destination_video_folder_id=payload.get("destination_video_folder_id"),
-        destination_metadata_folder_id=payload.get("destination_metadata_folder_id"),
-        upload_outputs_to_drive=bool(payload.get("upload_outputs_to_drive")),
         metadata=_dict_or_empty(payload.get("metadata")),
     )

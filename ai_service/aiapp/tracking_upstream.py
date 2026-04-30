@@ -5,9 +5,9 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException, Request
-from fastapi.responses import Response
 
 from .config import settings
+from .http_client import get_http_client
 
 
 def _service_auth_headers() -> dict[str, str]:
@@ -35,28 +35,25 @@ def _tracking_base() -> str:
 async def proxy_get_json(path: str, request: Request) -> Any:
     url = f"{_tracking_base()}/{path.lstrip('/')}"
     headers = tracking_headers_from_request(request)
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.get(url, headers=headers or None)
-        if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return response.json()
+    response = await get_http_client().get(url, headers=headers or None)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
 
 
 async def proxy_post_json(path: str, payload: dict[str, Any], request: Request) -> Any:
     url = f"{_tracking_base()}/{path.lstrip('/')}"
     headers = tracking_headers_from_request(request)
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.post(url, json=payload, headers=headers or None)
-        if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return response.json()
+    response = await get_http_client().post(url, json=payload, headers=headers or None)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
 
 
 async def proxy_get_bytes(path: str, request: Request) -> tuple[bytes, str]:
     url = f"{_tracking_base()}/{path.lstrip('/')}"
     headers = tracking_headers_from_request(request)
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.get(url, headers=headers or None)
-        if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return response.content, response.headers.get("content-type", "application/octet-stream")
+    response = await get_http_client().get(url, headers=headers or None)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.content, response.headers.get("content-type", "application/octet-stream")

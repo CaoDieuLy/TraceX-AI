@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     metadata_service_url: str = "http://metadata-service:8000"
     ai_service_url: str = "http://ai_service:8001"
     cors_allowed_origins: str = "http://localhost:3000"
+    downstream_http_timeout_seconds: float = 180.0
+    downstream_http_connect_timeout_seconds: float = 10.0
+    downstream_http_pool_timeout_seconds: float = 10.0
+    downstream_http_max_connections: int = 100
+    downstream_http_max_keepalive_connections: int = 20
+    downstream_http_keepalive_expiry_seconds: float = 30.0
 
     model_config = SettingsConfigDict(extra="ignore")
 

@@ -16,7 +16,7 @@ class TrackingResponse(BaseModel):
     manifest_path: str | None = None
     relative_manifest_path: str | None = None
     exists: bool
-    gpu_hardware_profile: str | None = None
+    detected_hardware: dict[str, Any] | None = None
     runtime_mode: str | None = None
     acceleration_state: dict[str, Any] | None = None
 
@@ -34,7 +34,7 @@ class AiProcessResponse(BaseModel):
     status: str
     provider: str
     mode: str
-    gpu_hardware_profile: dict[str, Any] | None = None
+    detected_hardware: dict[str, Any] | None = None
     acceleration_state: dict[str, Any] | None = None
     query_id: str | None = None
     video_id: str
@@ -46,24 +46,20 @@ class AiProcessResponse(BaseModel):
 
 
 class VideoIngestionRequest(BaseModel):
-    source_path: str | None = None
-    source_drive_file_id: str | None = None
+    source_url: str
     source_filename: str | None = None
     camera_id: str | None = None
     recorded_start: datetime | None = None
     output_video_dir: str | None = None
     output_metadata_dir: str | None = None
     output_basename: str | None = None
-    destination_video_folder_id: str | None = None
-    destination_metadata_folder_id: str | None = None
-    upload_outputs_to_drive: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class VideoIngestionResponse(BaseModel):
     status: str
     processing_backend: str
-    gpu_hardware_profile: dict[str, Any] | None = None
+    detected_hardware: dict[str, Any] | None = None
     acceleration_state: dict[str, Any] | None = None
     source_path: str
     compressed_path: str
@@ -82,6 +78,9 @@ class CandidateSearchRequest(BaseModel):
     query_text: str = Field(min_length=1, max_length=4000)
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     limit: int = Field(default=5, ge=1, le=50)
+    camera_ids: list[str] | None = Field(default=None)
+    time_from: str | None = Field(default=None)
+    time_to: str | None = Field(default=None)
 
 
 class CandidateSearchResponse(BaseModel):
