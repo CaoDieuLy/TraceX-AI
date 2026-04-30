@@ -19,7 +19,7 @@ from .config import settings
 from .cuda_runtime import configure_torch_runtime
 from .execution_plan import resolve_execution_plan
 from .ingestion_runtime import VideoIngestionRuntime
-from .legacy_runtime import LEGACY_ROOT
+
 from .runtime import StrictTrackerRuntime
 from .strict_pipeline import get_strict_pipeline
 
@@ -500,7 +500,6 @@ def get_runtime_config() -> dict:
         "enable_corrective_cascade": settings.enable_corrective_cascade,
         "lightning_api_base_url": settings.lightning_api_base_url or None,
         "lightning_api_endpoint": settings.lightning_api_endpoint,
-        "legacy_root": str(LEGACY_ROOT),
     }
 
 

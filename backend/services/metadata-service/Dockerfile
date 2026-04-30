@@ -9,7 +9,6 @@ COPY backend/services/metadata-service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/services/metadata-service/app ./app
-COPY backend/legacy-engine /workspace/backend/legacy-engine
 
 EXPOSE 8000
 

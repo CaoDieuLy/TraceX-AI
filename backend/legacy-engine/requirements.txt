@@ -1,9 +1,0 @@
-# torchreid — Re-ID framework backbone dùng bởi model_adapters.py (TransReID loader)
-# Chỉ cần subset này để load TransReID checkpoint.
-# Active inference requirements: backend/services/tracking-service/requirements.txt
-torch
-torchvision
-timm
-numpy
-scipy
-Pillow

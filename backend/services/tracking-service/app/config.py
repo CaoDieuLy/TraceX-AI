@@ -63,7 +63,6 @@ class Settings(BaseSettings):
     app_name: str = "mcpt-tracking-service"
 
     # Paths - auto-detect from PROJECT_ROOT
-    legacy_root: str = str(PROJECT_ROOT / "backend" / "legacy-engine")
     ingestion_work_root: str = str(PROJECT_ROOT / "storage" / "tracking-ingestion")
     video_conversion_output_dir: str = str(PROJECT_ROOT / "storage" / "video-conversion")
     video_download_output_dir: str = str(PROJECT_ROOT / "storage" / "tracking-outputs")
@@ -138,7 +137,6 @@ def _normalize_runtime_path(raw_value: str, fallback_relative_path: str) -> str:
     return str((PROJECT_ROOT / candidate).resolve())
 
 
-settings.legacy_root = _normalize_runtime_path(settings.legacy_root, "backend/legacy-engine")
 settings.ingestion_work_root = _normalize_runtime_path(settings.ingestion_work_root, "storage/tracking-ingestion")
 settings.video_conversion_output_dir = _normalize_runtime_path(settings.video_conversion_output_dir, "storage/video-conversion")
 settings.video_download_output_dir = _normalize_runtime_path(settings.video_download_output_dir, "storage/tracking-outputs")

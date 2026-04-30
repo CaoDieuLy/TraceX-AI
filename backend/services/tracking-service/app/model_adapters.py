@@ -5,7 +5,6 @@ Models (all SOTA as of April 2026):
   TransReIDHub    — ViT-Base Re-ID backbone, 768-dim (MSMT17, CVPR 2021)
   VideoMAEHub     — Large video transformer, 1024-dim (Kinetics-400, ECCV 2022)
   SigLIP2ModelHub — ViT-L-16-512 image/text, 1024-dim (webli, Feb 2025 SOTA)
-  OSNetReIDHub    — x1.0 AIN MSMT17, 512-dim (2019, kept for reference)
 
 Adapters:
   ZeroShotAttributeAdapter          — gender + age_group (SigLIP2 zero-shot)
@@ -293,93 +292,6 @@ class VideoMAEHub:
         cls = out.last_hidden_state[:, 0]  # CLS token [1, 1024]
         cls = cls / cls.norm(dim=-1, keepdim=True)
         return cls.squeeze(0).cpu().numpy().astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
-# OSNet-AIN Re-ID Hub — kept as fallback reference (replaced by TransReID)
-# ---------------------------------------------------------------------------
-# NOTE: OSNet-AIN (512-dim) is superseded by TransReID (768-dim).
-# The TransReIDHub is the primary Re-ID backbone.
-
-# ---------------------------------------------------------------------------
-# OSNet-AIN Re-ID Hub — cross-camera appearance matching (512-dim)
-# Checkpoint: osnet_ain_x1_0 trained on MSMT17 (appearance-invariant normalization)
-# ---------------------------------------------------------------------------
-
-class OSNetReIDHub:
-    """
-    OSNet-AIN x1.0 trained on MSMT17 — lazy singleton for cross-camera Re-ID.
-
-    Produces 512-dim L2-normalised person embeddings optimised for Re-ID across
-    cameras with varying illumination (AIN = Appearance-Invariant Normalization).
-    Used in trace pipeline for spatiotemporal candidate matching.
-    Input: 256×128 RGB crop  Output: 512-dim vector
-    """
-
-    _instance: Optional["OSNetReIDHub"] = None
-    _lock = threading.Lock()
-
-    _CKPT = (
-        Path(__file__).parent.parent.parent.parent.parent.parent
-        / "storage" / "model-weights" / "osnet-reid"
-        / "osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth"
-    )
-
-    def __new__(cls) -> "OSNetReIDHub":
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._loaded = False
-            return cls._instance
-
-    def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
-        with self._lock:
-            if self._loaded:
-                return
-            import sys, torch
-            from pathlib import Path as _Path
-            # Add legacy-engine to path for torchreid
-            legacy = str(_Path(__file__).parent.parent.parent.parent / "legacy-engine")
-            if legacy not in sys.path:
-                sys.path.insert(0, legacy)
-            import torchreid
-            logger.info("Loading OSNet-AIN x1.0 from %s …", self._CKPT)
-            model = torchreid.models.build_model(
-                "osnet_ain_x1_0", num_classes=1, pretrained=False, loss="softmax"
-            )
-            if self._CKPT.exists():
-                ckpt = torch.load(str(self._CKPT), map_location="cpu")
-                state = ckpt.get("state_dict", ckpt.get("model", ckpt))
-                state = {k.replace("module.", ""): v for k, v in state.items()}
-                backbone_state = {k: v for k, v in state.items() if "classifier" not in k}
-                model.load_state_dict(backbone_state, strict=False)
-                logger.info("OSNet-AIN checkpoint loaded from %s", self._CKPT.name)
-            else:
-                logger.warning("OSNet-AIN checkpoint not found at %s — using random weights", self._CKPT)
-            self._device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = model.to(self._device).eval()
-            self._model = model
-            self._torch = torch
-            self._loaded = True
-            logger.info("OSNet-AIN ready on %s (512-dim)", self._device)
-
-    def embed_crops(self, pil_crops: list[Image.Image]) -> np.ndarray:
-        """Return L2-normalised 512-dim Re-ID embeddings [N, 512]."""
-        self._ensure_loaded()
-        import torchvision.transforms as T
-        transform = T.Compose([
-            T.Resize((256, 128)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        tensors = [transform(img.convert("RGB")) for img in pil_crops]
-        batch = self._torch.stack(tensors).to(self._device)
-        with self._torch.no_grad():
-            feats = self._model(batch)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        return feats.cpu().numpy().astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +616,7 @@ class SoliderKPRAppearanceEmbeddingAdapter:
 
     def _embed_frames(
         self,
-        hub: OSNetReIDHub,
+        hub: TransReIDHub,
         pil_crops: list[Image.Image],
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
         all_parts = [_part_crops(pil) for pil in pil_crops]
