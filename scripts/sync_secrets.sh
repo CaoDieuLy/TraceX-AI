@@ -19,6 +19,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MASTER="$REPO_ROOT/secrets/master.env"
+ENV_DIR="$REPO_ROOT/infra/env"
 
 if [[ ! -f "$MASTER" ]]; then
   echo "[error] secrets/master.env not found." >&2
@@ -28,11 +29,12 @@ fi
 
 set -a; source "$MASTER"; set +a
 echo "[sync] Loaded secrets/master.env"
+mkdir -p "$ENV_DIR"
 
 # =============================================================================
 # 1. infra/env/backend.env
 # =============================================================================
-cat > "$REPO_ROOT/infra/env/backend.env" << EOF
+cat > "$ENV_DIR/backend.env" << EOF
 # AUTO-GENERATED từ secrets/master.env — không edit trực tiếp
 # Regenerate: bash scripts/sync_secrets.sh
 
@@ -77,7 +79,7 @@ echo "[sync] Updated infra/env/backend.env"
 # =============================================================================
 # 2. infra/env/ai.env
 # =============================================================================
-cat > "$REPO_ROOT/infra/env/ai.env" << EOF
+cat > "$ENV_DIR/ai.env" << EOF
 # AUTO-GENERATED từ secrets/master.env — không edit trực tiếp
 
 POSTGRES_HOST=$POSTGRES_HOST
@@ -103,7 +105,7 @@ echo "[sync] Updated infra/env/ai.env"
 # =============================================================================
 # 3. infra/env/frontend.env
 # =============================================================================
-cat > "$REPO_ROOT/infra/env/frontend.env" << EOF
+cat > "$ENV_DIR/frontend.env" << EOF
 # AUTO-GENERATED từ secrets/master.env — không edit trực tiếp
 
 NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_GATEWAY_URL
@@ -160,15 +162,21 @@ if [[ "${1:-}" == "--vps" ]]; then
     echo "[warn] sshpass not found — bỏ qua sync VPS" >&2
   else
     echo "[sync] Syncing to VPS $VPS_HOST ..."
-    sshpass -p "$VPS_PASSWORD" scp -o StrictHostKeyChecking=no \
-      "$REPO_ROOT/infra/env/backend.env" \
-      "$VPS_USER@$VPS_HOST:$VPS_REPO_PATH/infra/env/backend.env"
-    sshpass -p "$VPS_PASSWORD" scp -o StrictHostKeyChecking=no \
-      "$REPO_ROOT/infra/env/ai.env" \
-      "$VPS_USER@$VPS_HOST:$VPS_REPO_PATH/infra/env/ai.env"
-    sshpass -p "$VPS_PASSWORD" scp -o StrictHostKeyChecking=no \
-      "$REPO_ROOT/secrets/shared.env" \
-      "$VPS_USER@$VPS_HOST:$VPS_REPO_PATH/secrets/shared.env"
+    sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no \
+      "$VPS_USER@$VPS_HOST" \
+      "mkdir -p '$VPS_REPO_PATH/infra/env' '$VPS_REPO_PATH/secrets'"
+    (
+      cd "$REPO_ROOT"
+      sshpass -p "$VPS_PASSWORD" scp -o StrictHostKeyChecking=no \
+        "infra/env/backend.env" \
+        "$VPS_USER@$VPS_HOST:$VPS_REPO_PATH/infra/env/backend.env"
+      sshpass -p "$VPS_PASSWORD" scp -o StrictHostKeyChecking=no \
+        "infra/env/ai.env" \
+        "$VPS_USER@$VPS_HOST:$VPS_REPO_PATH/infra/env/ai.env"
+      sshpass -p "$VPS_PASSWORD" scp -o StrictHostKeyChecking=no \
+        "secrets/shared.env" \
+        "$VPS_USER@$VPS_HOST:$VPS_REPO_PATH/secrets/shared.env"
+    )
     sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no \
       "$VPS_USER@$VPS_HOST" \
       "cd $VPS_REPO_PATH && docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env restart backend ai_service 2>&1 | tail -4"

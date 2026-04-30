@@ -89,6 +89,19 @@ bash scripts/import_secrets.sh /path/to/mcpt_secrets_20260430.tar.gz
 bash scripts/sync_secrets.sh --vps
 ```
 
+**Lưu ý trên Windows / Git Bash:** nếu file `.tar.gz` nằm trong đường dẫn có dấu cách, hãy bọc path trong dấu `"` hoặc dùng path tương đối. Ví dụ:
+
+```bash
+# Đang đứng trong repo
+bash scripts/import_secrets.sh "./mcpt_secrets_20260430.tar.gz"
+
+# Hoặc dùng path tuyệt đối có dấu cách
+bash scripts/import_secrets.sh "D:\python ky 9\A20-App-119\mcpt_secrets_20260430.tar.gz"
+
+# Trên Git Bash/MSYS cũng có thể dùng kiểu path Unix
+bash scripts/import_secrets.sh "/d/python ky 9/A20-App-119/mcpt_secrets_20260430.tar.gz"
+```
+
 > **Xem thêm:** [QUICKSTART.md](QUICKSTART.md) để biết flow đầy đủ bước setup lần đầu.
 
 ### Cập nhật một secret (ví dụ: LightningAI URL thay đổi)
