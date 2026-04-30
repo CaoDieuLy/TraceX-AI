@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import cv2
 import httpx
 from googleapiclient.http import MediaIoBaseDownload
+from passlib.exc import UnknownHashError
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -661,7 +662,13 @@ def create_user(
 
 def authenticate_user(session: Session, identifier: str, password: str) -> User | None:
     user = get_user_by_identifier(session, identifier)
-    if user is None or not bool(user.is_active) or not verify_password(password, user.hashed_password):
+    if user is None or not bool(user.is_active):
+        return None
+    try:
+        if not verify_password(password, user.hashed_password):
+            return None
+    except UnknownHashError:
+        logger.warning("Unsupported password hash format for user email=%s", user.email)
         return None
     user.last_login = datetime.now(timezone.utc)
     session.add(user)
@@ -1076,7 +1083,7 @@ def rank_candidates(
     1) Hard filter DB by camera_ids (zone) if provided
     2) Local prefilter to reduce candidate set
     3) Call tracking_service /api/v1/candidates/search with CLIP encoding + hybrid scoring
-    No fallback local when upstream fails.
+    If tracking upstream is unavailable, gracefully fallback to local shortlist.
     """
     cleaned_query = query_text.strip()
     if not cleaned_query:
@@ -1119,11 +1126,15 @@ def rank_candidates(
     if time_to:
         payload["time_to"] = time_to
 
-    response = _post_tracking_json("/api/v1/candidates/search", payload)
-    items = response.get("items")
-    if not isinstance(items, list):
-        raise RuntimeError("Tracking service did not return a valid items list.")
-    return items
+    try:
+        response = _post_tracking_json("/api/v1/candidates/search", payload)
+        items = response.get("items")
+        if not isinstance(items, list):
+            raise RuntimeError("Tracking service did not return a valid items list.")
+        return items
+    except Exception as exc:
+        logger.warning("Tracking ranking unavailable, fallback local shortlist: %s", exc)
+        return candidates[:bounded_limit]
 
 
 def get_overview(session: Session) -> dict:

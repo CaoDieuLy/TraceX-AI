@@ -91,11 +91,12 @@ class Settings(BaseSettings):
     lightning_api_token: str = ""
     lightning_api_auth_header: str = "Authorization"
     lightning_api_auth_prefix: str = "Bearer "
-    tracking_request_timeout_seconds: int = 1800
-    tracking_health_timeout_seconds: int = 20
-    tracking_startup_max_wait_seconds: int = 600
-    tracking_startup_poll_interval_seconds: int = 15
-    tracking_startup_retry_attempts: int = 2
+    # Keep upstream waits short so interactive search does not hang.
+    tracking_request_timeout_seconds: int = 30
+    tracking_health_timeout_seconds: int = 5
+    tracking_startup_max_wait_seconds: int = 8
+    tracking_startup_poll_interval_seconds: int = 2
+    tracking_startup_retry_attempts: int = 1
     jwt_secret_key: str = os.getenv("JWT_SECRET_KEY", "")
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440

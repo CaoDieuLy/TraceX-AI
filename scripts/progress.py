@@ -23,7 +23,7 @@ def main():
     client.connect(VPS_HOST, username=VPS_USER, password=VPS_PASS, timeout=15)
 
     # Completed videos from DB
-    db_out = run(client, """docker exec mcpt-postgres psql -U mcpt_user -d video_tracking -t -A -F'|' -c \
+    db_out = run(client, """docker exec mcpt-postgres psql -U mcpt_user -d mcpt_video_tracking_full -t -A -F'|' -c \
 "SELECT video_id, TO_CHAR(updated_at AT TIME ZONE 'UTC', 'HH24:MI:SS') FROM queue_video_assets ORDER BY updated_at DESC;" """)
 
     completed = {}
