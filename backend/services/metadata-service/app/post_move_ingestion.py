@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .config import settings
+
 if TYPE_CHECKING:
     from .storage_ingest import StorageVideoItem
 
@@ -234,6 +236,7 @@ class StorageTrackingResultAssembler:
         video_payload = dict(raw_result.get("video") or {})
         people = list(raw_result.get("people") or [])
         metadata_path = self.metadata_dir / f"{Path(item.source_filename).stem}.json"
+        metadata_path_value = str(metadata_path) if settings.local_queue_cache_enabled else ""
         compressed_path = str(raw_result.get("compressed_path") or item.source_path or "")
         source_drive_file_id = str(item.source_drive_file_id or "").strip() or None
         if item.source_path is None and source_drive_file_id:
@@ -243,11 +246,11 @@ class StorageTrackingResultAssembler:
         video_payload["source_storage_relative_path"] = item.relative_path
         video_payload["source_drive_file_id"] = source_drive_file_id
         video_payload["compressed_path"] = compressed_path
-        video_payload["metadata_path"] = str(metadata_path)
+        video_payload["metadata_path"] = metadata_path_value
 
         normalized_result = dict(raw_result)
         normalized_result["compressed_path"] = compressed_path
-        normalized_result["metadata_path"] = str(metadata_path)
+        normalized_result["metadata_path"] = metadata_path_value
         if source_drive_file_id and not str(normalized_result.get("drive_video_file_id") or "").strip():
             normalized_result["drive_video_file_id"] = source_drive_file_id
             normalized_result["drive_video_link"] = f"https://drive.google.com/file/d/{source_drive_file_id}/view"
@@ -255,7 +258,8 @@ class StorageTrackingResultAssembler:
             video_payload["drive_video_link"] = normalized_result["drive_video_link"]
         normalized_result["video"] = video_payload
 
-        self._write_local_metadata_artifact(metadata_path, video_payload, people)
+        if settings.local_queue_cache_enabled:
+            self._write_local_metadata_artifact(metadata_path, video_payload, people)
         return ProcessedStorageVideo(
             result=normalized_result,
             source_filename=item.source_filename,

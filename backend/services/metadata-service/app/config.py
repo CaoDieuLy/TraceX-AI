@@ -111,6 +111,8 @@ class Settings(BaseSettings):
     queue_poll_interval_seconds: int = 30
     queue_parallel_jobs: int = 3
     queue_download_workers: int = 4
+    local_queue_cache_enabled: bool = False
+    startup_local_queue_sync_enabled: bool = False
     storage_ingest_enabled: bool = True
     storage_ingest_root: str = str(PROJECT_ROOT / "storage")
     storage_ingest_source_backend: str = "filesystem"

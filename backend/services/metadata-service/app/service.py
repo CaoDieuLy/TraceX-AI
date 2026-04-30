@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import time
@@ -19,6 +20,8 @@ from sqlalchemy.orm import Session, joinedload
 from .auth import hash_password, verify_password
 from .config import A20_ROOT, PROJECT_ROOT, settings
 from .models import PersonCandidate, QueueVideoAsset, User, VideoAsset, VideoQuery
+
+logger = logging.getLogger(__name__)
 
 ROLE_HIERARCHY: dict[str, int] = {
     "USER": 1,

@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .auth import create_access_token
@@ -98,8 +99,9 @@ def on_startup() -> None:
             full_name=settings.bootstrap_admin_full_name,
         )
         session.commit()
-        sync_local_queue_state(session, only_if_empty=True)
-        session.commit()
+        if settings.startup_local_queue_sync_enabled:
+            sync_local_queue_state(session, only_if_empty=True)
+            session.commit()
     except Exception:
         session.rollback()
         LOGGER.exception("Metadata service startup initialization failed")
