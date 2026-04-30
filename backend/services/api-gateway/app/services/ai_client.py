@@ -22,8 +22,22 @@ def _auth_headers_from_request_headers(request_headers: dict[str, str] | None) -
     return {}
 
 
-async def search_internal(*, query: str, top_k: int, offset: int) -> dict[str, Any]:
-    payload = {"query": query, "top_k": top_k, "offset": offset}
+async def search_internal(
+    *,
+    query: str,
+    top_k: int,
+    offset: int,
+    camera_ids: list[str] | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"query": query, "top_k": top_k, "offset": offset}
+    if camera_ids:
+        payload["camera_ids"] = camera_ids
+    if time_from:
+        payload["time_from"] = time_from
+    if time_to:
+        payload["time_to"] = time_to
     response = await get_http_client().post(f"{_ai_base()}/internal/search", json=payload)
     response.raise_for_status()
     return response.json()

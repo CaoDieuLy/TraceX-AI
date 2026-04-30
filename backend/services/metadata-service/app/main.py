@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .auth import create_access_token

@@ -20,6 +20,12 @@ type VideoDetailApiResponse = {
   }>;
 };
 
+export type SearchFilters = {
+  camera_ids?: string[];
+  time_from?: string;
+  time_to?: string;
+};
+
 function isLikelyImageUrl(url: string): boolean {
   const value = url.toLowerCase();
   if (!value) return false;
@@ -94,11 +100,28 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return parseJsonOrThrow<T>(response);
 }
 
-export async function searchVideos(query: string, topK: number, offset = 0): Promise<VideoItem[]> {
+export async function searchVideos(query: string, topK: number, offset = 0, filters?: SearchFilters): Promise<VideoItem[]> {
   const apiBaseUrl = getApiBaseUrl();
+  const payloadBody: {
+    query: string;
+    top_k: number;
+    offset: number;
+    camera_ids?: string[];
+    time_from?: string;
+    time_to?: string;
+  } = { query, top_k: topK, offset };
+  if (filters?.camera_ids?.length) {
+    payloadBody.camera_ids = filters.camera_ids;
+  }
+  if (filters?.time_from) {
+    payloadBody.time_from = filters.time_from;
+  }
+  if (filters?.time_to) {
+    payloadBody.time_to = filters.time_to;
+  }
   const payload = await apiFetch<SearchApiResponse>("/search", {
     method: "POST",
-    body: JSON.stringify({ query, top_k: topK, offset }),
+    body: JSON.stringify(payloadBody),
   });
 
   return payload.results.map((item) => ({

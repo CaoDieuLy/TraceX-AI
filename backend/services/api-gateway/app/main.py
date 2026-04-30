@@ -41,6 +41,9 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     top_k: int = Field(default=10, ge=1, le=50)
     offset: int = Field(default=0, ge=0)
+    camera_ids: list[str] | None = None
+    time_from: str | None = None
+    time_to: str | None = None
 
 
 class SearchResultItem(BaseModel):
@@ -189,6 +192,9 @@ async def search(payload: SearchRequest, request: Request, _auth: None = Depends
             query=payload.query,
             top_k=payload.top_k,
             offset=payload.offset,
+            camera_ids=payload.camera_ids,
+            time_from=payload.time_from,
+            time_to=payload.time_to,
         )
         items = ai_payload.get("results") if isinstance(ai_payload, dict) else []
         rows = [item for item in items if isinstance(item, dict)]

@@ -12,7 +12,14 @@ import {
 
 import { GRID_BATCH_SIZE } from "@/lib/constants";
 import type { VideoItem } from "@/lib/types/video";
+import { mapLocationIdsToCameraIds } from "@/lib/cameraFilters";
 import { searchVideos } from "@/lib/api";
+
+type SearchFiltersState = {
+  locationIds: string[];
+  timeFrom: string;
+  timeTo: string;
+};
 
 type SearchContextValue = {
   query: string;
@@ -26,6 +33,12 @@ type SearchContextValue = {
   results: VideoItem[];
   gridPage: number;
   setGridPage: (page: number) => void;
+  filters: SearchFiltersState;
+  setLocationIds: (ids: string[]) => void;
+  setTimeFrom: (value: string) => void;
+  setTimeTo: (value: string) => void;
+  clearFilters: () => void;
+  filterError: string | null;
   runSearch: () => Promise<void>;
   loadMore: () => Promise<boolean>;
   resetSearch: () => void;
@@ -42,6 +55,39 @@ export function SearchProvider({ children }: { children: ReactNode }) {
   const [hasMore, setHasMore] = useState(false);
   const [results, setResults] = useState<VideoItem[]>([]);
   const [gridPage, setGridPage] = useState(0);
+  const [locationIds, setLocationIds] = useState<string[]>([]);
+  const [timeFrom, setTimeFrom] = useState("");
+  const [timeTo, setTimeTo] = useState("");
+  const [filterError, setFilterError] = useState<string | null>(null);
+
+  const filters = useMemo(
+    () => ({ locationIds, timeFrom, timeTo }),
+    [locationIds, timeFrom, timeTo],
+  );
+
+  const buildSearchFilters = useCallback(() => {
+    const cameraIds = mapLocationIdsToCameraIds(locationIds);
+    const timeFromIso = timeFrom ? new Date(timeFrom).toISOString() : undefined;
+    const timeToIso = timeTo ? new Date(timeTo).toISOString() : undefined;
+    return {
+      camera_ids: cameraIds.length ? cameraIds : undefined,
+      time_from: timeFromIso,
+      time_to: timeToIso,
+    };
+  }, [locationIds, timeFrom, timeTo]);
+
+  const validateTimeRange = useCallback((): boolean => {
+    if (!timeFrom || !timeTo) {
+      setFilterError(null);
+      return true;
+    }
+    if (new Date(timeFrom).getTime() <= new Date(timeTo).getTime()) {
+      setFilterError(null);
+      return true;
+    }
+    setFilterError("Thời gian bắt đầu không được lớn hơn thời gian kết thúc.");
+    return false;
+  }, [timeFrom, timeTo]);
 
   const runSearch = useCallback(async () => {
     const trimmed = query.trim();
@@ -51,13 +97,16 @@ export function SearchProvider({ children }: { children: ReactNode }) {
       setHasSearched(false);
       return;
     }
+    if (!validateTimeRange()) {
+      return;
+    }
 
     setError(null);
     setHasSearched(true);
     setIsLoading(true);
     try {
       const requestLimit = Math.min(GRID_BATCH_SIZE, topK);
-      const next = await searchVideos(trimmed, requestLimit, 0);
+      const next = await searchVideos(trimmed, requestLimit, 0, buildSearchFilters());
       setResults(next);
       setGridPage(0);
       setHasMore(next.length >= requestLimit && next.length < topK);
@@ -69,11 +118,11 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [query, topK]);
+  }, [query, topK, validateTimeRange, buildSearchFilters]);
 
   const loadMore = useCallback(async (): Promise<boolean> => {
     const trimmed = query.trim();
-    if (!trimmed || isLoading || !hasSearched || !hasMore) {
+    if (!trimmed || isLoading || !hasSearched || !hasMore || !validateTimeRange()) {
       return false;
     }
 
@@ -87,7 +136,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setError(null);
     try {
       const requestLimit = Math.min(GRID_BATCH_SIZE, remaining);
-      const next = await searchVideos(trimmed, requestLimit, results.length);
+      const next = await searchVideos(trimmed, requestLimit, results.length, buildSearchFilters());
       if (!next.length) {
         setHasMore(false);
         return false;
@@ -102,7 +151,14 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [query, isLoading, hasSearched, hasMore, topK, results.length]);
+  }, [query, isLoading, hasSearched, hasMore, topK, results.length, validateTimeRange, buildSearchFilters]);
+
+  const clearFilters = useCallback(() => {
+    setLocationIds([]);
+    setTimeFrom("");
+    setTimeTo("");
+    setFilterError(null);
+  }, []);
 
   const resetSearch = useCallback(() => {
     setResults([]);
@@ -111,7 +167,8 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setIsLoading(false);
     setHasMore(false);
     setGridPage(0);
-  }, []);
+    clearFilters();
+  }, [clearFilters]);
 
   useEffect(() => {
     if (!hasSearched) {
@@ -121,9 +178,12 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     if (!trimmed) {
       return;
     }
+    if (!validateTimeRange()) {
+      return;
+    }
     setIsLoading(true);
     setError(null);
-    void searchVideos(trimmed, Math.min(GRID_BATCH_SIZE, topK), 0)
+    void searchVideos(trimmed, Math.min(GRID_BATCH_SIZE, topK), 0, buildSearchFilters())
       .then((next) => {
         setResults(next);
         setGridPage(0);
@@ -155,11 +215,32 @@ export function SearchProvider({ children }: { children: ReactNode }) {
       results,
       gridPage,
       setGridPage,
+      filters,
+      setLocationIds,
+      setTimeFrom,
+      setTimeTo,
+      clearFilters,
+      filterError,
       runSearch,
       loadMore,
       resetSearch,
     }),
-    [query, topK, hasSearched, isLoading, error, hasMore, results, gridPage, runSearch, loadMore, resetSearch],
+    [
+      query,
+      topK,
+      hasSearched,
+      isLoading,
+      error,
+      hasMore,
+      results,
+      gridPage,
+      filters,
+      clearFilters,
+      filterError,
+      runSearch,
+      loadMore,
+      resetSearch,
+    ],
   );
 
   return <SearchContext.Provider value={value}>{children}</SearchContext.Provider>;

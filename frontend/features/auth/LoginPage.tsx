@@ -126,9 +126,9 @@ export function LoginPage() {
             <img src="/images/auth/img_icon_se.png" alt="logo" className="h-11 w-11 rounded-xl object-contain" />
             <div>
               <p className="text-3xl font-bold leading-tight text-[#F6FAFF] drop-shadow-[0_2px_6px_rgba(10,30,60,0.42)]">
-                VLyMVision
+                TraceX-AI
               </p>
-              <p className="text-sm text-[#E8F2FF]/90">AI-Powered CCTV Platform</p>
+              <p className="text-sm text-[#E8F2FF]/90">AI-Powered CCTV Search Engine Platform</p>
             </div>
           </div>
 
@@ -138,7 +138,7 @@ export function LoginPage() {
             <span className="text-[#5DD4FF] drop-shadow-[0_2px_10px_rgba(34,200,255,0.45)]">an toàn vượt trội.</span>
           </h1>
           <p className="mt-4 max-w-2xl text-base leading-relaxed text-[#E8F2FF] md:text-lg">
-            Nen tang CCTV tich hop AI giup ban giam sat, phat hien va phan ung tuc thi moi su kien.
+            Công cụ tìm kiếm thông minh dựa trên AI để giúp bạn nhanh chóng tìm kiếm và truy vết đối tượng trong hệ thống CCTV.
           </p>
 
           <div className="mt-8 max-w-xl space-y-3">
@@ -146,14 +146,14 @@ export function LoginPage() {
               <img src="/images/auth/img_icon_Ai.png" alt="AI" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
                 <p className="text-xl font-semibold text-[#F5FAFF]">AI Thong minh</p>
-                <p className="text-sm text-[#DFECFF]">Phat hien khuon mat, hanh vi bat thuong va canh bao theo thoi gian thuc.</p>
+                <p className="text-sm text-[#DFECFF]">Tìm kiếm và truy vết đối tượng từ mô tả hoặc ảnh minh họa trên toàn bộ lịch sử lưu trữ của hệ thống camera.</p>
               </div>
             </div>
             <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
               <img src="/images/auth/img_icon_cam.png" alt="Camera" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
                 <p className="text-xl font-semibold text-[#F5FAFF]">Giam sat toan dien</p>
-                <p className="text-sm text-[#DFECFF]">Xem live, xem lai, quan ly nhieu camera moi luc moi noi.</p>
+                <p className="text-sm text-[#DFECFF]">fjdkdfkf</p>
               </div>
             </div>
             <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
