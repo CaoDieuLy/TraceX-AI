@@ -183,17 +183,24 @@ class VideoFrameSampler:
         return tuple(sampled_frames)
 
 
-@dataclass
 class RFDETRPersonDetector:
-    """RF-DETR 2x-large person detector — strict production detector (roboflow rfdetr[plus])."""
+    """RF-DETR 2x-large person detector — strict production detector, class-level singleton."""
 
     confidence_threshold: float = 0.32
     max_detections_per_frame: int = 300
 
-    def __post_init__(self) -> None:
-        self._model = None
-        self._ready = False
-        self._load_lock = threading.Lock()
+    _instance: "RFDETRPersonDetector | None" = None
+    _class_lock = threading.Lock()
+
+    def __new__(cls) -> "RFDETRPersonDetector":
+        with cls._class_lock:
+            if cls._instance is None:
+                inst = super().__new__(cls)
+                inst._model = None
+                inst._ready = False
+                inst._load_lock = threading.Lock()
+                cls._instance = inst
+        return cls._instance
 
     def _ensure_loaded(self) -> None:
         if self._ready:
