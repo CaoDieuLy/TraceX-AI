@@ -96,71 +96,107 @@ class VideoIngestionRuntime:
         return pipeline, detected_hardware, execution_plan
 
     @staticmethod
-    def _download_public_url(url: str, target_path: Path) -> None:
-        """Download from a public HTTP URL with Google Drive large-file redirect handling."""
-        if not str(url or "").strip():
-            raise ValueError("source_url is required for ingestion download")
-
+    def _resolve_drive_response(session: "requests.Session", url: str) -> "requests.Response":
+        """Follow Google Drive redirects/confirmation forms and return a streaming video response."""
         import requests as _req
-        session = _req.Session()
-        resp = session.get(url, stream=True, timeout=300)
-        LOGGER.info(
-            "Ingestion download started url_host=%s status=%s content_type=%s filename=%s",
-            urlparse(str(resp.url)).netloc,
-            resp.status_code,
-            resp.headers.get("content-type"),
-            target_path.name,
-        )
-        # Google Drive shows a virus-scan warning for files > 25 MB
+        resp = session.get(url, stream=True, timeout=60)
+        # Large file virus-scan cookie
         for key, value in resp.cookies.items():
             if key.startswith("download_warning"):
                 separator = "&" if "?" in url else "?"
-                resp = session.get(f"{url}{separator}confirm={value}", stream=True, timeout=300)
-                LOGGER.info(
-                    "Followed Google Drive download_warning cookie for %s; status=%s content_type=%s",
-                    target_path.name,
-                    resp.status_code,
-                    resp.headers.get("content-type"),
-                )
+                resp = session.get(f"{url}{separator}confirm={value}", stream=True, timeout=60)
                 break
+        # HTML confirmation form fallback
         if "text/html" in str(resp.headers.get("content-type") or "").lower():
             parser = _GoogleDriveDownloadFormParser()
             parser.feed(resp.text)
             if parser.action and parser.inputs:
                 download_url = f"{urljoin(resp.url, parser.action)}?{urlencode(parser.inputs)}"
                 resp.close()
-                resp = session.get(download_url, stream=True, timeout=300)
-                LOGGER.info(
-                    "Followed Google Drive download form for %s; status=%s content_type=%s",
-                    target_path.name,
-                    resp.status_code,
-                    resp.headers.get("content-type"),
-                )
+                resp = session.get(download_url, stream=True, timeout=60)
             else:
-                preview = str(resp.text or "")[:500].replace("\n", " ")
-                raise RuntimeError(
-                    "Google Drive returned an HTML download page without a usable download form. "
-                    f"Preview: {preview}"
-                )
+                preview = str(resp.text or "")[:300].replace("\n", " ")
+                raise RuntimeError(f"Drive returned HTML without download form. Preview: {preview}")
         resp.raise_for_status()
-        content_type = str(resp.headers.get("content-type") or "").lower()
-        if "text/html" in content_type:
-            preview = str(resp.text or "")[:500].replace("\n", " ")
-            raise RuntimeError(
-                "Google Drive returned HTML instead of video content after confirmation. "
-                f"Content-Type: {content_type}. Preview: {preview}"
-            )
+        if "text/html" in str(resp.headers.get("content-type") or "").lower():
+            preview = str(resp.text or "")[:300].replace("\n", " ")
+            raise RuntimeError(f"Drive returned HTML instead of video. Preview: {preview}")
+        return resp
 
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        bytes_written = 0
-        with target_path.open("wb") as fh:
-            for chunk in resp.iter_content(chunk_size=1 << 17):  # 128 KB
-                if chunk:
-                    fh.write(chunk)
-                    bytes_written += len(chunk)
-        if bytes_written <= 0:
-            raise RuntimeError(f"Downloaded empty source video: {target_path.name}")
-        LOGGER.info("Ingestion download completed filename=%s bytes=%s", target_path.name, bytes_written)
+    def _stream_url_to_pipe(self, url: str, source_filename: str) -> str:
+        """Linux only: stream URL into a named FIFO pipe so cv2 reads concurrently (no full-file download).
+        Returns the pipe path as a string for cv2.VideoCapture()."""
+        import os, threading
+        import requests as _req
+
+        stem = Path(source_filename).stem
+        pipe_path = self.default_source_dir / f"{stem}.fifo"
+        pipe_path.parent.mkdir(parents=True, exist_ok=True)
+        pipe_str = str(pipe_path)
+        if pipe_path.exists():
+            pipe_path.unlink()
+        os.mkfifo(pipe_str)
+
+        def _writer() -> None:
+            try:
+                session = _req.Session()
+                resp = self._resolve_drive_response(session, url)
+                bytes_sent = 0
+                with open(pipe_str, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB
+                        if chunk:
+                            fh.write(chunk)
+                            bytes_sent += len(chunk)
+                LOGGER.info("Pipe stream complete filename=%s bytes=%s", source_filename, bytes_sent)
+            except Exception as exc:
+                LOGGER.error("Pipe writer failed for %s: %s", source_filename, exc)
+                try:
+                    pipe_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_writer, daemon=True, name=f"pipe-{stem}").start()
+        return pipe_str
+
+    @staticmethod
+    def _download_with_retry(url: str, target_path: Path, *, max_attempts: int = 3) -> None:
+        """Download from a public HTTP URL with retry + exponential backoff."""
+        import requests as _req
+        import time as _time
+
+        if not str(url or "").strip():
+            raise ValueError("source_url is required for ingestion download")
+
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                session = _req.Session()
+                resp = VideoIngestionRuntime._resolve_drive_response(session, url)
+                LOGGER.info(
+                    "Download started attempt=%s/%s url_host=%s filename=%s",
+                    attempt, max_attempts,
+                    urlparse(str(resp.url)).netloc,
+                    target_path.name,
+                )
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                bytes_written = 0
+                with target_path.open("wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 17):  # 128 KB
+                        if chunk:
+                            fh.write(chunk)
+                            bytes_written += len(chunk)
+                if bytes_written <= 0:
+                    raise RuntimeError(f"Downloaded empty file: {target_path.name}")
+                LOGGER.info("Download complete filename=%s bytes=%s", target_path.name, bytes_written)
+                return
+            except Exception as exc:
+                last_exc = exc
+                LOGGER.warning("Download attempt %s/%s failed for %s: %s", attempt, max_attempts, target_path.name, exc)
+                if attempt < max_attempts:
+                    _time.sleep(2 ** attempt)  # 2s, 4s, 8s
+                    if target_path.exists():
+                        target_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Download failed after {max_attempts} attempts for {target_path.name}") from last_exc
 
     def _resolve_source(
         self,
@@ -169,15 +205,33 @@ class VideoIngestionRuntime:
         source_filename: str | None,
     ) -> Path | str:
         source_url = str(source_url or "").strip()
-        if source_url.startswith(("http://", "https://")) and "drive.google.com" not in source_url:
-            return source_url
+        # Local file path
         local_source = Path(source_url).expanduser()
         if local_source.exists():
             return local_source
+        # Non-Drive HTTP URL: return as-is for cv2 direct streaming
+        if source_url.startswith(("http://", "https://")) and "drive.google.com" not in source_url:
+            return source_url
+        # Google Drive URL: use FIFO pipe on Linux (zero disk write) or download on Windows
         filename = Path(source_filename or "video.mp4").name
+        import platform
+        if platform.system() == "Linux":
+            LOGGER.info("Streaming %s via FIFO pipe (no download)", filename)
+            return self._stream_url_to_pipe(source_url, filename)
+        # Windows fallback: download to temp file
         target_path = self.default_source_dir / filename
-        self._download_public_url(source_url, target_path)
+        self._download_with_retry(source_url, target_path)
         return target_path
+
+    def _cleanup_source(self, resolved_source: Path | str) -> None:
+        """Delete temp download / FIFO pipe after processing to free disk."""
+        try:
+            p = Path(str(resolved_source))
+            if p.exists() and p.parent == self.default_source_dir:
+                p.unlink(missing_ok=True)
+                LOGGER.info("Cleaned up temp source: %s", p.name)
+        except Exception as exc:
+            LOGGER.warning("Cleanup failed for %s: %s", resolved_source, exc)
 
     @staticmethod
     def _normalize_output_name(source_path: Path, output_basename: str | None) -> str:
@@ -268,14 +322,19 @@ class VideoIngestionRuntime:
             or settings.ingestion_default_sample_fps
         )
         pipeline_runner = LocalVideoIngestionPipeline(sample_fps=sample_fps)
-        output = pipeline_runner.run(
-            source_path=resolved_source_path,
-            compressed_path=compressed_path,
-            metadata_path=metadata_path,
-            camera_id=camera_id,
-            recorded_start=recorded_start,
-            metadata=metadata,
-        )
+        try:
+            output = pipeline_runner.run(
+                source_path=resolved_source_path,
+                compressed_path=compressed_path,
+                metadata_path=metadata_path,
+                camera_id=camera_id,
+                recorded_start=recorded_start,
+                metadata=metadata,
+            )
+        finally:
+            # Always clean up FIFO pipe or temp download to prevent disk full
+            self._cleanup_source(resolved_source_path)
+
         response = output.to_response()
         response["detected_hardware"] = detected_hardware
         response["acceleration_state"] = configure_torch_runtime(
