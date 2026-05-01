@@ -812,7 +812,7 @@ class LocalVideoIngestionPipeline:
         LOGGER.info("Local ingestion streaming started source=%s sample_fps=%s batch=%s", source_path, self.sample_fps, batch_size)
 
         for batch_idx, sampled_batch in enumerate(
-            self.sampler.stream_batches(source_path, batch_size=batch_size),
+            self.sampler.stream_batched(source_path, batch_size=batch_size),
             start=1,
         ):
             sampled_frame_count += len(sampled_batch)
