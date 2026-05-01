@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(sshpass -p xVrqU6Dg@VhAcj4 ssh -o StrictHostKeyChecking=no root@103.72.56.139 ' *)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(git checkout *)",
+      "Bash(git pull *)",
+      "Bash(sshpass -p 'xVrqU6Dg@VhAcj4' ssh -o StrictHostKeyChecking=no root@103.72.56.139 \"docker logs mcpt-backend --tail 30 2>&1\")",
+      "Bash(command -v sshpass)",
+      "Bash(sshpass -V)",
+      "Bash(sshpass -p 'xVrqU6Dg@VhAcj4' ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no root@103.72.56.139 \"docker logs mcpt-backend --tail 30 2>&1\")"
     ]
   },
   "hooks": {

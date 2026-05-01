@@ -143,7 +143,15 @@ class VideoFrameSampler:
 
     sample_fps: int = 5
 
-    def sample(self, video_path: Path) -> tuple[SampledFrame, ...]:
+    def stream_batched(self, video_path: Path, batch_size: int = 150):
+        """
+        Generator: yields successive batches of SampledFrame.
+
+        Each batch holds at most `batch_size` full-resolution frames.
+        Callers must process and discard each batch before requesting the next
+        so that peak RAM stays at  batch_size × frame_bytes  instead of
+        total_frames × frame_bytes  (typically 900 MB vs 18 GB for a 10-min video).
+        """
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
             raise FileNotFoundError(f"Could not open source video: {video_path}")
@@ -152,35 +160,51 @@ class VideoFrameSampler:
         if source_fps <= 0.0:
             source_fps = float(self.sample_fps)
 
-        sampled_frames: list[SampledFrame] = []
         next_emit_second = 0.0
         source_frame_index = 0
+        sampled_index = 0
+        batch: list[SampledFrame] = []
 
-        while True:
-            ok, frame = capture.read()
-            if not ok or frame is None:
-                break
+        try:
+            while True:
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    break
 
-            timestamp_second = source_frame_index / source_fps
-            if timestamp_second + 1e-9 < next_emit_second:
-                source_frame_index += 1
-                continue
+                timestamp_second = source_frame_index / source_fps
+                if timestamp_second + 1e-9 < next_emit_second:
+                    source_frame_index += 1
+                    continue
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            laplacian_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-            sampled_frames.append(
-                SampledFrame(
-                    frame_index=len(sampled_frames),
-                    timestamp_second=round(timestamp_second, 6),
-                    image=frame,
-                    laplacian_score=round(laplacian_score, 6),
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                laplacian_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                batch.append(
+                    SampledFrame(
+                        frame_index=sampled_index,
+                        timestamp_second=round(timestamp_second, 6),
+                        image=frame,
+                        laplacian_score=round(laplacian_score, 6),
+                    )
                 )
-            )
-            next_emit_second += 1.0 / max(self.sample_fps, 1)
-            source_frame_index += 1
+                sampled_index += 1
+                next_emit_second += 1.0 / max(self.sample_fps, 1)
+                source_frame_index += 1
 
-        capture.release()
-        return tuple(sampled_frames)
+                if len(batch) >= batch_size:
+                    yield tuple(batch)
+                    batch.clear()
+        finally:
+            capture.release()
+
+        if batch:
+            yield tuple(batch)
+
+    def sample(self, video_path: Path) -> tuple[SampledFrame, ...]:
+        """Load all frames at once — only safe for short clips or tests."""
+        all_frames: list[SampledFrame] = []
+        for batch in self.stream_batched(video_path):
+            all_frames.extend(batch)
+        return tuple(all_frames)
 
 
 class RFDETRPersonDetector:
@@ -677,14 +701,26 @@ class LocalVideoIngestionPipeline:
         recorded_start: datetime | None,
         metadata: dict[str, object],
     ) -> LocalIngestionOutput:
-        LOGGER.info("Local ingestion sampling started source=%s sample_fps=%s", source_path, self.sample_fps)
-        sampled_frames = self.sampler.sample(source_path)
-        LOGGER.info("Local ingestion sampling completed frames=%s source=%s", len(sampled_frames), source_path)
+        batch_size = max(1, int(os.environ.get("MCPT_FRAME_BATCH_SIZE", "150")))
+        LOGGER.info(
+            "Local ingestion started source=%s sample_fps=%s batch_size=%s",
+            source_path, self.sample_fps, batch_size,
+        )
 
-        LOGGER.info("Local ingestion detection started frames=%s", len(sampled_frames))
-        detections_by_frame = self.detector.detect(sampled_frames)
+        # Batched streaming: each batch of frames is decoded, detected, then freed.
+        # Peak RAM = batch_size × frame_bytes (~900 MB) instead of all_frames × frame_bytes (~18 GB).
+        detections_by_frame: dict[int, tuple[FrameDetection, ...]] = {}
+        total_sampled = 0
+        for batch in self.sampler.stream_batched(source_path, batch_size=batch_size):
+            batch_dets = self.detector.detect(batch)
+            detections_by_frame.update(batch_dets)
+            total_sampled += len(batch)
+            # batch goes out of scope here — full-resolution frames are GC'd immediately
         detection_count = sum(len(items) for items in detections_by_frame.values())
-        LOGGER.info("Local ingestion detection completed detections=%s", detection_count)
+        LOGGER.info(
+            "Local ingestion detect+stream completed frames=%s detections=%s",
+            total_sampled, detection_count,
+        )
 
         video_id = compressed_path.name
         LOGGER.info("Local ingestion tracking started video_id=%s", video_id)

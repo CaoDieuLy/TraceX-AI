@@ -133,6 +133,10 @@ def _wait_for_tracking_upstream_ready(*, context: str) -> None:
                 return
             last_error = f"status={response.status_code} body={response.text[:200]}"
             logger.info("Tracking upstream not ready yet for %s: %s", context, last_error)
+        except httpx.ReadTimeout:
+            # Service is reachable (TCP ok) but event loop blocked by inference — treat as alive
+            logger.info("Tracking upstream health read-timeout for %s — inference in progress, proceeding", context)
+            return
         except httpx.HTTPError as exc:
             last_error = str(exc)
             logger.info("Tracking upstream health probe failed for %s: %s", context, exc)
