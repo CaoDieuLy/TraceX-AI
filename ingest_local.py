@@ -57,8 +57,9 @@ DATABASE_URL = os.environ.get(
     f"postgresql+psycopg2://{quote_plus(PG_USER)}:{quote_plus(PG_PASS)}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 )
 
+LOG_LEVEL = str(os.environ.get("INGEST_LOCAL_LOG_LEVEL", "INFO")).upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
