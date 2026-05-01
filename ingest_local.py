@@ -251,6 +251,11 @@ def poll_job(job_id: str) -> dict:
             )
             r.raise_for_status()
             data = r.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise RuntimeError(f"Job {job_id} not found (server restarted?) — resubmit needed") from exc
+            log.warning("[poll] %s failed: %s — retrying", job_id, exc)
+            continue
         except httpx.HTTPError as exc:
             log.warning("[poll] %s failed: %s — retrying", job_id, exc)
             continue
