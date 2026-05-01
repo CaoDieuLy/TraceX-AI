@@ -749,7 +749,7 @@ class LocalVideoIngestionPipeline:
             "metadata_path": str(metadata_path),
             "recorded_start": recorded_start.isoformat() if recorded_start else None,
             "sample_fps": self.sample_fps,
-            "sampled_frame_count": len(sampled_frames),
+            "sampled_frame_count": total_sampled,
             "tracklet_count": len(tracklets),
             "accepted_tracklet_count": len(people),
             "rejected_tracklet_count": max(len(tracklets) - len(people), 0),
