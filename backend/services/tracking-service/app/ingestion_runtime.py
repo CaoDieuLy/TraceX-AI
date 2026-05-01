@@ -167,7 +167,13 @@ class VideoIngestionRuntime:
         *,
         source_url: str,
         source_filename: str | None,
-    ) -> Path:
+    ) -> Path | str:
+        source_url = str(source_url or "").strip()
+        if source_url.startswith(("http://", "https://")) and "drive.google.com" not in source_url:
+            return source_url
+        local_source = Path(source_url).expanduser()
+        if local_source.exists():
+            return local_source
         filename = Path(source_filename or "video.mp4").name
         target_path = self.default_source_dir / filename
         self._download_public_url(source_url, target_path)
@@ -241,12 +247,18 @@ class VideoIngestionRuntime:
         )
         output_video_root = Path(output_video_dir) if output_video_dir else self.default_video_dir
         output_metadata_root = Path(output_metadata_dir) if output_metadata_dir else self.default_metadata_dir
-        compressed_path = self._prepare_compressed_video(
-            source_path=resolved_source_path,
-            target_video_dir=output_video_root,
-            output_basename=output_basename,
-        )
-        metadata_basename = compressed_path.stem if compressed_path.stem else resolved_source_path.stem
+        if isinstance(resolved_source_path, Path):
+            compressed_path = self._prepare_compressed_video(
+                source_path=resolved_source_path,
+                target_video_dir=output_video_root,
+                output_basename=output_basename,
+            )
+            metadata_basename = compressed_path.stem if compressed_path.stem else resolved_source_path.stem
+        else:
+            output_video_root.mkdir(parents=True, exist_ok=True)
+            normalized_name = self._normalize_output_name(Path(source_filename or "stream.mp4"), output_basename)
+            compressed_path = output_video_root / normalized_name
+            metadata_basename = compressed_path.stem or "stream"
         metadata_path = output_metadata_root / f"{metadata_basename}.json"
 
         sample_fps = int(
