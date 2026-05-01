@@ -117,7 +117,14 @@ def _run_warmup_models() -> None:
 _job_store: dict[str, dict] = {}
 _job_store_lock = threading.Lock()
 _ingestion_queue: _queue_module.Queue = _queue_module.Queue(maxsize=32)
+_active_ingestion_jobs: dict[str, str] = {}
 _worker_thread: threading.Thread | None = None
+
+
+def _ingestion_source_key(*, camera_id: str | None, source_filename: str | None) -> str:
+    camera = str(camera_id or "").strip().lower()
+    filename = str(source_filename or "").strip().lower()
+    return f"{camera}::{filename}"
 
 
 def _ingestion_worker() -> None:
@@ -150,6 +157,10 @@ def _ingestion_worker() -> None:
                     "finished_at": _utcnow_iso(),
                 })
         finally:
+            with _job_store_lock:
+                source_key = str(_job_store.get(job_id, {}).get("source_key") or "")
+                if source_key and _active_ingestion_jobs.get(source_key) == job_id:
+                    _active_ingestion_jobs.pop(source_key, None)
             _ingestion_queue.task_done()
 
 
@@ -244,6 +255,31 @@ def tracking_run(payload: TrackingRequest) -> dict:
 @app.post("/api/v1/ingestion/process")
 def ingestion_process(payload: VideoIngestionRequest) -> dict:
     """Enqueue a video ingestion job. Returns immediately with job_id."""
+    source_key = _ingestion_source_key(
+        camera_id=payload.camera_id,
+        source_filename=payload.source_filename,
+    )
+
+    with _job_store_lock:
+        existing_job_id = _active_ingestion_jobs.get(source_key)
+        if existing_job_id:
+            existing_job = _job_store.get(existing_job_id)
+            if existing_job and existing_job.get("status") in {"queued", "processing"}:
+                logger.info(
+                    "[ingestion] Reusing active job job_id=%s source_filename=%s camera_id=%s status=%s",
+                    existing_job_id,
+                    payload.source_filename,
+                    payload.camera_id,
+                    existing_job.get("status"),
+                )
+                return {
+                    "job_id": existing_job_id,
+                    "status": existing_job.get("status"),
+                    "source_filename": payload.source_filename,
+                    "deduplicated": True,
+                }
+            _active_ingestion_jobs.pop(source_key, None)
+
     job_id = str(uuid.uuid4())
     with _job_store_lock:
         _job_store[job_id] = {
@@ -251,11 +287,14 @@ def ingestion_process(payload: VideoIngestionRequest) -> dict:
             "queued_at": _utcnow_iso(),
             "source_filename": payload.source_filename,
             "camera_id": payload.camera_id,
+            "source_key": source_key,
         }
+        _active_ingestion_jobs[source_key] = job_id
     try:
         _ingestion_queue.put_nowait((job_id, payload.model_dump()))
     except _queue_module.Full:
         with _job_store_lock:
+            _active_ingestion_jobs.pop(source_key, None)
             del _job_store[job_id]
         raise HTTPException(status_code=503, detail="Ingestion queue full, try again later")
     logger.info("[ingestion] Job queued job_id=%s source_filename=%s", job_id, payload.source_filename)
