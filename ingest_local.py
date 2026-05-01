@@ -57,7 +57,7 @@ DATABASE_URL = os.environ.get(
 )
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -182,8 +182,13 @@ def _headers() -> dict:
 def check_ready() -> bool:
     try:
         r = httpx.get(f"{LIGHTNING_URL}/health", headers=_headers(), timeout=10)
-        return r.status_code == 200 and r.json().get("ready", False)
-    except Exception:
+        data = r.json()
+        ready = r.status_code == 200 and bool(data.get("ready", False))
+        if not ready:
+            log.debug("[lightning] health status=%s ready=%s warmup=%s", r.status_code, data.get("ready"), data.get("warmup", {}).get("status"))
+        return ready
+    except Exception as exc:
+        log.warning("[lightning] health check error: %s: %s", type(exc).__name__, exc)
         return False
 
 
