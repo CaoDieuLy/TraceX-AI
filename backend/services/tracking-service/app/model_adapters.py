@@ -353,6 +353,33 @@ class VideoMAEHub:
         cls = cls / cls.norm(dim=-1, keepdim=True)
         return cls.squeeze(0).float().cpu().numpy()
 
+    def extract_features_batch(self, clips_frames: list[list["Image.Image"]]) -> "np.ndarray":
+        """Batch version: process N clips in one forward pass. Returns [N, 1024]."""
+        self._ensure_loaded()
+        import numpy as _np
+        if not clips_frames:
+            return _np.zeros((0, 1024), dtype=_np.float32)
+        batch_tensors = []
+        for pil_frames in clips_frames:
+            n = len(pil_frames)
+            if n == 0:
+                batch_tensors.append(self._torch.zeros(16, 3, 224, 224))
+                continue
+            indices = [int(i * (n - 1) / 15) for i in range(16)] if n >= 2 else [0] * 16
+            frames_16 = [pil_frames[idx].convert("RGB") for idx in indices]
+            tensors = [self._transform(f) for f in frames_16]
+            batch_tensors.append(self._torch.stack(tensors))  # [16, 3, 224, 224]
+        clip_batch = self._torch.stack(batch_tensors).to(self._device)  # [N, 16, 3, 224, 224]
+        with _gpu_inference_scope(
+            self._torch, self._device,
+            precision_env="MCPT_VLM_PRECISION",
+            default_precision="fp32",
+        ):
+            out = self._model(pixel_values=clip_batch)
+        cls = out.last_hidden_state[:, 0]  # [N, 1024]
+        cls = cls / cls.norm(dim=-1, keepdim=True)
+        return cls.float().cpu().numpy()
+
 
 # ---------------------------------------------------------------------------
 # SigLIP2 Hub — single model for all image/text encoding (1024-dim)

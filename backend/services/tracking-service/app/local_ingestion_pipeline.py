@@ -155,7 +155,7 @@ def _quality_or_zero(person: dict[str, object], field_name: str) -> float:
 class VideoFrameSampler:
     """Decode video and sample frames at the fixed ingest FPS."""
 
-    sample_fps: int = 5
+    sample_fps: int = 4
 
     def stream_batched(self, video_path: Path, batch_size: int = 150):
         """
@@ -640,30 +640,366 @@ class LocalMetadataAssembler:
         ]
         if not accepted_tracklets:
             return []
+        return self._build_people_batch(
+            video_id=video_id,
+            camera_id=camera_id,
+            accepted_tracklets=accepted_tracklets,
+            sampled_fps=sampled_fps,
+        )
 
-        worker_count = max(1, min(self.tracklet_worker_count, len(accepted_tracklets)))
-        if worker_count == 1:
-            return [
-                self._build_person_metadata(
-                    video_id=video_id,
-                    camera_id=camera_id,
-                    tracklet=tracklet,
-                    quality=quality,
-                    sampled_fps=sampled_fps,
-                )
-                for tracklet, quality in accepted_tracklets
-            ]
+    def _build_people_batch(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        accepted_tracklets: list[tuple["LocalTracklet", "TrackletQualityResult"]],
+        sampled_fps: int,
+    ) -> list[dict[str, object]]:
+        """
+        GPU-efficient batch feature extraction.
 
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            build_person = partial(
-                self._build_person_metadata_from_item,
+        Runs each model once for ALL tracklets combined instead of N separate calls:
+          SigLIP2 image  — 1 forward pass (all selected crops concatenated)
+          TransReID      — 1 forward pass (all part-crops concatenated)
+          VideoMAE       — 1 forward pass (all action clips stacked)
+        Text features are cached inside SigLIP2ModelHub after the first call.
+        """
+        import cv2 as _cv2
+        from PIL import Image as _PILImage
+        from .model_adapters import (
+            SigLIP2ModelHub, TransReIDHub, VideoMAEHub,
+            _crop_pil, _selected_observations, _part_crops, _quality_weighted_pool,
+            _GENDER_PROMPTS, _AGE_PROMPTS,
+            _SHIRT_PROMPTS, _PANTS_PROMPTS, _HAIR_PROMPTS, _SKIN_PROMPTS,
+            _HAT_PROMPTS, _BAG_PROMPTS, _HEAD_ACCESSORY_PROMPTS, _SHOES_PROMPTS,
+        )
+        from .tracklet_feature_pipeline import (
+            ActionClipBuilder, TrackletFeatureAggregator, EMBEDDING_VOCABULARY,
+            StaticAttributeResult, AppearanceAttributeResult,
+            AppearanceEmbeddingResult, AttributeEmbeddingResult,
+            BehaviorAnalysisResult, SemanticEmbeddingResult,
+        )
+
+        siglip = SigLIP2ModelHub()
+        reid   = TransReIDHub()
+        vmae   = VideoMAEHub()
+
+        _PROMPT_MAP = {
+            "shirt": _SHIRT_PROMPTS, "pants": _PANTS_PROMPTS,
+            "hair_color": _HAIR_PROMPTS, "skin_tone": _SKIN_PROMPTS,
+            "hat": _HAT_PROMPTS, "bag": _BAG_PROMPTS,
+            "head_accessory": _HEAD_ACCESSORY_PROMPTS, "shoes": _SHOES_PROMPTS,
+        }
+
+        # ── Build TrackletFeatureInput payloads ──────────────────────────────
+        payloads: list[TrackletFeatureInput] = []
+        for tracklet, _ in accepted_tracklets:
+            payloads.append(TrackletFeatureInput(
                 video_id=video_id,
-                camera_id=camera_id,
+                object_id=tracklet.track_id,
                 sampled_fps=sampled_fps,
-            )
-            return list(
-                executor.map(build_person, accepted_tracklets)
-            )
+                frames=tuple(
+                    TrackletFrameObservation(
+                        frame_index=item.frame_index,
+                        timestamp_second=item.timestamp_second,
+                        bbox=item.bbox,
+                        detection_confidence=item.confidence,
+                        laplacian_score=item.laplacian_score,
+                        crop_bgr=item.crop_bgr,
+                    )
+                    for item in tracklet.observations
+                ),
+            ))
+
+        # ── Frame selection (CPU) ────────────────────────────────────────────
+        selections = [self.feature_pipeline.selector.select(p) for p in payloads]
+
+        # ── Batch SigLIP2 image features: 1 GPU call for all tracklets ───────
+        per_t_valid: list[list] = []
+        all_siglip_pils: list = []
+        siglip_slices: list[tuple[int, int]] = []
+
+        for payload, selection in zip(payloads, selections):
+            obs = _selected_observations(payload, selection)
+            valid = [(f, _crop_pil(f, None)) for f in obs]
+            valid = [(f, p) for f, p in valid if p is not None]
+            per_t_valid.append(valid)
+            s = len(all_siglip_pils)
+            all_siglip_pils.extend(p for _, p in valid)
+            siglip_slices.append((s, len(all_siglip_pils)))
+
+        all_img_feats = (
+            siglip.image_features(all_siglip_pils)
+            if all_siglip_pils
+            else np.zeros((0, 1024), dtype=np.float32)
+        )
+
+        # Pre-warm text cache (one shot — subsequent calls are dict lookups)
+        for _, prompts in _GENDER_PROMPTS + _AGE_PROMPTS:
+            siglip.text_features(prompts)
+        for prompt_list in _PROMPT_MAP.values():
+            for _, prompts in prompt_list:
+                siglip.text_features(prompts)
+
+        # ── Classify attributes per tracklet (pure CPU matmul) ───────────────
+        all_static:     list[StaticAttributeResult]     = []
+        all_appearance: list[AppearanceAttributeResult] = []
+
+        for idx, selection in enumerate(selections):
+            s, e    = siglip_slices[idx]
+            img_feats = all_img_feats[s:e]
+            valid   = per_t_valid[idx]
+            qmap    = {item.frame_index: item.quality_score for item in selection.selected_frames}
+
+            if len(img_feats) == 0:
+                all_static.append(StaticAttributeResult(gender=None, age_group=None, confidence=0.0))
+                all_appearance.append(AppearanceAttributeResult())
+                continue
+
+            gender_votes: dict = {}
+            age_votes:    dict = {}
+            for i, (frame, _) in enumerate(valid):
+                w    = qmap.get(frame.frame_index, 0.1)
+                feat = img_feats[i]
+                best_g, bg_s = None, -float("inf")
+                for label, prompts in _GENDER_PROMPTS:
+                    sc = float(np.mean(siglip.text_features(prompts) @ feat))
+                    if sc > bg_s:
+                        bg_s, best_g = sc, label
+                gender_votes[best_g] = gender_votes.get(best_g, 0.0) + w
+                best_a, ba_s = None, -float("inf")
+                for label, prompts in _AGE_PROMPTS:
+                    sc = float(np.mean(siglip.text_features(prompts) @ feat))
+                    if sc > ba_s:
+                        ba_s, best_a = sc, label
+                age_votes[best_a] = age_votes.get(best_a, 0.0) + w
+
+            gender    = max(gender_votes, key=gender_votes.get) if gender_votes else None
+            age_group = max(age_votes,    key=age_votes.get)    if age_votes    else None
+            all_static.append(StaticAttributeResult(
+                gender=gender, age_group=age_group,
+                confidence=0.45 if (gender or age_group) else 0.0,
+            ))
+
+            fields: dict[str, dict] = {k: {} for k in _PROMPT_MAP}
+            for i, (frame, _) in enumerate(valid):
+                w    = max(qmap.get(frame.frame_index, 0.1), 1e-4)
+                feat = img_feats[i]
+                for field_name, label_prompts in _PROMPT_MAP.items():
+                    best_label, bs = None, -float("inf")
+                    for label, prompts in label_prompts:
+                        sc = float(np.mean(siglip.text_features(prompts) @ feat))
+                        if sc > bs:
+                            bs, best_label = sc, label
+                    fields[field_name][best_label] = fields[field_name].get(best_label, 0.0) + w
+
+            def _best(votes: dict):
+                return max(votes, key=votes.get) if votes else None
+
+            all_appearance.append(AppearanceAttributeResult(
+                head_accessory=_best(fields["head_accessory"]),
+                hat=_best(fields["hat"]),
+                hair_color=_best(fields["hair_color"]),
+                skin_tone=_best(fields["skin_tone"]),
+                shirt=_best(fields["shirt"]),
+                pants=_best(fields["pants"]),
+                shoes=_best(fields["shoes"]),
+                bag=_best(fields["bag"]),
+            ))
+
+        # ── Batch TransReID: 1 GPU call for all crops ────────────────────────
+        per_t_pil_crops: list[list] = []
+        per_t_weights:   list[list[float]] = []
+        all_fulls: list = []
+        all_uppers: list = []
+        all_lowers: list = []
+        reid_slices: list[tuple[int, int]] = []
+
+        for payload, selection in zip(payloads, selections):
+            obs  = _selected_observations(payload, selection)
+            qmap = {item.frame_index: item.quality_score for item in selection.selected_frames}
+            pil_crops: list = []
+            weights:   list[float] = []
+            for frame in obs:
+                pil = _crop_pil(frame, None)
+                if pil is None:
+                    continue
+                pil_crops.append(pil)
+                weights.append(qmap.get(frame.frame_index, 0.1))
+            per_t_pil_crops.append(pil_crops)
+            per_t_weights.append(weights)
+            s = len(all_fulls)
+            for pil in pil_crops:
+                parts = _part_crops(pil)
+                all_fulls.append(parts[0])
+                all_uppers.append(parts[1])
+                all_lowers.append(parts[2])
+            reid_slices.append((s, len(all_fulls)))
+
+        _GW, _PW = 0.55, 0.45
+        if all_fulls:
+            all_reid = reid.embed_crops(all_fulls + all_uppers + all_lowers)  # [3M, 768]
+            M        = len(all_fulls)
+            gf_all   = all_reid[:M]
+            uf_all   = all_reid[M:2 * M]
+            lf_all   = all_reid[2 * M:]
+        else:
+            gf_all = uf_all = lf_all = np.zeros((0, 768), dtype=np.float32)
+
+        all_app_embed: list[AppearanceEmbeddingResult] = []
+        for idx, (pil_crops, weights) in enumerate(zip(per_t_pil_crops, per_t_weights)):
+            s, e = reid_slices[idx]
+            if not pil_crops:
+                empty = tuple(0.0 for _ in range(512))
+                all_app_embed.append(AppearanceEmbeddingResult(
+                    embedding_model="transreid-vit-base-msmt17-kpr",
+                    embedding_vector=empty, tracklet_vectors=(empty,),
+                ))
+                continue
+            gf, uf, lf = gf_all[s:e], uf_all[s:e], lf_all[s:e]
+            per_frame_vecs = []
+            for i in range(len(pil_crops)):
+                pm   = (uf[i] + lf[i]) / 2.0
+                pm  /= float(np.linalg.norm(pm)) or 1.0
+                fv   = _GW * gf[i] + _PW * pm
+                fv  /= float(np.linalg.norm(fv)) or 1.0
+                per_frame_vecs.append(fv.astype(np.float32))
+            fused   = _quality_weighted_pool(per_frame_vecs, weights)
+            fused_t = tuple(round(float(v), 6) for v in fused.tolist())
+            pf_t    = [tuple(round(float(v), 6) for v in gf[i].tolist()) for i in range(len(pil_crops))]
+            all_app_embed.append(AppearanceEmbeddingResult(
+                embedding_model="transreid-vit-base-msmt17-kpr",
+                embedding_vector=fused_t, tracklet_vectors=tuple(pf_t),
+            ))
+
+        # ── Batch VideoMAE: 1 GPU call for all clips ─────────────────────────
+        clip_builder = ActionClipBuilder()
+        all_clips_per_t: list[tuple] = [
+            clip_builder.build(p, sel.representative_frame.frame_index)
+            for p, sel in zip(payloads, selections)
+        ]
+        all_clips_flat = [clip for clips in all_clips_per_t for clip in clips]
+
+        def _clip_pils(clip) -> list:
+            out = []
+            for frame in clip.frames:
+                crop = frame.crop_bgr
+                if crop is not None and crop.size > 0:
+                    rgb = _cv2.cvtColor(np.asarray(crop, dtype=np.uint8), _cv2.COLOR_BGR2RGB)
+                    out.append(_PILImage.fromarray(rgb))
+            return out
+
+        clip_pils_list = [_clip_pils(clip) for clip in all_clips_flat]
+        vmae_feats = (
+            vmae.extract_features_batch(clip_pils_list)
+            if clip_pils_list
+            else np.zeros((0, 1024), dtype=np.float32)
+        )
+
+        vocab_labels  = list(EMBEDDING_VOCABULARY)
+        vocab_prompts = [
+            f"a surveillance footage of a person who is {lbl.replace('_', ' ')} in an indoor space"
+            for lbl in vocab_labels
+        ]
+        text_feats_vocab = siglip.text_features(vocab_prompts)  # [K, 1024], cached
+
+        clip_offset = 0
+        all_behavior_per_t: list[tuple] = []
+        all_semantic_per_t: list[tuple] = []
+
+        for clips in all_clips_per_t:
+            beh_results: list[BehaviorAnalysisResult] = []
+            sem_results: list[SemanticEmbeddingResult] = []
+            for clip in clips:
+                video_feat = vmae_feats[clip_offset] if clip_offset < len(vmae_feats) else np.zeros(1024, dtype=np.float32)
+                clip_offset += 1
+                scores    = text_feats_vocab @ video_feat
+                best_idx  = int(np.argmax(scores))
+                best_lbl  = vocab_labels[best_idx]
+                conf      = round(float(np.clip(scores[best_idx], 0.0, 1.0)), 6)
+                beh_results.append(BehaviorAnalysisResult(
+                    clip_id=clip.clip_id, action_summary=best_lbl,
+                    labels=(best_lbl,), confidence=conf,
+                    metadata={"scores": {lbl: round(float(s), 4) for lbl, s in zip(vocab_labels, scores)}},
+                ))
+                sem_text = f"a surveillance footage of a person who is {best_lbl.replace('_', ' ')} in an indoor space"
+                sem_feat = siglip.text_features([sem_text])[0]
+                sem_results.append(SemanticEmbeddingResult(
+                    clip_id=clip.clip_id,
+                    embedding_model="siglip2-vit-l16-512-action",
+                    vocabulary=tuple(EMBEDDING_VOCABULARY),
+                    embedding_vector=tuple(round(float(v), 6) for v in sem_feat.tolist()),
+                ))
+            all_behavior_per_t.append(tuple(beh_results))
+            all_semantic_per_t.append(tuple(sem_results))
+
+        # ── Attribute text embedding (SigLIP2 text, all cached) ──────────────
+        all_attr_embed: list[AttributeEmbeddingResult] = []
+        for static_attr in all_static:
+            parts = [p for p in [static_attr.gender, static_attr.age_group] if p]
+            text  = "a photo of a " + (" ".join(parts) if parts else "person")
+            feat  = siglip.text_features([text])[0]
+            all_attr_embed.append(AttributeEmbeddingResult(
+                embedding_model="siglip2-vit-l16-512-attr",
+                embedding_vector=tuple(round(float(v), 6) for v in feat.tolist()),
+            ))
+
+        # ── Aggregate and build final metadata dicts ─────────────────────────
+        aggregator  = TrackletFeatureAggregator()
+        runtime_meta = {"batch_optimized": True, "batch_size": len(accepted_tracklets)}
+        people: list[dict[str, object]] = []
+
+        for idx, ((tracklet, quality), payload, selection) in enumerate(
+            zip(accepted_tracklets, payloads, selections)
+        ):
+            try:
+                agg = aggregator.aggregate(
+                    tracklet=payload,
+                    selection=selection,
+                    static_attributes=all_static[idx],
+                    attribute_embedding=all_attr_embed[idx],
+                    appearance_attributes=all_appearance[idx],
+                    appearance_embedding=all_app_embed[idx],
+                    clips=all_clips_per_t[idx],
+                    behavior_results=all_behavior_per_t[idx],
+                    semantic_embeddings=all_semantic_per_t[idx],
+                    runtime_metadata=runtime_meta,
+                )
+                aggregated_metadata = agg.to_metadata()
+            except Exception:
+                LOGGER.warning("Batch aggregate failed for track_id=%s, falling back.", tracklet.track_id)
+                try:
+                    aggregated_metadata = self.feature_pipeline.process(payload).aggregated.to_metadata()
+                except Exception:
+                    continue
+
+            candidate_id = f"{video_id}:{tracklet.track_id}"
+            aggregated_metadata.update({
+                "candidate_id": candidate_id,
+                "camera_id": camera_id,
+                "video_id": video_id,
+                "track_id": tracklet.track_id,
+                "human_key": f"{camera_id or video_id}:{tracklet.track_id}",
+                "tracklet_frames": [
+                    {
+                        "frame_idx": item.frame_index,
+                        "timestamp_second": item.timestamp_second,
+                        "bbox": item.bbox.to_xyxy(),
+                        "confidence": item.confidence,
+                    }
+                    for item in tracklet.observations
+                ],
+                "tracklet_quality": {
+                    "accepted": quality.accepted,
+                    "average_confidence": quality.average_confidence,
+                    "average_laplacian": quality.average_laplacian,
+                    "frame_count": quality.frame_count,
+                    "duration_seconds": round(quality.duration_seconds, 6),
+                },
+            })
+            people.append(aggregated_metadata)
+
+        return people
 
     def _build_person_metadata_from_item(
         self,
@@ -681,6 +1017,368 @@ class LocalMetadataAssembler:
             quality=quality,
             sampled_fps=sampled_fps,
         )
+
+    def _build_people_batch(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        accepted_tracklets: list[tuple["LocalTracklet", "TrackletQualityResult"]],
+        sampled_fps: int,
+    ) -> list[dict[str, object]]:
+        """
+        Batch-optimized feature extraction: runs each model once for ALL tracklets.
+        SigLIP2 image: 1 call instead of 2N  (static + appearance share the same batch)
+        TransReID:     1 call instead of N
+        VideoMAE:      1 batched call instead of N×clips calls
+        Text features: already cached in SigLIP2, effectively free.
+        """
+        if not accepted_tracklets:
+            return []
+
+        import cv2 as _cv2
+        from PIL import Image as _PILImage
+
+        # Lazy import model hubs and helpers from model_adapters
+        from .model_adapters import (
+            SigLIP2ModelHub, TransReIDHub, VideoMAEHub,
+            _crop_pil, _selected_observations, _part_crops, _quality_weighted_pool,
+            _GENDER_PROMPTS, _AGE_PROMPTS,
+            _SHIRT_PROMPTS, _PANTS_PROMPTS, _HAIR_PROMPTS, _SKIN_PROMPTS,
+            _HAT_PROMPTS, _BAG_PROMPTS, _HEAD_ACCESSORY_PROMPTS, _SHOES_PROMPTS,
+            StaticAttributeResult, AppearanceAttributeResult,
+            AppearanceEmbeddingResult, AttributeEmbeddingResult,
+            BehaviorAnalysisResult, SemanticEmbeddingResult,
+        )
+        from .tracklet_feature_pipeline import (
+            ActionClipBuilder, TrackletFeatureAggregator,
+            EMBEDDING_VOCABULARY,
+        )
+
+        siglip = SigLIP2ModelHub()
+        reid   = TransReIDHub()
+        vmae   = VideoMAEHub()
+
+        # ── Build TrackletFeatureInput for every tracklet ──────────────────────
+        tracklet_inputs = [
+            TrackletFeatureInput(
+                video_id=video_id,
+                object_id=tracklet.track_id,
+                sampled_fps=sampled_fps,
+                frames=tuple(
+                    TrackletFrameObservation(
+                        frame_index=item.frame_index,
+                        timestamp_second=item.timestamp_second,
+                        bbox=item.bbox,
+                        detection_confidence=item.confidence,
+                        laplacian_score=item.laplacian_score,
+                        crop_bgr=item.crop_bgr,
+                    )
+                    for item in tracklet.observations
+                ),
+            )
+            for tracklet, _ in accepted_tracklets
+        ]
+        selections = [self.feature_pipeline.selector.select(ti) for ti in tracklet_inputs]
+
+        # ── Phase 1: Batch SigLIP2 image encoding ──────────────────────────────
+        per_t_valid: list[list[tuple]] = []   # [(frame_obs, pil_img), ...]  per tracklet
+        all_siglip_pils: list = []
+        siglip_slices: list[tuple[int, int]] = []
+
+        for ti, selection in zip(tracklet_inputs, selections):
+            selected_obs = _selected_observations(ti, selection)
+            valid = [(f, _crop_pil(f, None)) for f in selected_obs]
+            valid = [(f, p) for f, p in valid if p is not None]
+            per_t_valid.append(valid)
+            s = len(all_siglip_pils)
+            all_siglip_pils.extend(p for _, p in valid)
+            siglip_slices.append((s, len(all_siglip_pils)))
+
+        # ONE SigLIP2 image forward pass for ALL tracklets combined
+        all_img_feats = (
+            siglip.image_features(all_siglip_pils)
+            if all_siglip_pils
+            else np.zeros((0, 1024), dtype=np.float32)
+        )
+
+        # Pre-warm all text feature caches (one-time; subsequent calls hit cache)
+        _prompt_map = {
+            "shirt": _SHIRT_PROMPTS, "pants": _PANTS_PROMPTS,
+            "hair_color": _HAIR_PROMPTS, "skin_tone": _SKIN_PROMPTS,
+            "hat": _HAT_PROMPTS, "bag": _BAG_PROMPTS,
+            "head_accessory": _HEAD_ACCESSORY_PROMPTS, "shoes": _SHOES_PROMPTS,
+        }
+        for _, prompts in _GENDER_PROMPTS + _AGE_PROMPTS:
+            siglip.text_features(prompts)
+        for label_prompts in _prompt_map.values():
+            for _, prompts in label_prompts:
+                siglip.text_features(prompts)
+
+        # ── Phase 2: Classify attributes using pre-computed image features (CPU) ──
+        all_static: list[StaticAttributeResult] = []
+        all_appearance: list[AppearanceAttributeResult] = []
+
+        for idx, selection in enumerate(selections):
+            s, e = siglip_slices[idx]
+            img_feats = all_img_feats[s:e]   # [N_frames, 1024]
+            valid     = per_t_valid[idx]
+            quality_map = {item.frame_index: item.quality_score for item in selection.selected_frames}
+
+            if img_feats.shape[0] == 0:
+                all_static.append(StaticAttributeResult(gender=None, age_group=None, confidence=0.0))
+                all_appearance.append(AppearanceAttributeResult())
+                continue
+
+            # Static: gender + age_group
+            gender_votes: dict = {}
+            age_votes: dict    = {}
+            for i, (frame, _) in enumerate(valid):
+                w  = quality_map.get(frame.frame_index, 0.1)
+                feat = img_feats[i]
+                best_g, bs = None, -float("inf")
+                for label, prompts in _GENDER_PROMPTS:
+                    sc = float(np.mean(siglip.text_features(prompts) @ feat))
+                    if sc > bs: bs, best_g = sc, label
+                gender_votes[best_g] = gender_votes.get(best_g, 0.0) + w
+                best_a, bs = None, -float("inf")
+                for label, prompts in _AGE_PROMPTS:
+                    sc = float(np.mean(siglip.text_features(prompts) @ feat))
+                    if sc > bs: bs, best_a = sc, label
+                age_votes[best_a] = age_votes.get(best_a, 0.0) + w
+            gender    = max(gender_votes, key=gender_votes.get) if gender_votes else None
+            age_group = max(age_votes,    key=age_votes.get)    if age_votes    else None
+            all_static.append(StaticAttributeResult(
+                gender=gender, age_group=age_group,
+                confidence=0.45 if (gender or age_group) else 0.0,
+            ))
+
+            # Appearance: 8 attribute fields
+            fields: dict[str, dict] = {k: {} for k in _prompt_map}
+            for i, (frame, _) in enumerate(valid):
+                w    = max(quality_map.get(frame.frame_index, 0.1), 1e-4)
+                feat = img_feats[i]
+                for field_name, label_prompts in _prompt_map.items():
+                    best_label, bs = None, -float("inf")
+                    for label, prompts in label_prompts:
+                        sc = float(np.mean(siglip.text_features(prompts) @ feat))
+                        if sc > bs: bs, best_label = sc, label
+                    fields[field_name][best_label] = fields[field_name].get(best_label, 0.0) + w
+
+            def _best(votes: dict):
+                return max(votes, key=votes.get) if votes else None
+
+            all_appearance.append(AppearanceAttributeResult(
+                head_accessory=_best(fields["head_accessory"]),
+                hat=_best(fields["hat"]),
+                hair_color=_best(fields["hair_color"]),
+                skin_tone=_best(fields["skin_tone"]),
+                shirt=_best(fields["shirt"]),
+                pants=_best(fields["pants"]),
+                shoes=_best(fields["shoes"]),
+                bag=_best(fields["bag"]),
+            ))
+
+        # ── Phase 3: Batch TransReID ────────────────────────────────────────────
+        per_t_pil_crops: list[list]       = []
+        per_t_weights:   list[list[float]]= []
+        all_fulls:  list = []
+        all_uppers: list = []
+        all_lowers: list = []
+        reid_slices: list[tuple[int, int]] = []
+
+        for ti, selection in zip(tracklet_inputs, selections):
+            selected_obs = _selected_observations(ti, selection)
+            quality_map  = {item.frame_index: item.quality_score for item in selection.selected_frames}
+            pil_crops, weights = [], []
+            for frame in selected_obs:
+                pil = _crop_pil(frame, None)
+                if pil is None:
+                    continue
+                pil_crops.append(pil)
+                weights.append(quality_map.get(frame.frame_index, 0.1))
+            per_t_pil_crops.append(pil_crops)
+            per_t_weights.append(weights)
+            s = len(all_fulls)
+            if pil_crops:
+                parts = [_part_crops(pil) for pil in pil_crops]
+                all_fulls.extend(p[0] for p in parts)
+                all_uppers.extend(p[1] for p in parts)
+                all_lowers.extend(p[2] for p in parts)
+            reid_slices.append((s, len(all_fulls)))
+
+        # ONE TransReID call with all crops
+        _G_W, _P_W = 0.55, 0.45
+        if all_fulls:
+            total_M   = len(all_fulls)
+            reid_raw  = reid.embed_crops(all_fulls + all_uppers + all_lowers)  # [3M, 768]
+            gf_all    = reid_raw[:total_M]
+            uf_all    = reid_raw[total_M:2 * total_M]
+            lf_all    = reid_raw[2 * total_M:]
+        else:
+            gf_all = uf_all = lf_all = np.zeros((0, 768), dtype=np.float32)
+
+        all_appearance_embed: list[AppearanceEmbeddingResult] = []
+        for idx, (pil_crops, weights) in enumerate(zip(per_t_pil_crops, per_t_weights)):
+            s, e = reid_slices[idx]
+            if not pil_crops:
+                empty = tuple(0.0 for _ in range(512))
+                all_appearance_embed.append(AppearanceEmbeddingResult(
+                    embedding_model="transreid-vit-base-msmt17-kpr",
+                    embedding_vector=empty, tracklet_vectors=(empty,),
+                ))
+                continue
+            gf, uf, lf = gf_all[s:e], uf_all[s:e], lf_all[s:e]
+            per_frame_vecs = []
+            for i in range(len(pil_crops)):
+                pm   = (uf[i] + lf[i]) / 2.0
+                pn   = float(np.linalg.norm(pm)) or 1.0
+                fused = _G_W * gf[i] + _P_W * (pm / pn)
+                fn   = float(np.linalg.norm(fused)) or 1.0
+                per_frame_vecs.append((fused / fn).astype(np.float32))
+            pooled = _quality_weighted_pool(per_frame_vecs, weights)
+            all_appearance_embed.append(AppearanceEmbeddingResult(
+                embedding_model="transreid-vit-base-msmt17-kpr",
+                embedding_vector=tuple(round(float(v), 6) for v in pooled.tolist()),
+                tracklet_vectors=tuple(
+                    tuple(round(float(v), 6) for v in gf[i].tolist())
+                    for i in range(len(pil_crops))
+                ),
+            ))
+
+        # ── Phase 4: Batch VideoMAE ─────────────────────────────────────────────
+        clip_builder = ActionClipBuilder()
+        all_clips_per_t = [
+            clip_builder.build(ti, sel.representative_frame.frame_index)
+            for ti, sel in zip(tracklet_inputs, selections)
+        ]
+        all_clips_flat = [clip for clips in all_clips_per_t for clip in clips]
+
+        def _clip_pils(clip) -> list:
+            pils = []
+            for frame in clip.frames:
+                crop = frame.crop_bgr
+                if crop is not None and crop.size > 0:
+                    rgb = _cv2.cvtColor(np.asarray(crop, dtype=np.uint8), _cv2.COLOR_BGR2RGB)
+                    pils.append(_PILImage.fromarray(rgb))
+            return pils
+
+        # ONE batched VideoMAE call
+        clips_pil_lists = [_clip_pils(clip) for clip in all_clips_flat]
+        if clips_pil_lists:
+            vmae_feats = vmae.extract_features_batch(clips_pil_lists)  # [total_clips, 1024]
+        else:
+            vmae_feats = np.zeros((0, 1024), dtype=np.float32)
+
+        # Action vocabulary text features (cached after first call)
+        vocab_labels  = list(EMBEDDING_VOCABULARY)
+        vocab_prompts = [
+            f"a surveillance footage of a person who is {lbl.replace('_', ' ')} in an indoor space"
+            for lbl in vocab_labels
+        ]
+        text_vocab_feats = siglip.text_features(vocab_prompts)  # [K, 1024]
+
+        clip_offset = 0
+        all_behavior_per_t:  list[tuple] = []
+        all_semantic_per_t:  list[tuple] = []
+
+        for clips in all_clips_per_t:
+            behaviors: list[BehaviorAnalysisResult]  = []
+            semantics: list[SemanticEmbeddingResult] = []
+            for clip in clips:
+                if clip_offset >= len(vmae_feats):
+                    break
+                vid_feat = vmae_feats[clip_offset]
+                clip_offset += 1
+                scores    = text_vocab_feats @ vid_feat          # [K]
+                best_idx  = int(np.argmax(scores))
+                best_lbl  = vocab_labels[best_idx]
+                confidence = round(float(np.clip(scores[best_idx], 0.0, 1.0)), 6)
+                behaviors.append(BehaviorAnalysisResult(
+                    clip_id=clip.clip_id,
+                    action_summary=best_lbl,
+                    labels=(best_lbl,),
+                    confidence=confidence,
+                    metadata={"scores": {l: round(float(s), 4) for l, s in zip(vocab_labels, scores)}},
+                ))
+                sem_text  = f"a surveillance footage of a person who is {best_lbl.replace('_', ' ')} in an indoor space"
+                sem_feat  = siglip.text_features([sem_text])[0]
+                semantics.append(SemanticEmbeddingResult(
+                    clip_id=clip.clip_id,
+                    embedding_model="siglip2-vit-l16-512-action",
+                    vocabulary=EMBEDDING_VOCABULARY,
+                    embedding_vector=tuple(round(float(v), 6) for v in sem_feat.tolist()),
+                ))
+            all_behavior_per_t.append(tuple(behaviors))
+            all_semantic_per_t.append(tuple(semantics))
+
+        # ── Phase 5: Attribute text embeddings (text-only, cached) ─────────────
+        all_attr_embed: list[AttributeEmbeddingResult] = []
+        for static_attr in all_static:
+            parts = [p for p in [static_attr.gender, static_attr.age_group] if p]
+            text  = "a photo of a " + (" ".join(parts) if parts else "person")
+            feat  = siglip.text_features([text])[0]
+            all_attr_embed.append(AttributeEmbeddingResult(
+                embedding_model="siglip2-vit-l16-512-attr",
+                embedding_vector=tuple(round(float(v), 6) for v in feat.tolist()),
+            ))
+
+        # ── Phase 6: Aggregate per tracklet (CPU) ──────────────────────────────
+        aggregator = TrackletFeatureAggregator()
+        runtime_meta = {"batch_optimized": True, "batch_size": len(accepted_tracklets)}
+        people: list[dict[str, object]] = []
+
+        for idx, ((tracklet, quality), ti, selection) in enumerate(
+            zip(accepted_tracklets, tracklet_inputs, selections)
+        ):
+            try:
+                agg = aggregator.aggregate(
+                    tracklet=ti,
+                    selection=selection,
+                    static_attributes=all_static[idx],
+                    attribute_embedding=all_attr_embed[idx],
+                    appearance_attributes=all_appearance[idx],
+                    appearance_embedding=all_appearance_embed[idx],
+                    clips=all_clips_per_t[idx],
+                    behavior_results=all_behavior_per_t[idx],
+                    semantic_embeddings=all_semantic_per_t[idx],
+                    runtime_metadata=runtime_meta,
+                )
+            except Exception as exc:
+                LOGGER.warning("batch aggregation failed for track %s: %s — falling back", tracklet.track_id, exc)
+                try:
+                    agg = self.feature_pipeline.process(ti).aggregated
+                except Exception:
+                    continue
+
+            meta = agg.to_metadata()
+            candidate_id = f"{video_id}:{tracklet.track_id}"
+            meta.update({
+                "candidate_id": candidate_id,
+                "camera_id": camera_id,
+                "video_id": video_id,
+                "track_id": tracklet.track_id,
+                "human_key": f"{camera_id or video_id}:{tracklet.track_id}",
+                "tracklet_frames": [
+                    {
+                        "frame_idx": item.frame_index,
+                        "timestamp_second": item.timestamp_second,
+                        "bbox": item.bbox.to_xyxy(),
+                        "confidence": item.confidence,
+                    }
+                    for item in tracklet.observations
+                ],
+                "tracklet_quality": {
+                    "accepted": quality.accepted,
+                    "average_confidence": quality.average_confidence,
+                    "average_laplacian": quality.average_laplacian,
+                    "frame_count": quality.frame_count,
+                    "duration_seconds": round(quality.duration_seconds, 6),
+                },
+            })
+            people.append(meta)
+
+        return people
 
     def _build_person_metadata(
         self,
@@ -742,12 +1440,22 @@ class LocalMetadataAssembler:
 class TrackletMemoryBank:
     """
     Keep short-term identity history and resolve stable human keys across tracklets.
+
+    One centroid per identity (no chaining): each identity is represented by a
+    running-average unit vector so that the 1st and 166th tracklet of the same
+    person are compared against the same stable reference, not a drifted chain.
     """
 
-    similarity_threshold: float = 0.60
+    similarity_threshold: float = 0.75  # cosine; 0.60 caused chain-merging of different people
     history_seconds: float = 600.0
     next_global_id: int = 1
-    memory: list[dict[str, object]] = field(default_factory=list)
+    # id → {"ts": float, "uv": np.ndarray | None, "count": int}
+    _centroids: dict[str, dict[str, object]] = field(default_factory=dict)
+
+    # Keep dataclass field name stable for any external pickle/copy consumers.
+    @property
+    def memory(self) -> dict[str, dict[str, object]]:
+        return self._centroids
 
     def resolve_identity(
         self,
@@ -755,31 +1463,48 @@ class TrackletMemoryBank:
         embedding_vector: list[float] | None,
         timestamp_second: float,
     ) -> str:
-        self.memory = [e for e in self.memory if timestamp_second - float(e["ts"]) <= self.history_seconds]
+        # Evict stale identities.
+        stale = [k for k, v in self._centroids.items()
+                 if timestamp_second - float(v["ts"]) > self.history_seconds]
+        for k in stale:
+            del self._centroids[k]
+
         if not embedding_vector:
             gid = f"global-{self.next_global_id}"
             self.next_global_id += 1
+            self._centroids[gid] = {"ts": timestamp_second, "uv": None, "count": 1}
             return gid
 
         q = np.asarray(embedding_vector, dtype=np.float32)
         n = float(np.linalg.norm(q))
         unit = q / n if n > 0 else q
 
+        # Compare query against one centroid per identity — no chaining.
         identity: str | None = None
-        if self.memory:
-            # Vectorised cosine similarity: one matmul instead of a Python loop.
-            # Each stored entry pre-normalises its vector, so mat @ unit = cosine sims.
-            mat = np.stack([e["uv"] for e in self.memory])  # [M, dim]
-            scores = mat @ unit                              # [M]
+        valid = [(k, v) for k, v in self._centroids.items() if v["uv"] is not None]
+        if valid:
+            ids = [k for k, _ in valid]
+            mat = np.stack([v["uv"] for _, v in valid])  # [M, dim]
+            scores = mat @ unit                           # [M] cosine similarities
             best_idx = int(np.argmax(scores))
             if float(scores[best_idx]) >= self.similarity_threshold:
-                identity = str(self.memory[best_idx]["id"])
+                identity = ids[best_idx]
 
         if identity is None:
             identity = f"global-{self.next_global_id}"
             self.next_global_id += 1
 
-        self.memory.append({"id": identity, "ts": timestamp_second, "uv": unit})
+        # Update centroid: running weighted average keeps the reference stable.
+        if identity in self._centroids and self._centroids[identity]["uv"] is not None:
+            count = int(self._centroids[identity]["count"])
+            old_uv = self._centroids[identity]["uv"]
+            new_uv = (old_uv * count + unit) / (count + 1)
+            norm = float(np.linalg.norm(new_uv))
+            new_uv = new_uv / norm if norm > 1e-8 else new_uv
+            self._centroids[identity] = {"ts": timestamp_second, "uv": new_uv, "count": count + 1}
+        else:
+            self._centroids[identity] = {"ts": timestamp_second, "uv": unit, "count": 1}
+
         return identity
 
 
@@ -803,7 +1528,7 @@ class LocalVideoIngestionPipeline:
     adapters.  Falls back to HOG + GreedyIoU when rfdetr package is absent.
     """
 
-    sample_fps: int = 5
+    sample_fps: int = 4
     sampler: VideoFrameSampler = field(default_factory=VideoFrameSampler)
     detector: RFDETRPersonDetector = field(default_factory=_default_detector)
     tracker: OCMCTrackStyleTracker = field(default_factory=_default_tracker)
