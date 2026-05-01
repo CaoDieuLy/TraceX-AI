@@ -283,7 +283,9 @@ class QueueSyncService:
             try:
                 if remote_endpoint:
                     _wait_for_tracking_upstream_ready(context=context)
-                with httpx.Client(timeout=float(settings.tracking_request_timeout_seconds)) as client:
+                # Short timeout: just enough to submit the job (async endpoint returns immediately)
+                submit_timeout = 60.0
+                with httpx.Client(timeout=submit_timeout) as client:
                     response = client.post(endpoint, json=payload, headers=headers or None)
                 if response.is_error:
                     detail = response.text[:2000]
@@ -308,6 +310,15 @@ class QueueSyncService:
                         continue
                 response.raise_for_status()
                 data = response.json()
+                # Async mode: LightningAI enqueued the job, poll for result
+                if "job_id" in data:
+                    job_id = data["job_id"]
+                    LOGGER.info(
+                        "Async ingestion job queued job_id=%s source_filename=%s camera_id=%s",
+                        job_id, source_filename, camera_id,
+                    )
+                    return self._poll_ingestion_job(endpoint_root, job_id, headers)
+                # Legacy sync mode: full result returned immediately
                 LOGGER.info(
                     "Tracking ingestion completed source_filename=%s camera_id=%s people=%s",
                     source_filename,
@@ -327,6 +338,42 @@ class QueueSyncService:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError(f"Tracking ingestion failed for {source_filename}")
+
+    def _poll_ingestion_job(
+        self,
+        endpoint_root: str,
+        job_id: str,
+        headers: dict | None,
+        poll_interval: int = 30,
+        max_wait: int = 1800,
+    ) -> dict:
+        """Poll /api/v1/ingestion/status/{job_id} until done or timeout (default 30 min)."""
+        status_url = f"{endpoint_root}/api/v1/ingestion/status/{job_id}"
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            time.sleep(poll_interval)
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.get(status_url, headers=headers or None)
+                resp.raise_for_status()
+                data = resp.json()
+            except httpx.HTTPError as exc:
+                LOGGER.warning("Poll request failed for job %s: %s — retrying", job_id, exc)
+                continue
+            status = data.get("status")
+            LOGGER.info("Ingestion job %s status=%s source_filename=%s", job_id, status, data.get("source_filename"))
+            if status == "done":
+                result = data.get("result", {})
+                LOGGER.info("Ingestion job %s completed people=%s", job_id, result.get("person_count"))
+                return result
+            if status == "failed":
+                raise RuntimeError(
+                    f"Ingestion job {job_id} failed on LightningAI: "
+                    f"{data.get('error_type')}: {data.get('error')}"
+                )
+        raise TimeoutError(
+            f"Ingestion job {job_id} did not complete within {max_wait}s"
+        )
 
     @staticmethod
     def _drive_public_download_url(file_id: str) -> str:

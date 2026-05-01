@@ -1,5 +1,9 @@
 import json
 import logging
+import queue as _queue_module
+import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +36,10 @@ from .service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Warmup state
+# ---------------------------------------------------------------------------
 _warmup_task: asyncio.Task | None = None
 _warmup_state: dict[str, object] = {
     "enabled": bool(settings.startup_warmup_enabled),
@@ -56,16 +64,10 @@ def _warmup_snapshot() -> dict[str, object]:
 
 
 def _warmup_models() -> None:
-    """
-    Pre-load tất cả AI models vào GPU memory khi service start.
-    Đảm bảo latency thấp cho request đầu tiên của user.
-    Models: RF-DETR 2XLarge, TransReID ViT-Base, VideoMAE Large, SigLIP2 ViT-L-16-512.
-    """
     from .model_adapters import SigLIP2ModelHub, TransReIDHub, VideoMAEHub
 
     logger.info("[warmup] Pre-loading AI models into GPU memory...")
 
-    # SigLIP2 — dùng cho attribute zero-shot + action embedding + query encoding
     try:
         hub = SigLIP2ModelHub()
         hub._ensure_loaded()
@@ -73,7 +75,6 @@ def _warmup_models() -> None:
     except Exception as exc:
         logger.error("[warmup] SigLIP2 failed: %s", exc)
 
-    # TransReID — dùng cho appearance Re-ID embedding
     try:
         hub = TransReIDHub()
         hub._ensure_loaded()
@@ -81,7 +82,6 @@ def _warmup_models() -> None:
     except Exception as exc:
         logger.error("[warmup] TransReID failed: %s", exc)
 
-    # VideoMAE — dùng cho action recognition
     try:
         hub = VideoMAEHub()
         hub._ensure_loaded()
@@ -89,7 +89,6 @@ def _warmup_models() -> None:
     except Exception as exc:
         logger.error("[warmup] VideoMAE failed: %s", exc)
 
-    # RF-DETR — dùng cho person detection (heaviest model, load cuối)
     try:
         from .local_ingestion_pipeline import RFDETRPersonDetector
         det = RFDETRPersonDetector()
@@ -105,16 +104,64 @@ def _run_warmup_models() -> None:
     _set_warmup_state(status="running", ready=False, started_at=_utcnow_iso(), finished_at=None, last_error=None)
     try:
         _warmup_models()
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.exception("[warmup] Background warmup failed")
         _set_warmup_state(status="failed", ready=False, finished_at=_utcnow_iso(), last_error=str(exc))
         return
     _set_warmup_state(status="completed", ready=True, finished_at=_utcnow_iso(), last_error=None)
 
 
+# ---------------------------------------------------------------------------
+# Async ingestion job queue
+# ---------------------------------------------------------------------------
+_job_store: dict[str, dict] = {}
+_job_store_lock = threading.Lock()
+_ingestion_queue: _queue_module.Queue = _queue_module.Queue(maxsize=32)
+_worker_thread: threading.Thread | None = None
+
+
+def _ingestion_worker() -> None:
+    """Background thread: drains _ingestion_queue one job at a time."""
+    while True:
+        job_id, payload_dict = _ingestion_queue.get()
+        # Wait for warmup before starting inference
+        while not _warmup_state.get("ready") and _warmup_state.get("status") not in ("disabled", "failed"):
+            time.sleep(2)
+        with _job_store_lock:
+            _job_store[job_id]["status"] = "processing"
+            _job_store[job_id]["started_at"] = _utcnow_iso()
+        logger.info("[worker] Processing job %s source_filename=%s", job_id, payload_dict.get("source_filename"))
+        try:
+            result = process_video_ingestion(payload_dict)
+            with _job_store_lock:
+                _job_store[job_id].update({
+                    "status": "done",
+                    "result": result,
+                    "finished_at": _utcnow_iso(),
+                })
+            logger.info("[worker] Job %s done people=%s", job_id, result.get("person_count"))
+        except Exception as exc:
+            logger.exception("[worker] Job %s failed: %s", job_id, exc)
+            with _job_store_lock:
+                _job_store[job_id].update({
+                    "status": "failed",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "finished_at": _utcnow_iso(),
+                })
+        finally:
+            _ingestion_queue.task_done()
+
+
+# ---------------------------------------------------------------------------
+# App lifespan
+# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _warmup_task
+    global _warmup_task, _worker_thread
+    _worker_thread = threading.Thread(target=_ingestion_worker, daemon=True, name="ingestion-worker")
+    _worker_thread.start()
+    logger.info("[startup] Ingestion worker thread started")
     if settings.startup_warmup_enabled:
         _warmup_task = asyncio.create_task(asyncio.to_thread(_run_warmup_models))
     else:
@@ -194,27 +241,35 @@ def tracking_run(payload: TrackingRequest) -> dict:
     return run_tracking(payload.candidate_info)
 
 
-@app.post("/api/v1/ingestion/process", response_model=VideoIngestionResponse)
+@app.post("/api/v1/ingestion/process")
 def ingestion_process(payload: VideoIngestionRequest) -> dict:
+    """Enqueue a video ingestion job. Returns immediately with job_id."""
+    job_id = str(uuid.uuid4())
+    with _job_store_lock:
+        _job_store[job_id] = {
+            "status": "queued",
+            "queued_at": _utcnow_iso(),
+            "source_filename": payload.source_filename,
+            "camera_id": payload.camera_id,
+        }
     try:
-        return process_video_ingestion(payload.model_dump())
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(
-            "Video ingestion failed for source_filename=%s camera_id=%s",
-            payload.source_filename,
-            payload.camera_id,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": type(exc).__name__,
-                "message": str(exc),
-                "source_filename": payload.source_filename,
-                "camera_id": payload.camera_id,
-            },
-        ) from exc
+        _ingestion_queue.put_nowait((job_id, payload.model_dump()))
+    except _queue_module.Full:
+        with _job_store_lock:
+            del _job_store[job_id]
+        raise HTTPException(status_code=503, detail="Ingestion queue full, try again later")
+    logger.info("[ingestion] Job queued job_id=%s source_filename=%s", job_id, payload.source_filename)
+    return {"job_id": job_id, "status": "queued", "source_filename": payload.source_filename}
+
+
+@app.get("/api/v1/ingestion/status/{job_id}")
+def ingestion_job_status(job_id: str) -> dict:
+    """Poll ingestion job status. Returns result when status=='done'."""
+    with _job_store_lock:
+        job = _job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Ingestion job not found: {job_id}")
+    return job
 
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)
