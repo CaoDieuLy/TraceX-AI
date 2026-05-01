@@ -25,7 +25,7 @@ DEFAULT_VPS_USER = os.getenv("TRACKING_MONITOR_VPS_USER", "root")
 DEFAULT_VPS_PASSWORD = os.getenv("TRACKING_MONITOR_VPS_PASSWORD", "xVrqU6Dg@VhAcj4")
 DEFAULT_CLOUD_URL = os.getenv(
     "TRACKING_MONITOR_CLOUD_URL",
-    "https://8000-01kpr5td5by2gc0hjq4s6zwsbt.cloudspaces.litng.ai",
+    "https://8000-01kqhxrsmzj0gjh7fe5fqga4jm.cloudspaces.litng.ai",
 )
 DEFAULT_AUTH_TOKEN = os.getenv("TRACKING_MONITOR_AUTH_TOKEN", "abc123")
 DEFAULT_OUTPUT = os.getenv("TRACKING_MONITOR_OUTPUT", "tracking_progress.log")

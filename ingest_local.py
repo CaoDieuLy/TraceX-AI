@@ -36,13 +36,13 @@ else:
     print(f"[warn] {MASTER_ENV} not found — using environment variables only")
 
 # ---------------------------------------------------------------------------
-# Config (read after dotenv)
+# Config (read after dotenv; --lightning-url arg overrides TRACKING_SERVICE_URL)
 # ---------------------------------------------------------------------------
 LIGHTNING_URL    = os.environ["TRACKING_SERVICE_URL"].rstrip("/")
 LIGHTNING_TOKEN  = os.environ.get("LIGHTNING_API_TOKEN", "")
 DRIVE_FOLDER_ID  = os.environ["GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID"]
 POLL_INTERVAL    = int(os.environ.get("QUEUE_POLL_INTERVAL_SECONDS", "30"))
-MAX_WAIT_SECONDS = 1800   # 30 min per video
+MAX_WAIT_SECONDS = 1800   # 30 min per video — increase for long videos
 
 import httpx
 from urllib.parse import quote_plus
@@ -312,14 +312,53 @@ def parse_camera_id(filename: str) -> str | None:
     return m.group(1) if m else None
 
 
-def run(dry_run: bool = False, clear_db: bool = False):
+def _select_shard_files(all_files: list[dict], *, shard: int, total_shards: int, shard_mode: str) -> list[dict]:
+    if total_shards <= 1:
+        return all_files
+    if shard_mode == "interleaved":
+        return all_files[shard::total_shards]
+
+    total_files = len(all_files)
+    base = total_files // total_shards
+    remainder = total_files % total_shards
+    start = shard * base + min(shard, remainder)
+    length = base + (1 if shard < remainder else 0)
+    end = start + length
+    return all_files[start:end]
+
+
+def run(
+    dry_run: bool = False,
+    clear_db: bool = False,
+    shard: int = 0,
+    total_shards: int = 1,
+    shard_mode: str = "contiguous",
+):
     SessionLocal = setup_db(clear=clear_db)
 
     log.info("[drive] Listing mp4 files in Storage folder %s ...", DRIVE_FOLDER_ID)
     drive = build_drive_service()
-    files = list_drive_mp4s(drive, DRIVE_FOLDER_ID)
-    files.sort(key=lambda f: f["name"])
-    log.info("[drive] Found %d .mp4 files", len(files))
+    all_files = list_drive_mp4s(drive, DRIVE_FOLDER_ID)
+    all_files.sort(key=lambda f: f["name"])
+    log.info("[drive] Found %d .mp4 files total", len(all_files))
+
+    # Interleaved sharding: shard 0 → [0,3,6,...], shard 1 → [1,4,7,...], shard 2 → [2,5,8,...]
+    # Balances load evenly regardless of camera/time distribution.
+    files = _select_shard_files(
+        all_files,
+        shard=shard,
+        total_shards=total_shards,
+        shard_mode=shard_mode,
+    )
+    if total_shards > 1:
+        log.info(
+            "[shard %d/%d] mode=%s assigned %d/%d videos",
+            shard,
+            total_shards - 1,
+            shard_mode,
+            len(files),
+            len(all_files),
+        )
 
     if dry_run:
         for f in files:
@@ -334,10 +373,8 @@ def run(dry_run: bool = False, clear_db: bool = False):
         file_id   = f["id"]
         camera_id = parse_camera_id(filename)
 
-        # Skip videos already processed (have candidates in DB)
-        video_id = filename
         with SessionLocal() as session:
-            already_done = session.query(PersonCandidate).filter_by(video_id=video_id).first()
+            already_done = session.query(PersonCandidate).filter_by(video_id=filename).first()
         if already_done:
             log.info("[%d/%d] SKIP %s — already in DB", i, len(files), filename)
             continue
@@ -350,23 +387,52 @@ def run(dry_run: bool = False, clear_db: bool = False):
 
             result = poll_job(job_id)
             people_count = result.get("person_count", 0)
-            log.info("[%d/%d] Done: %d people found", i, len(files), people_count)
+            tracklet_count = result.get("video", {}).get("tracklet_count", "?")
+            log.info("[%d/%d] Done: %d people / %s tracklets", i, len(files), people_count, tracklet_count)
 
             with SessionLocal() as session:
                 saved = save_result(session, result, {"name": filename, "camera_id": camera_id})
             total_saved += saved
-            log.info("[%d/%d] Saved %d new candidates to DB (total so far: %d)", i, len(files), saved, total_saved)
+            log.info("[%d/%d] Saved %d new candidates (total so far: %d)", i, len(files), saved, total_saved)
 
         except Exception as exc:
             log.error("[%d/%d] FAILED %s: %s", i, len(files), filename, exc)
             continue
 
-    log.info("[done] Processed %d/%d videos. Total candidates saved: %d", len(files), len(files), total_saved)
+    log.info("[done] Shard %d/%d finished. Videos=%d, candidates saved=%d",
+             shard, total_shards - 1, len(files), total_saved)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Local Drive→LightningAI→DB pipeline")
+    parser = argparse.ArgumentParser(
+        description="Local Drive→LightningAI→DB pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Parallel execution (3 GPU servers, 50 videos):
+  TRACKING_SERVICE_URL=https://gpu-0 python ingest_local.py --shard 0 --total-shards 3
+  TRACKING_SERVICE_URL=https://gpu-1 python ingest_local.py --shard 1 --total-shards 3
+  TRACKING_SERVICE_URL=https://gpu-2 python ingest_local.py --shard 2 --total-shards 3
+""",
+    )
     parser.add_argument("--dry-run", action="store_true", help="List videos only, no processing")
     parser.add_argument("--clear-db", action="store_true", help="Truncate DB tables before run")
+    parser.add_argument("--shard", type=int, default=0, metavar="INDEX",
+                        help="0-based shard index for parallel execution (default: 0)")
+    parser.add_argument("--total-shards", type=int, default=1, metavar="TOTAL",
+                        help="Total parallel shards, e.g. 3 for three concurrent processes (default: 1)")
+    parser.add_argument("--shard-mode", choices=("contiguous", "interleaved"), default="contiguous",
+                        help="How to split files across shards (default: contiguous)")
+    parser.add_argument("--lightning-url", default="", metavar="URL",
+                        help="Override TRACKING_SERVICE_URL for this shard")
     args = parser.parse_args()
-    run(dry_run=args.dry_run, clear_db=args.clear_db)
+
+    if args.lightning_url:
+        LIGHTNING_URL = args.lightning_url.rstrip("/")
+
+    run(
+        dry_run=args.dry_run,
+        clear_db=args.clear_db,
+        shard=args.shard,
+        total_shards=args.total_shards,
+        shard_mode=args.shard_mode,
+    )

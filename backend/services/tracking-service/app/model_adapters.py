@@ -17,6 +17,7 @@ Adapters:
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 import logging
 import os
 import threading
@@ -43,6 +44,40 @@ from .tracklet_feature_pipeline import (
 )
 
 logger = logging.getLogger(__name__)
+_MODEL_GPU_LOCK = threading.Semaphore(1)
+
+
+def _env_batch_size(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if raw.isdigit():
+        return max(1, int(raw))
+    return max(1, int(default))
+
+
+def _env_precision(name: str, default: str) -> str:
+    value = os.environ.get(name, "").strip().lower()
+    return value or default
+
+
+@contextmanager
+def _gpu_inference_scope(torch_module: object, device: str, *, precision_env: str, default_precision: str):
+    precision = _env_precision(precision_env, default_precision)
+    inference_mode = getattr(torch_module, "inference_mode", None)
+    inference_context = inference_mode() if callable(inference_mode) else torch_module.no_grad()
+    autocast_context = nullcontext()
+    if device == "cuda":
+        if precision == "bf16":
+            autocast_context = torch_module.autocast(device_type="cuda", dtype=torch_module.bfloat16)
+        elif precision in {"fp16", "half"}:
+            autocast_context = torch_module.autocast(device_type="cuda", dtype=torch_module.float16)
+        _MODEL_GPU_LOCK.acquire()
+    try:
+        with inference_context:
+            with autocast_context:
+                yield
+    finally:
+        if device == "cuda":
+            _MODEL_GPU_LOCK.release()
 
 # ---------------------------------------------------------------------------
 # Taxonomy prompt maps — SigLIP2 zero-shot labels
@@ -205,24 +240,35 @@ class TransReIDHub:
             model = model.to(self._device).eval()
             self._model = model
             self._torch = torch
+            import torchvision.transforms as T
+            self._transform = T.Compose([
+                T.Resize((256, 128)),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
             self._loaded = True
             logger.info("TransReID ready on %s (768-dim)", self._device)
 
     def embed_crops(self, pil_crops: list[Image.Image]) -> np.ndarray:
         """Return L2-normalised 768-dim Re-ID embeddings [N, 768]."""
         self._ensure_loaded()
-        import torchvision.transforms as T
-        transform = T.Compose([
-            T.Resize((256, 128)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        tensors = [transform(img.convert("RGB")) for img in pil_crops]
-        batch = self._torch.stack(tensors).to(self._device)
-        with self._torch.no_grad():
-            feats = self._model(batch)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        return feats.cpu().numpy().astype(np.float32)
+        if not pil_crops:
+            return np.zeros((0, 768), dtype=np.float32)
+        tensors = [self._transform(img.convert("RGB")) for img in pil_crops]
+        batch_size = _env_batch_size("MCPT_REID_BATCH_SIZE", len(tensors))
+        outputs: list[np.ndarray] = []
+        for start in range(0, len(tensors), batch_size):
+            batch = self._torch.stack(tensors[start:start + batch_size]).to(self._device)
+            with _gpu_inference_scope(
+                self._torch,
+                self._device,
+                precision_env="MCPT_REID_PRECISION",
+                default_precision="fp32",
+            ):
+                feats = self._model(batch)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            outputs.append(feats.cpu().numpy().astype(np.float32))
+        return np.concatenate(outputs, axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +316,12 @@ class VideoMAEHub:
             model = model.to(self._device).eval()
             self._model = model
             self._torch = torch
+            import torchvision.transforms as T
+            self._transform = T.Compose([
+                T.Resize((224, 224)),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
             self._loaded = True
             logger.info("VideoMAE Large ready on %s (1024-dim)", self._device)
 
@@ -281,22 +333,21 @@ class VideoMAEHub:
         Returns [1024] L2-normalised vector.
         """
         self._ensure_loaded()
-        import torchvision.transforms as T
-        transform = T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
         # Resample to exactly 16 frames
         n = len(pil_frames)
         if n == 0:
             return np.zeros(1024, dtype=np.float32)
         indices = [int(i * (n - 1) / 15) for i in range(16)] if n >= 2 else [0] * 16
         frames_16 = [pil_frames[idx].convert("RGB") for idx in indices]
-        tensors = [transform(f) for f in frames_16]
+        tensors = [self._transform(f) for f in frames_16]
         # Shape: [1, 16, 3, 224, 224]
         clip = self._torch.stack(tensors).unsqueeze(0).to(self._device)
-        with self._torch.no_grad():
+        with _gpu_inference_scope(
+            self._torch,
+            self._device,
+            precision_env="MCPT_VLM_PRECISION",
+            default_precision="fp32",
+        ):
             out = self._model(pixel_values=clip)
         cls = out.last_hidden_state[:, 0]  # CLS token [1, 1024]
         cls = cls / cls.norm(dim=-1, keepdim=True)
@@ -323,6 +374,7 @@ class SigLIP2ModelHub:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
                 cls._instance._loaded = False
+                cls._instance._text_embed_cache: dict = {}
             return cls._instance
 
     def _ensure_loaded(self) -> None:
@@ -355,21 +407,49 @@ class SigLIP2ModelHub:
     def image_features(self, pil_images: list[Image.Image]) -> np.ndarray:
         """Return L2-normalised image features [N, 1024]."""
         self._ensure_loaded()
+        if not pil_images:
+            return np.zeros((0, 1024), dtype=np.float32)
         tensors = [self._preprocess(img) for img in pil_images]
-        batch = self._torch.stack(tensors).to(self._device)
-        with self._torch.no_grad():
-            feats = self._model.encode_image(batch)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        return feats.cpu().numpy().astype(np.float32)
+        batch_size = _env_batch_size("MCPT_EMBEDDING_BATCH_SIZE", len(tensors))
+        outputs: list[np.ndarray] = []
+        for start in range(0, len(tensors), batch_size):
+            batch = self._torch.stack(tensors[start:start + batch_size]).to(self._device)
+            with _gpu_inference_scope(
+                self._torch,
+                self._device,
+                precision_env="MCPT_EMBEDDING_PRECISION",
+                default_precision="fp32",
+            ):
+                feats = self._model.encode_image(batch)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            outputs.append(feats.cpu().numpy().astype(np.float32))
+        return np.concatenate(outputs, axis=0)
 
     def text_features(self, texts: list[str]) -> np.ndarray:
-        """Return L2-normalised text features [N, 1024]."""
+        """Return L2-normalised text features [N, 1024]. Results cached by text content."""
         self._ensure_loaded()
-        tokens = self._tokenizer(texts).to(self._device)
-        with self._torch.no_grad():
-            feats = self._model.encode_text(tokens)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        return feats.cpu().numpy().astype(np.float32)
+        if not texts:
+            return np.zeros((0, 1024), dtype=np.float32)
+        key = tuple(texts)
+        cached = self._text_embed_cache.get(key)
+        if cached is not None:
+            return cached
+        batch_size = _env_batch_size("MCPT_EMBEDDING_BATCH_SIZE", len(texts))
+        outputs: list[np.ndarray] = []
+        for start in range(0, len(texts), batch_size):
+            tokens = self._tokenizer(texts[start:start + batch_size]).to(self._device)
+            with _gpu_inference_scope(
+                self._torch,
+                self._device,
+                precision_env="MCPT_EMBEDDING_PRECISION",
+                default_precision="fp32",
+            ):
+                feats = self._model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            outputs.append(feats.cpu().numpy().astype(np.float32))
+        result = np.concatenate(outputs, axis=0)
+        self._text_embed_cache[key] = result
+        return result
 
     def classify_zero_shot(
         self,
@@ -463,18 +543,34 @@ class ZeroShotAttributeAdapter:
         selected = _selected_observations(tracklet, selection)
         quality_map = {item.frame_index: item.quality_score for item in selection.selected_frames}
 
+        valid = [(f, _crop_pil(f, None)) for f in selected]
+        valid = [(f, p) for f, p in valid if p is not None]
+        if not valid:
+            return StaticAttributeResult(gender=None, age_group=None, confidence=0.0)
+
+        _, pils = zip(*valid)
+        img_feats = hub.image_features(list(pils))  # [N, 1024] — one GPU call for all frames
+
         gender_votes: dict[str | None, float] = {}
         age_votes: dict[str | None, float] = {}
 
-        for frame in selected:
-            pil = _crop_pil(frame, None)
-            if pil is None:
-                continue
+        for i, (frame, _) in enumerate(valid):
             weight = quality_map.get(frame.frame_index, 0.1)
-            g = hub.classify_zero_shot(pil, _GENDER_PROMPTS)
-            a = hub.classify_zero_shot(pil, _AGE_PROMPTS)
-            gender_votes[g] = gender_votes.get(g, 0.0) + weight
-            age_votes[a] = age_votes.get(a, 0.0) + weight
+            img_feat = img_feats[i]
+
+            best_g, best_g_score = None, -float("inf")
+            for label, prompts in _GENDER_PROMPTS:
+                score = float(np.mean(hub.text_features(prompts) @ img_feat))
+                if score > best_g_score:
+                    best_g_score, best_g = score, label
+            gender_votes[best_g] = gender_votes.get(best_g, 0.0) + weight
+
+            best_a, best_a_score = None, -float("inf")
+            for label, prompts in _AGE_PROMPTS:
+                score = float(np.mean(hub.text_features(prompts) @ img_feat))
+                if score > best_a_score:
+                    best_a_score, best_a = score, label
+            age_votes[best_a] = age_votes.get(best_a, 0.0) + weight
 
         gender = max(gender_votes, key=gender_votes.get) if gender_votes else None
         age_group = max(age_votes, key=age_votes.get) if age_votes else None
@@ -514,14 +610,24 @@ class ZeroShotAppearanceMetadataAdapter:
             "head_accessory": _HEAD_ACCESSORY_PROMPTS, "shoes": _SHOES_PROMPTS,
         }
 
-        for frame in selected:
-            pil = _crop_pil(frame, None)
-            if pil is None:
-                continue
+        valid = [(f, _crop_pil(f, None)) for f in selected]
+        valid = [(f, p) for f, p in valid if p is not None]
+        if not valid:
+            return AppearanceAttributeResult()
+
+        _, pils = zip(*valid)
+        img_feats = hub.image_features(list(pils))  # [N, 1024] — one GPU call for all frames
+
+        for i, (frame, _) in enumerate(valid):
             weight = max(quality_map.get(frame.frame_index, 0.1), 1e-4)
-            for field_name, prompts in prompt_map.items():
-                label = hub.classify_zero_shot(pil, prompts)
-                fields[field_name][label] = fields[field_name].get(label, 0.0) + weight
+            img_feat = img_feats[i]
+            for field_name, label_prompts in prompt_map.items():
+                best_label, best_score = None, -float("inf")
+                for label, prompts in label_prompts:
+                    score = float(np.mean(hub.text_features(prompts) @ img_feat))
+                    if score > best_score:
+                        best_score, best_label = score, label
+                fields[field_name][best_label] = fields[field_name].get(best_label, 0.0) + weight
 
         def best(votes: dict) -> str | None:
             return max(votes, key=votes.get) if votes else None
@@ -633,9 +739,11 @@ class SoliderKPRAppearanceEmbeddingAdapter:
         upper_crops = [p[1] for p in all_parts]
         lower_crops = [p[2] for p in all_parts]
 
-        global_feats = hub.embed_crops(full_crops)   # [N, 768]
-        upper_feats  = hub.embed_crops(upper_crops)  # [N, 768]
-        lower_feats  = hub.embed_crops(lower_crops)  # [N, 768]
+        all_feats = hub.embed_crops(full_crops + upper_crops + lower_crops)  # [3N, 768]
+        n = len(full_crops)
+        global_feats = all_feats[:n]
+        upper_feats  = all_feats[n:2 * n]
+        lower_feats  = all_feats[2 * n:]
 
         per_frame_vecs: list[np.ndarray] = []
         for i in range(len(pil_crops)):

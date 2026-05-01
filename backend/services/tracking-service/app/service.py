@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -103,6 +104,40 @@ def _embedding_similarity(query_emb: np.ndarray, candidate_emb: list[float] | No
     cand_norm = np.linalg.norm(cand_vec) + 1e-8
     query_norm = np.linalg.norm(query_emb) + 1e-8
     return float(np.dot(query_emb, cand_vec) / (query_norm * cand_norm))
+
+
+def _action_embedding_similarity(query_emb: np.ndarray | None, action_payload: object) -> float:
+    if query_emb is None or not isinstance(action_payload, dict):
+        return 0.0
+
+    query_vec = np.asarray(query_emb, dtype=np.float32)
+    query_norm = float(np.linalg.norm(query_vec))
+    if query_norm <= 1e-8:
+        return 0.0
+    query_vec = query_vec / query_norm
+
+    candidate_vectors: list[np.ndarray] = []
+
+    direct_vector = action_payload.get("embedding_vector")
+    if isinstance(direct_vector, list) and len(direct_vector) == query_vec.shape[0]:
+        candidate_vectors.append(np.asarray(direct_vector, dtype=np.float32))
+
+    segments = action_payload.get("segments")
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            vector = segment.get("embedding_vector")
+            if isinstance(vector, list) and len(vector) == query_vec.shape[0]:
+                candidate_vectors.append(np.asarray(vector, dtype=np.float32))
+
+    if not candidate_vectors:
+        return 0.0
+
+    matrix = np.stack(candidate_vectors, axis=0)
+    norms = np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-8)
+    matrix = matrix / norms
+    return float(np.max(matrix @ query_vec))
 
 
 def _semantic_overlap_itself(query_text: str, candidate: dict) -> float:
@@ -251,6 +286,46 @@ def _normalize_tracking_segments(candidate: dict, limit: int) -> list[dict[str, 
     return normalized
 
 
+def _normalized_vector_matrix(
+    candidates: list[dict],
+    *,
+    field_name: str,
+) -> tuple[list[int], np.ndarray | None]:
+    row_indices: list[int] = []
+    matrix_rows: list[np.ndarray] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        raw_vector = candidate.get(field_name)
+        if not isinstance(raw_vector, list) or not raw_vector:
+            continue
+        vector = np.asarray(raw_vector, dtype=np.float32)
+        if vector.ndim != 1:
+            continue
+        vector_norm = float(np.linalg.norm(vector))
+        if vector_norm <= 1e-8:
+            continue
+        row_indices.append(index)
+        matrix_rows.append(vector / vector_norm)
+    if not matrix_rows:
+        return [], None
+    return row_indices, np.stack(matrix_rows, axis=0)
+
+
+def _matrix_vector_similarity_scores(
+    matrix: np.ndarray,
+    vector: np.ndarray,
+) -> np.ndarray:
+    if matrix.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    if torch.cuda.is_available() and matrix.shape[0] >= 1024:
+        device = torch.device("cuda")
+        matrix_tensor = torch.as_tensor(matrix, device=device)
+        vector_tensor = torch.as_tensor(vector, device=device)
+        return (matrix_tensor @ vector_tensor).detach().cpu().numpy()
+    return matrix @ vector
+
+
 def _precompute_candidate_embedding_scores(query_embedding: np.ndarray | None, candidates: list[dict]) -> dict[int, float]:
     if query_embedding is None:
         return {}
@@ -261,29 +336,50 @@ def _precompute_candidate_embedding_scores(query_embedding: np.ndarray | None, c
         return {}
     normalized_query = normalized_query / query_norm
 
-    row_indices: list[int] = []
-    matrix_rows: list[np.ndarray] = []
-    for index, candidate in enumerate(candidates):
-        if not isinstance(candidate, dict):
-            continue
-        raw_embedding = candidate.get("embedding_vector")
-        if not isinstance(raw_embedding, list) or not raw_embedding:
-            continue
-        candidate_vector = np.asarray(raw_embedding, dtype=np.float32)
-        if candidate_vector.ndim != 1 or candidate_vector.shape[0] != normalized_query.shape[0]:
-            continue
-        candidate_norm = float(np.linalg.norm(candidate_vector))
-        if candidate_norm <= 1e-8:
-            continue
-        row_indices.append(index)
-        matrix_rows.append(candidate_vector / candidate_norm)
+    row_indices, matrix = _normalized_vector_matrix(candidates, field_name="embedding_vector")
+    if matrix is None:
+        return {}
+    compatible_rows = [idx for idx, row in zip(row_indices, matrix) if row.shape[0] == normalized_query.shape[0]]
+    if not compatible_rows:
+        return {}
+    compatible_matrix = np.stack(
+        [row for row in matrix if row.shape[0] == normalized_query.shape[0]],
+        axis=0,
+    )
+    scores = _matrix_vector_similarity_scores(compatible_matrix, normalized_query)
+    return {row_index: float(score) for row_index, score in zip(compatible_rows, scores)}
 
-    if not matrix_rows:
+
+def _precompute_field_similarity_scores(
+    query_embedding: np.ndarray | None,
+    candidates: list[dict],
+    *,
+    field_name: str,
+) -> dict[int, float]:
+    if query_embedding is None:
         return {}
 
-    matrix = np.stack(matrix_rows, axis=0)
-    scores = matrix @ normalized_query
-    return {row_index: float(score) for row_index, score in zip(row_indices, scores)}
+    normalized_query = np.asarray(query_embedding, dtype=np.float32)
+    query_norm = float(np.linalg.norm(normalized_query))
+    if query_norm <= 1e-8:
+        return {}
+    normalized_query = normalized_query / query_norm
+
+    row_indices, matrix = _normalized_vector_matrix(candidates, field_name=field_name)
+    if matrix is None:
+        return {}
+    compatible_rows: list[int] = []
+    compatible_vectors: list[np.ndarray] = []
+    for row_index, row in zip(row_indices, matrix):
+        if row.shape[0] != normalized_query.shape[0]:
+            continue
+        compatible_rows.append(row_index)
+        compatible_vectors.append(row)
+    if not compatible_vectors:
+        return {}
+    compatible_matrix = np.stack(compatible_vectors, axis=0)
+    scores = _matrix_vector_similarity_scores(compatible_matrix, normalized_query)
+    return {row_index: float(score) for row_index, score in zip(compatible_rows, scores)}
 
 
 def _candidate_embedding_values(candidate: dict) -> list[float]:
@@ -313,34 +409,73 @@ def _precompute_anchor_similarity_scores(anchor_candidate: dict, candidates: lis
         return {}
     anchor_vector = anchor_vector / anchor_norm
 
+    row_indices, matrix = _normalized_vector_matrix(candidates, field_name="embedding_vector")
+    if matrix is None:
+        return {}
+    compatible_rows: list[int] = []
+    compatible_vectors: list[np.ndarray] = []
+    for row_index, row in zip(row_indices, matrix):
+        if row.shape[0] != anchor_vector.shape[0]:
+            continue
+        compatible_rows.append(row_index)
+        compatible_vectors.append(row)
+    if not compatible_vectors:
+        return {}
+    compatible_matrix = np.stack(compatible_vectors, axis=0)
+    scores = _matrix_vector_similarity_scores(compatible_matrix, anchor_vector)
+    return {row_index: float(score) for row_index, score in zip(compatible_rows, scores)}
+
+
+def _precompute_action_segment_similarity_scores(
+    query_embedding: np.ndarray | None,
+    candidates: list[dict],
+) -> dict[int, float]:
+    if query_embedding is None:
+        return {}
+
+    normalized_query = np.asarray(query_embedding, dtype=np.float32)
+    query_norm = float(np.linalg.norm(normalized_query))
+    if query_norm <= 1e-8:
+        return {}
+    normalized_query = normalized_query / query_norm
+
     row_indices: list[int] = []
     matrix_rows: list[np.ndarray] = []
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             continue
-        candidate_embedding = _candidate_embedding_values(candidate)
-        if not candidate_embedding or len(candidate_embedding) != anchor_vector.shape[0]:
+        payload = candidate.get("action_semantic_embedding")
+        if not isinstance(payload, dict):
             continue
-        candidate_vector = np.asarray(candidate_embedding, dtype=np.float32)
-        candidate_norm = float(np.linalg.norm(candidate_vector))
-        if candidate_norm <= 1e-8:
+        segments = payload.get("segments")
+        if not isinstance(segments, list):
             continue
-        row_indices.append(index)
-        matrix_rows.append(candidate_vector / candidate_norm)
-
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            raw_vector = segment.get("embedding_vector")
+            if not isinstance(raw_vector, list) or not raw_vector:
+                continue
+            vector = np.asarray(raw_vector, dtype=np.float32)
+            if vector.ndim != 1 or vector.shape[0] != normalized_query.shape[0]:
+                continue
+            vector_norm = float(np.linalg.norm(vector))
+            if vector_norm <= 1e-8:
+                continue
+            row_indices.append(index)
+            matrix_rows.append(vector / vector_norm)
     if not matrix_rows:
         return {}
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        matrix_tensor = torch.as_tensor(np.stack(matrix_rows, axis=0), device=device)
-        anchor_tensor = torch.as_tensor(anchor_vector, device=device)
-        scores_tensor = matrix_tensor @ anchor_tensor
-        scores = scores_tensor.detach().cpu().numpy()
-    else:
-        matrix = np.stack(matrix_rows, axis=0)
-        scores = matrix @ anchor_vector
-    return {row_index: float(score) for row_index, score in zip(row_indices, scores)}
+    matrix = np.stack(matrix_rows, axis=0)
+    scores = _matrix_vector_similarity_scores(matrix, normalized_query)
+    best_by_candidate: dict[int, float] = {}
+    for row_index, score in zip(row_indices, scores):
+        current = best_by_candidate.get(row_index)
+        value = float(score)
+        if current is None or value > current:
+            best_by_candidate[row_index] = value
+    return best_by_candidate
 
 
 def _global_tracking_matches(
@@ -448,12 +583,7 @@ def _resolve_query_source_path(storage_path: str, video_id: str | None = None) -
 
 def _prepare_remote_query_video(source_path: Path, video_id: str | None = None) -> Path:
     if source_path.suffix.lower() in INGESTION_VIDEO_SUFFIXES:
-        conversion_dir = Path(settings.video_conversion_output_dir)
-        conversion_dir.mkdir(parents=True, exist_ok=True)
-        target_path = conversion_dir / f"{(video_id or source_path.stem).strip() or source_path.stem}{source_path.suffix.lower()}"
-        if source_path.resolve() != target_path.resolve():
-            shutil.copy2(source_path, target_path)
-        return target_path
+        return source_path
     raise ValueError(
         f"Only .mp4 inputs are supported for query processing. Got: {source_path.name}"
     )
@@ -477,15 +607,32 @@ def _strict_pipeline_spec() -> dict:
 
 
 @lru_cache(maxsize=1)
-def get_runtime_config() -> dict:
-    mode = "remote" if settings.lightning_api_base_url else "local"
+def _resolved_runtime_bundle() -> tuple[dict, dict, dict, dict]:
     pipeline = _strict_pipeline_spec()
     detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
+    VideoIngestionRuntime._apply_execution_environment(execution_plan)
     acceleration_state = configure_torch_runtime(
         allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
         cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
         host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
     )
+    return pipeline, detected_hardware, execution_plan, acceleration_state
+
+
+def prepare_runtime_for_inference() -> dict[str, object]:
+    pipeline, detected_hardware, execution_plan, acceleration_state = _resolved_runtime_bundle()
+    return {
+        "pipeline": pipeline,
+        "detected_hardware": detected_hardware,
+        "execution_plan": execution_plan,
+        "acceleration_state": acceleration_state,
+    }
+
+
+@lru_cache(maxsize=1)
+def get_runtime_config() -> dict:
+    mode = "remote" if settings.lightning_api_base_url else "local"
+    pipeline, detected_hardware, execution_plan, acceleration_state = _resolved_runtime_bundle()
     return {
         "provider": "lightningai",
         "mode": mode,
@@ -567,13 +714,10 @@ def process_video_query(payload: dict) -> dict:
     video_id = str(payload.get("video_id") or "").strip()
     query_id = payload.get("query_id")
     metadata = _json_dict_or_empty(payload.get("metadata"))
-    pipeline = _strict_pipeline_spec()
-    detected_hardware, execution_plan = resolve_execution_plan(pipeline_spec=pipeline)
-    acceleration_state = configure_torch_runtime(
-        allow_tf32=bool(detected_hardware.get("allow_tf32", True)),
-        cudnn_benchmark=bool(detected_hardware.get("cudnn_benchmark", True)),
-        host_cpu_count=int(detected_hardware.get("host_cpu_count") or 1),
-    )
+    runtime = prepare_runtime_for_inference()
+    detected_hardware = _dict_or_empty(runtime.get("detected_hardware"))
+    execution_plan = _dict_or_empty(runtime.get("execution_plan"))
+    acceleration_state = _dict_or_empty(runtime.get("acceleration_state"))
     file_exists = bool(storage_path)
 
     if not settings.lightning_api_base_url.strip():
@@ -838,6 +982,24 @@ def _score_attribute_match(query_intent: dict, candidate: dict) -> float:
     return round(score, 6)
 
 
+def _score_attribute_match_precomputed(query_intent: dict, *, full_text: str) -> float:
+    if not query_intent["attributes"] and not query_intent["actions"]:
+        return 0.0
+
+    score = 0.0
+    for keywords in query_intent["attributes"].values():
+        if any(keyword in full_text for keyword in keywords):
+            score += 0.12
+        else:
+            score -= 0.03
+
+    for action in query_intent["actions"]:
+        if action in full_text:
+            score += 0.10
+
+    return round(score, 6)
+
+
 def _rank_candidate_multimodal(
     query_text: str,
     query_clip_embed: np.ndarray | None,
@@ -867,13 +1029,7 @@ def _rank_candidate_multimodal(
     # --- Action similarity (CLIP text vs ITSELF action embedding) ---
     act_sim = 0.0
     if query_clip_embed is not None and query_intent["has_action_intent"]:
-        action_embed_data = view.get("action_semantic_embedding")
-        if isinstance(action_embed_data, dict):
-            action_vec = action_embed_data.get("embedding_vector")
-        else:
-            action_vec = None
-        if isinstance(action_vec, list) and len(action_vec) == query_clip_embed.shape[0]:
-            act_sim = _embedding_similarity(query_clip_embed, action_vec)
+        act_sim = _action_embedding_similarity(query_clip_embed, view.get("action_semantic_embedding"))
 
     # --- Attribute metadata match ---
     meta_score = _score_attribute_match(query_intent, view)
@@ -908,37 +1064,29 @@ def _deduplicate_cross_camera(
     if not scored:
         return []
 
+    candidates = [item[1] for item in scored]
+    row_indices, matrix = _normalized_vector_matrix(candidates, field_name="embedding_vector")
+    if matrix is None:
+        row_indices = []
+        matrix = np.zeros((0, 0), dtype=np.float32)
+    matrix_by_scored_index = {row_index: row for row_index, row in zip(row_indices, matrix)}
+
     clusters: list[list[int]] = []
     assigned = [False] * len(scored)
-    embed_cache: dict[int, np.ndarray | None] = {}
-
-    def get_embed(idx: int) -> np.ndarray | None:
-        if idx not in embed_cache:
-            vec = scored[idx][1].get("embedding_vector")
-            if isinstance(vec, list) and vec:
-                arr = np.array(vec, dtype=np.float32)
-                norm = np.linalg.norm(arr)
-                embed_cache[idx] = arr / norm if norm > 1e-8 else None
-            else:
-                embed_cache[idx] = None
-        return embed_cache[idx]
-
     for i in range(len(scored)):
         if assigned[i]:
             continue
         cluster = [i]
         assigned[i] = True
-        ei = get_embed(i)
-        if ei is not None:
-            for j in range(i + 1, len(scored)):
-                if assigned[j]:
+        rep_vector = matrix_by_scored_index.get(i)
+        if rep_vector is not None:
+            similarities = _matrix_vector_similarity_scores(matrix, rep_vector)
+            for row_index, similarity in zip(row_indices, similarities):
+                if row_index <= i or assigned[row_index]:
                     continue
-                ej = get_embed(j)
-                if ej is not None and ei.shape == ej.shape:
-                    sim = float(np.dot(ei, ej))
-                    if sim >= similarity_threshold:
-                        cluster.append(j)
-                        assigned[j] = True
+                if float(similarity) >= similarity_threshold:
+                    cluster.append(row_index)
+                    assigned[row_index] = True
         clusters.append(cluster)
 
     result = []
@@ -982,6 +1130,9 @@ def search_candidates_remote(
     if not cleaned_query:
         return {"query_text": cleaned_query, "count": 0, "items": []}
 
+    runtime = prepare_runtime_for_inference()
+    pipeline = runtime["pipeline"] if isinstance(runtime, dict) else _strict_pipeline_spec()
+    semantic_cfg = _dict_or_empty(_dict_or_empty(pipeline.get("hyperparameters")).get("semantic_search"))
     bounded_limit = max(1, min(int(limit or 5), 50))
     normalized_candidates = [c for c in candidates if isinstance(c, dict)]
     if not normalized_candidates:
@@ -1002,16 +1153,71 @@ def search_candidates_remote(
     filtered = _hard_filter_candidates(normalized_candidates, camera_ids, time_from, time_to)
     logger.info("After hard filter: %d/%d candidates", len(filtered), len(normalized_candidates))
 
+    candidate_views = [_candidate_payload_view(candidate) for candidate in filtered]
+    precomputed_app_scores = _precompute_field_similarity_scores(
+        query_clip_embed,
+        candidate_views,
+        field_name="attribute_embedding_vector",
+    )
+    precomputed_action_scores = (
+        _precompute_action_segment_similarity_scores(query_clip_embed, candidate_views)
+        if query_clip_embed is not None and query_intent["has_action_intent"]
+        else {}
+    )
+
+    score_weights = {
+        "app": 0.42,
+        "act": 0.20,
+        "meta": 0.18,
+        "sem": 0.12,
+        "vis": 0.05,
+        "world": 0.03,
+    }
+    semantic_weight_overrides = _dict_or_empty(semantic_cfg.get("score_weights"))
+    for key, value in semantic_weight_overrides.items():
+        if key == "semantic_overlap":
+            score_weights["sem"] = float(value)
+        elif key in ("embedding", "app"):
+            score_weights["app"] = float(value)
+        elif key == "visibility":
+            score_weights["vis"] = float(value)
+        elif key == "world_position":
+            score_weights["world"] = float(value)
+        elif key in score_weights:
+            score_weights[key] = float(value)
+    for key, value in _dict_or_empty(weights).items():
+        if key in score_weights and isinstance(value, (int, float)):
+            score_weights[key] = float(value)
+
     # Phase 3b+4: Hybrid scoring per candidate
     scored: list[tuple[float, dict]] = []
-    for candidate in filtered:
-        candidate_view = _candidate_payload_view(candidate)
-        score = _rank_candidate_multimodal(cleaned_query, query_clip_embed, query_intent, candidate_view)
+    for index, (candidate, candidate_view) in enumerate(zip(filtered, candidate_views)):
+        search_text = _candidate_search_document(candidate_view)
+        semantic_attrs = [str(item).lower() for item in _coerce_string_list(candidate_view.get("semantic_attributes"))]
+        full_text = f"{search_text} {' '.join(semantic_attrs)}".strip().lower()
+        semantic_overlap = 0.0
+        if search_text:
+            semantic_overlap = _semantic_overlap_itself(cleaned_query, {**candidate_view, "search_text": search_text})
+        matched_segments = _normalize_tracking_segments(candidate_view, limit=3)
+        app_sim = float(precomputed_app_scores.get(index) or 0.0)
+        act_sim = float(precomputed_action_scores.get(index) or 0.0)
+        meta_score = _score_attribute_match_precomputed(query_intent, full_text=full_text)
+        vis_bonus = _visibility_bonus(candidate_view)
+        world_bonus = _world_position_bonus(candidate_view)
+        score = round(
+            app_sim * score_weights["app"] +
+            act_sim * score_weights["act"] +
+            meta_score * score_weights["meta"] +
+            semantic_overlap * score_weights["sem"] +
+            vis_bonus * score_weights["vis"] +
+            world_bonus * score_weights["world"],
+            6,
+        )
         enriched = dict(candidate)
-        enriched["search_text"] = _candidate_search_document(candidate_view)
-        enriched["semantic_overlap"] = round(_semantic_overlap_itself(cleaned_query, candidate_view), 6)
+        enriched["search_text"] = search_text
+        enriched["semantic_overlap"] = round(semantic_overlap, 6)
         if not isinstance(enriched.get("matched_segments"), list) or not enriched.get("matched_segments"):
-            enriched["matched_segments"] = _normalize_tracking_segments(candidate_view, limit=3)
+            enriched["matched_segments"] = matched_segments
         if not isinstance(enriched.get("timeline"), list) and isinstance(candidate_view.get("timeline"), list):
             enriched["timeline"] = candidate_view.get("timeline")
         scored.append((score, enriched))
@@ -1019,7 +1225,14 @@ def search_candidates_remote(
     scored.sort(key=lambda x: (-x[0], str(x[1].get("video_id") or ""), str(x[1].get("candidate_id") or "")))
 
     # Phase 5: Cross-camera dedup + diversity Top-k
-    items = _deduplicate_cross_camera(scored, per_camera_limit=max(1, bounded_limit // 5 + 1))
+    fetch_multiplier = max(2, int(semantic_cfg.get("fetch_multiplier") or 8))
+    pre_dedup_limit = min(len(scored), max(bounded_limit, bounded_limit * fetch_multiplier))
+    dedup_threshold = float(semantic_cfg.get("dedup_similarity_threshold") or 0.85)
+    items = _deduplicate_cross_camera(
+        scored[:pre_dedup_limit],
+        similarity_threshold=dedup_threshold,
+        per_camera_limit=max(1, bounded_limit // 5 + 1),
+    )
     items = items[:bounded_limit]
 
     return {"query_text": cleaned_query, "count": len(items), "items": items}
@@ -1062,11 +1275,13 @@ def _prepare_remote_tracking_jobs(
     *,
     artifact_id: str,
     max_segments_per_candidate: int,
+    source_resolve_workers_cap: int = 8,
 ) -> list[dict[str, object]]:
     if not selected_candidates:
         return []
 
-    max_workers = max(1, min(len(selected_candidates), 4))
+    configured_workers = max(1, int(os.environ.get("MCPT_PARALLEL_VIDEO_JOBS", "4")))
+    max_workers = max(1, min(len(selected_candidates), configured_workers, source_resolve_workers_cap))
 
     def resolve(candidate: dict) -> tuple[str, Path, list[dict[str, float | str]], dict]:
         source_path = _resolve_remote_candidate_source_path(candidate, artifact_id)
@@ -1099,7 +1314,18 @@ def _prepare_remote_tracking_jobs(
                     "action_summary": str(segment["action_summary"]),
                 }
             )
-    return list(grouped_jobs.values())
+    jobs = list(grouped_jobs.values())
+    for job in jobs:
+        clips = job.get("clips")
+        if isinstance(clips, list):
+            clips.sort(
+                key=lambda clip: (
+                    float(clip.get("start_second") or 0.0),
+                    float(clip.get("end_second") or 0.0),
+                    str(clip.get("candidate_id") or ""),
+                )
+            )
+    return jobs
 
 
 def build_tracking_video_remote(
@@ -1112,6 +1338,10 @@ def build_tracking_video_remote(
 ) -> dict:
     import cv2
 
+    runtime = prepare_runtime_for_inference()
+    pipeline = _dict_or_empty(runtime.get("pipeline"))
+    trace_cfg = _dict_or_empty(_dict_or_empty(pipeline.get("hyperparameters")).get("trace"))
+    runtime_defaults = _dict_or_empty(pipeline.get("runtime_defaults"))
     selected_candidates = _global_tracking_matches(
         selected_candidate_id=selected_candidate_id,
         candidates=candidates,
@@ -1121,19 +1351,32 @@ def build_tracking_video_remote(
     if not selected_candidates:
         raise FileNotFoundError("No candidates found for remote tracking build")
 
+    if candidate_ids:
+        allowed_ids = {str(candidate_id or "").strip() for candidate_id in candidate_ids if str(candidate_id or "").strip()}
+        allowed_ids.add(str(selected_candidate_id or "").strip())
+        selected_candidates = [
+            candidate
+            for candidate in selected_candidates
+            if str(candidate.get("candidate_id") or "").strip() in allowed_ids
+        ]
+        if not selected_candidates:
+            raise FileNotFoundError("No selected candidates remained after candidate_ids filtering")
+
     artifact_id = uuid4().hex
     output_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = None
     written_frames = 0
-    output_fps = 12.0
+    output_fps_cap = float(runtime_defaults.get("trace_output_fps_cap") or 12.0)
+    output_fps = output_fps_cap
     output_size: tuple[int, int] | None = None
     clips_manifest: list[dict[str, object]] = []
     grouped_jobs = _prepare_remote_tracking_jobs(
         selected_candidates,
         artifact_id=artifact_id,
         max_segments_per_candidate=max_segments_per_candidate,
+        source_resolve_workers_cap=max(1, int(trace_cfg.get("source_resolve_workers_cap") or 8)),
     )
 
     for job in grouped_jobs:
@@ -1149,24 +1392,32 @@ def build_tracking_video_remote(
             continue
         if output_size is None:
             output_size = (width, height)
-            output_fps = max(8.0, min(fps or 12.0, 24.0))
+            output_fps = max(8.0, min(fps or output_fps_cap, output_fps_cap))
             writer = cv2.VideoWriter(
                 str(output_path),
                 cv2.VideoWriter_fourcc(*"mp4v"),
                 output_fps,
                 output_size,
             )
+        current_frame = 0
         for clip in job["clips"]:
             start_second = float(clip["start_second"])
             end_second = float(clip["end_second"])
             start_frame = max(0, int(start_second * fps))
             end_frame = max(start_frame, int(end_second * fps))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            frame_idx = start_frame
-            while frame_idx <= end_frame:
+            if start_frame < current_frame:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                current_frame = start_frame
+            elif start_frame > current_frame:
+                while current_frame < start_frame:
+                    if not cap.grab():
+                        break
+                    current_frame += 1
+            while current_frame <= end_frame:
                 ok, frame = cap.read()
                 if not ok:
                     break
+                current_frame += 1
                 if output_size and (frame.shape[1], frame.shape[0]) != output_size:
                     frame = cv2.resize(frame, output_size)
                 overlay_1 = f"Query: {query_text or 'candidate tracking'}"
@@ -1179,7 +1430,6 @@ def build_tracking_video_remote(
                 if writer is not None:
                     writer.write(frame)
                     written_frames += 1
-                frame_idx += 1
             clips_manifest.append(
                 {
                     "candidate_id": clip.get("candidate_id"),

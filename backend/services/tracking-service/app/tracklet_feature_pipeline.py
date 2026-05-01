@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 from dataclasses import dataclass, field
 import math
+import os
 import numpy as np
 from statistics import mean
 from typing import Protocol
@@ -130,6 +131,13 @@ class TrackletStageExecutionConfig:
     """Execution settings for independent stages inside one tracklet pipeline."""
 
     max_workers: int = 3
+
+
+def _default_stage_execution_config() -> TrackletStageExecutionConfig:
+    configured = os.getenv("MCPT_TRACKLET_STAGE_WORKERS", "").strip()
+    if configured.isdigit():
+        return TrackletStageExecutionConfig(max_workers=max(1, int(configured)))
+    return TrackletStageExecutionConfig(max_workers=1)
 
 
 @dataclass(frozen=True)
@@ -455,7 +463,7 @@ class ActionClipBuilder:
     clip_duration_seconds: float = 2.0
     clip_stride_seconds: float = 1.5
     minimum_tracklet_duration_seconds: float = 2.0
-    max_segments: int = 10
+    max_segments: int = 3
 
     def build(
         self,
@@ -785,43 +793,65 @@ class TrackletFeaturePipelineProcessor:
     behavior_analyzer: ActionBehaviorAnalyzer = field(default_factory=lambda: __import__("app.model_adapters", fromlist=["SigLIP2BehaviorAnalyzer"]).SigLIP2BehaviorAnalyzer())
     semantic_embedder: ActionSemanticEmbedder = field(default_factory=_default_semantic_embedder)
     aggregator: TrackletFeatureAggregator = field(default_factory=TrackletFeatureAggregator)
-    stage_execution: TrackletStageExecutionConfig = field(default_factory=TrackletStageExecutionConfig)
+    stage_execution: TrackletStageExecutionConfig = field(default_factory=_default_stage_execution_config)
 
     def process(self, tracklet: TrackletFeatureInput) -> TrackletFeaturePipelineOutput:
         selection = self.selector.select(tracklet)
         max_workers = max(1, self.stage_execution.max_workers)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            static_future = executor.submit(self.static_attribute_extractor.extract, tracklet, selection)
-            appearance_future = executor.submit(self.appearance_attribute_extractor.extract, tracklet, selection)
-            clips_future = executor.submit(self.clip_builder.build, tracklet, selection.representative_frame.frame_index)
-
-            static_attributes = static_future.result()
-            appearance_attributes = appearance_future.result()
-            clips = clips_future.result()
-
-            attribute_embedding_future = executor.submit(
-                self.attribute_embedding_extractor.extract,
+        if max_workers == 1:
+            static_attributes = self.static_attribute_extractor.extract(tracklet, selection)
+            appearance_attributes = self.appearance_attribute_extractor.extract(tracklet, selection)
+            clips = self.clip_builder.build(tracklet, selection.representative_frame.frame_index)
+            attribute_embedding = self.attribute_embedding_extractor.extract(
                 tracklet,
                 selection,
                 static_attributes,
             )
-            appearance_embedding_future = executor.submit(
-                self.appearance_embedding_extractor.extract,
+            appearance_embedding = self.appearance_embedding_extractor.extract(
                 tracklet,
                 selection,
                 static_attributes,
                 appearance_attributes,
             )
-
             if clips:
-                behavior_results = tuple(executor.map(self.behavior_analyzer.analyze, clips))
-                semantic_embeddings = tuple(executor.map(self.semantic_embedder.embed, behavior_results))
+                behavior_results = tuple(self.behavior_analyzer.analyze(clip) for clip in clips)
+                semantic_embeddings = tuple(self.semantic_embedder.embed(result) for result in behavior_results)
             else:
                 behavior_results = ()
                 semantic_embeddings = ()
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                static_future = executor.submit(self.static_attribute_extractor.extract, tracklet, selection)
+                appearance_future = executor.submit(self.appearance_attribute_extractor.extract, tracklet, selection)
+                clips_future = executor.submit(self.clip_builder.build, tracklet, selection.representative_frame.frame_index)
 
-            attribute_embedding = attribute_embedding_future.result()
-            appearance_embedding = appearance_embedding_future.result()
+                static_attributes = static_future.result()
+                appearance_attributes = appearance_future.result()
+                clips = clips_future.result()
+
+                attribute_embedding_future = executor.submit(
+                    self.attribute_embedding_extractor.extract,
+                    tracklet,
+                    selection,
+                    static_attributes,
+                )
+                appearance_embedding_future = executor.submit(
+                    self.appearance_embedding_extractor.extract,
+                    tracklet,
+                    selection,
+                    static_attributes,
+                    appearance_attributes,
+                )
+
+                if clips:
+                    behavior_results = tuple(executor.map(self.behavior_analyzer.analyze, clips))
+                    semantic_embeddings = tuple(executor.map(self.semantic_embedder.embed, behavior_results))
+                else:
+                    behavior_results = ()
+                    semantic_embeddings = ()
+
+                attribute_embedding = attribute_embedding_future.result()
+                appearance_embedding = appearance_embedding_future.result()
 
         runtime_metadata = self._runtime_metadata()
         aggregated = self.aggregator.aggregate(

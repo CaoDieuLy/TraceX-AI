@@ -63,10 +63,12 @@ class VideoIngestionRuntime:
     def _apply_execution_environment(execution_plan: dict) -> None:
         parallelism = execution_plan.get("parallelism", {})
         batching = execution_plan.get("batching", {})
+        precision = execution_plan.get("precision", {})
         memory = execution_plan.get("memory", {})
         hardware = execution_plan.get("hardware", {})
         host_cpu_count = max(1, int(hardware.get("host_cpu_count") or 1))
         gpu_streams = max(1, int(parallelism.get("gpu_streams") or 1))
+        detector_batch_size = int(batching.get("detector_batch_size") or 8)
 
         os.environ["OMP_NUM_THREADS"] = str(host_cpu_count)
         os.environ["MKL_NUM_THREADS"] = str(host_cpu_count)
@@ -80,10 +82,16 @@ class VideoIngestionRuntime:
         os.environ["MCPT_METADATA_WORKERS"] = str(parallelism.get("metadata_workers") or max(host_cpu_count // 2, 1))
         os.environ["MCPT_PREFETCH_QUEUE_SIZE"] = str(parallelism.get("prefetch_queue_size") or 32)
         os.environ["MCPT_PARALLEL_VIDEO_JOBS"] = str(parallelism.get("parallel_video_jobs") or 1)
-        os.environ["MCPT_DETECTOR_BATCH_SIZE"] = str(batching.get("detector_batch_size") or 8)
+        os.environ["MCPT_DETECTOR_BATCH_SIZE"] = str(detector_batch_size)
         os.environ["MCPT_REID_BATCH_SIZE"] = str(batching.get("reid_batch_size") or 64)
         os.environ["MCPT_VLM_BATCH_SIZE"] = str(batching.get("vlm_batch_size") or 8)
         os.environ["MCPT_EMBEDDING_BATCH_SIZE"] = str(batching.get("embedding_batch_size") or 64)
+        os.environ["MCPT_DETECTOR_PRECISION"] = str(precision.get("detector") or "fp32")
+        os.environ["MCPT_REID_PRECISION"] = str(precision.get("reid") or "fp32")
+        os.environ["MCPT_VLM_PRECISION"] = str(precision.get("vlm") or "fp32")
+        os.environ["MCPT_EMBEDDING_PRECISION"] = str(precision.get("embedding") or precision.get("reid") or "fp32")
+        os.environ["MCPT_STREAM_BATCH_SIZE"] = str(max(detector_batch_size * 3, 150))
+        os.environ.setdefault("MCPT_TRACKLET_STAGE_WORKERS", "1")
         if memory.get("allow_tf32", True):
             os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "1")
         if memory.get("pin_memory", True):

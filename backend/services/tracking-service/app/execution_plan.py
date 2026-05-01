@@ -64,6 +64,12 @@ def build_execution_plan(*, pipeline_spec: dict, detected_hardware: dict) -> dic
             "vlm_batch_size": int(detected_hardware.get("vlm_batch_size", 8)),
             "embedding_batch_size": int(detected_hardware.get("embedding_batch_size", 64)),
         },
+        "precision": {
+            "detector": str(detected_hardware.get("detector_precision", "fp32")),
+            "reid": str(detected_hardware.get("reid_precision", "fp32")),
+            "vlm": str(detected_hardware.get("vlm_precision", "fp32")),
+            "embedding": str(detected_hardware.get("reid_precision", "fp32")),
+        },
         "memory": {
             "pin_memory": bool(detected_hardware.get("pin_memory", True)),
             "non_blocking_transfers": bool(detected_hardware.get("non_blocking_transfers", True)),

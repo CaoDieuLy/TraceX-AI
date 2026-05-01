@@ -30,6 +30,7 @@ from .service import (
     build_tracking_video_remote,
     get_runtime_config,
     get_ingestion_background_status,
+    prepare_runtime_for_inference,
     process_video_ingestion,
     process_video_ingestion_background,
     process_video_query,
@@ -69,6 +70,7 @@ def _warmup_snapshot() -> dict[str, object]:
 def _warmup_models() -> None:
     from .model_adapters import SigLIP2ModelHub, TransReIDHub, VideoMAEHub
 
+    prepare_runtime_for_inference()
     logger.info("[warmup] Pre-loading AI models into GPU memory...")
 
     try:

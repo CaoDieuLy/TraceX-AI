@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 import gc
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import threading
@@ -25,6 +27,7 @@ from .tracklet_feature_pipeline import (
 
 LOGGER = logging.getLogger(__name__)
 gpu_lock = threading.Semaphore(1)
+_APPEARANCE_DESCRIPTOR_DIM = 40
 
 
 def _default_tracklet_worker_count() -> int:
@@ -138,6 +141,14 @@ def _bbox_iou(lhs: BoundingBox, rhs: BoundingBox) -> float:
         return 0.0
     union_area = lhs.area + rhs.area - inter_area
     return float(inter_area / union_area) if union_area > 0 else 0.0
+
+
+def _quality_or_zero(person: dict[str, object], field_name: str) -> float:
+    quality = person.get("tracklet_quality")
+    if not isinstance(quality, dict):
+        return 0.0
+    value = quality.get(field_name)
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 @dataclass
@@ -338,9 +349,12 @@ class OCMCTrackStyleTracker:
     new_track_threshold: float = 0.55
     iou_gate: float = 0.18
     appearance_gate: float = 0.22
-    corrective_buffer_seconds: float = 14.0
-    max_frame_gap: int = 3
-    inactive_finalize_seconds: float = 5.0
+    motion_proximity_gate: float = 0.30
+    center_distance_gate: float = 1.85
+    min_scale_similarity: float = 0.45
+    corrective_buffer_seconds: float = 45.0
+    max_frame_gap: int = 8
+    inactive_finalize_seconds: float = 15.0
 
     def __post_init__(self) -> None:
         self.reset()
@@ -437,7 +451,10 @@ class OCMCTrackStyleTracker:
             self.buffer[tid] = self.active.pop(tid)
             self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
             self.buffer_last_ts[tid] = self.active_last_ts.pop(tid)
-            self.buffer_appearance[tid] = self.active_appearance.pop(tid, np.zeros(16))
+            self.buffer_appearance[tid] = self.active_appearance.pop(
+                tid,
+                np.zeros(_APPEARANCE_DESCRIPTOR_DIM, dtype=np.float32),
+            )
 
         finalized = [tid for tid, ts in self.buffer_last_ts.items() if frame_ts - ts >= self.inactive_finalize_seconds]
         for tid in finalized:
@@ -480,10 +497,22 @@ class OCMCTrackStyleTracker:
         det_app = self._appearance_descriptor(det)
         for tid in candidates:
             iou = _bbox_iou(last_bbox[tid], det.bbox)
-            if iou < self.iou_gate:
+            motion_score = self._motion_proximity(last_bbox[tid], det.bbox)
+            geometry_score = max(iou, motion_score)
+            if iou < self.iou_gate and motion_score < self.motion_proximity_gate:
                 continue
-            app_sim = self._cosine_sim(appearance.get(tid, np.zeros(16)), det_app)
-            score = 0.6 * iou + 0.4 * max(app_sim, 0.0)
+            app_sim = self._cosine_sim(
+                appearance.get(tid, np.zeros(_APPEARANCE_DESCRIPTOR_DIM, dtype=np.float32)),
+                det_app,
+            )
+            # Enforce appearance consistency unless geometry is very strong.
+            if app_sim < self.appearance_gate and geometry_score < max(self.motion_proximity_gate + 0.22, 0.58):
+                continue
+            score = (
+                0.45 * geometry_score +
+                0.35 * iou +
+                0.20 * max(app_sim, 0.0)
+            )
             if score > best_score:
                 best_score = score
                 best_tid = tid
@@ -517,20 +546,41 @@ class OCMCTrackStyleTracker:
 
     @staticmethod
     def _appearance_descriptor(det: FrameDetection) -> np.ndarray:
-        """Compact 16-bin HSV histogram for fast appearance gating in the tracker."""
+        """Compact HSV descriptor for fast appearance gating in the tracker."""
         crop = det.crop_bgr
         if crop is None or crop.size == 0:
-            return np.zeros(16, dtype=np.float32)
+            return np.zeros(_APPEARANCE_DESCRIPTOR_DIM, dtype=np.float32)
         hsv = cv2.cvtColor(np.asarray(crop, dtype=np.uint8), cv2.COLOR_BGR2HSV)
-        hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten().astype(np.float32)
-        norm = float(hist.sum()) or 1.0
-        return hist / norm
+        hue_hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten().astype(np.float32)
+        sat_hist = cv2.calcHist([hsv], [1], None, [12], [0, 256]).flatten().astype(np.float32)
+        val_hist = cv2.calcHist([hsv], [2], None, [8], [0, 256]).flatten().astype(np.float32)
+        descriptor = np.concatenate([hue_hist, sat_hist, val_hist], axis=0)
+        norm = float(descriptor.sum()) or 1.0
+        return descriptor / norm
 
     @staticmethod
     def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
         na = float(np.linalg.norm(a)) or 1.0
         nb = float(np.linalg.norm(b)) or 1.0
         return float(np.dot(a, b) / (na * nb))
+
+    def _motion_proximity(self, lhs: BoundingBox, rhs: BoundingBox) -> float:
+        if lhs.area <= 0 or rhs.area <= 0:
+            return 0.0
+        lhs_center_x = (lhs.x1 + lhs.x2) * 0.5
+        lhs_center_y = (lhs.y1 + lhs.y2) * 0.5
+        rhs_center_x = (rhs.x1 + rhs.x2) * 0.5
+        rhs_center_y = (rhs.y1 + rhs.y2) * 0.5
+        center_distance = math.hypot(lhs_center_x - rhs_center_x, lhs_center_y - rhs_center_y)
+        mean_diag = math.hypot((lhs.width + rhs.width) * 0.5, (lhs.height + rhs.height) * 0.5)
+        if mean_diag <= 1e-6:
+            return 0.0
+        distance_ratio = center_distance / mean_diag
+        distance_score = max(0.0, 1.0 - distance_ratio / max(self.center_distance_gate, 1e-6))
+        scale_similarity = min(lhs.area, rhs.area) / max(lhs.area, rhs.area)
+        if scale_similarity < self.min_scale_similarity:
+            return 0.0
+        return 0.7 * distance_score + 0.3 * scale_similarity
 
     @staticmethod
     def _last_frame_idx(obs_list: list[TrackletObservation]) -> int:
@@ -694,7 +744,7 @@ class TrackletMemoryBank:
     Keep short-term identity history and resolve stable human keys across tracklets.
     """
 
-    similarity_threshold: float = 0.85
+    similarity_threshold: float = 0.60
     history_seconds: float = 600.0
     next_global_id: int = 1
     memory: list[dict[str, object]] = field(default_factory=list)
@@ -705,36 +755,31 @@ class TrackletMemoryBank:
         embedding_vector: list[float] | None,
         timestamp_second: float,
     ) -> str:
-        self.memory = [item for item in self.memory if timestamp_second - float(item["timestamp_second"]) <= self.history_seconds]
+        self.memory = [e for e in self.memory if timestamp_second - float(e["ts"]) <= self.history_seconds]
         if not embedding_vector:
-            global_id = f"global-{self.next_global_id}"
+            gid = f"global-{self.next_global_id}"
             self.next_global_id += 1
-            return global_id
+            return gid
 
-        query = np.asarray(embedding_vector, dtype=np.float32)
-        query_norm = float(np.linalg.norm(query)) or 1.0
-        best_id = None
-        best_score = -1.0
-        for item in self.memory:
-            ref = np.asarray(item["embedding_vector"], dtype=np.float32)
-            denom = (float(np.linalg.norm(ref)) or 1.0) * query_norm
-            score = float(np.dot(query, ref) / denom)
-            if score > best_score:
-                best_score = score
-                best_id = str(item["identity"])
+        q = np.asarray(embedding_vector, dtype=np.float32)
+        n = float(np.linalg.norm(q))
+        unit = q / n if n > 0 else q
 
-        if best_id is not None and best_score >= self.similarity_threshold:
-            identity = best_id
-        else:
+        identity: str | None = None
+        if self.memory:
+            # Vectorised cosine similarity: one matmul instead of a Python loop.
+            # Each stored entry pre-normalises its vector, so mat @ unit = cosine sims.
+            mat = np.stack([e["uv"] for e in self.memory])  # [M, dim]
+            scores = mat @ unit                              # [M]
+            best_idx = int(np.argmax(scores))
+            if float(scores[best_idx]) >= self.similarity_threshold:
+                identity = str(self.memory[best_idx]["id"])
+
+        if identity is None:
             identity = f"global-{self.next_global_id}"
             self.next_global_id += 1
-        self.memory.append(
-            {
-                "identity": identity,
-                "timestamp_second": timestamp_second,
-                "embedding_vector": list(embedding_vector),
-            }
-        )
+
+        self.memory.append({"id": identity, "ts": timestamp_second, "uv": unit})
         return identity
 
 
@@ -768,6 +813,239 @@ class LocalVideoIngestionPipeline:
     def __post_init__(self) -> None:
         self.sampler = VideoFrameSampler(sample_fps=self.sample_fps)
 
+    @staticmethod
+    def _person_merge_weight(person: dict[str, object]) -> float:
+        quality = person.get("tracklet_quality")
+        quality_map = quality if isinstance(quality, dict) else {}
+        frame_count = max(1.0, float(quality_map.get("frame_count") or 1.0))
+        confidence = max(0.1, float(quality_map.get("average_confidence") or 0.1))
+        score = max(0.1, float(person.get("score") or 0.1))
+        return frame_count * confidence * score
+
+    @staticmethod
+    def _merge_embedding_vectors(
+        people: list[dict[str, object]],
+        *,
+        field_name: str,
+    ) -> list[float] | None:
+        weighted_vectors: list[np.ndarray] = []
+        weights: list[float] = []
+        for person in people:
+            raw_vector = person.get(field_name)
+            if not isinstance(raw_vector, list) or not raw_vector:
+                continue
+            vector = np.asarray(raw_vector, dtype=np.float32)
+            if vector.ndim != 1:
+                continue
+            vector_norm = float(np.linalg.norm(vector))
+            if vector_norm <= 1e-8:
+                continue
+            weighted_vectors.append(vector / vector_norm)
+            weights.append(LocalVideoIngestionPipeline._person_merge_weight(person))
+        if not weighted_vectors:
+            return None
+        weight_array = np.asarray(weights, dtype=np.float32)
+        weight_array = weight_array / max(float(weight_array.sum()), 1e-8)
+        matrix = np.stack(weighted_vectors, axis=0)
+        merged = (matrix * weight_array[:, None]).sum(axis=0)
+        merged_norm = float(np.linalg.norm(merged))
+        if merged_norm > 1e-8:
+            merged = merged / merged_norm
+        return [round(float(value), 6) for value in merged.tolist()]
+
+    @staticmethod
+    def _merge_people_by_identity(
+        *,
+        video_id: str,
+        people: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for person in people:
+            human_key = str(person.get("human_key") or "").strip()
+            if not human_key:
+                continue
+            grouped.setdefault(human_key, []).append(person)
+
+        merged_people: list[dict[str, object]] = []
+        for human_key, group in grouped.items():
+            ordered_group = sorted(
+                group,
+                key=lambda item: (
+                    LocalVideoIngestionPipeline._person_merge_weight(item),
+                    float(_quality_or_zero(item, "average_confidence")),
+                    float(item.get("frame_idx") or 0),
+                ),
+                reverse=True,
+            )
+            base = deepcopy(ordered_group[0])
+            track_ids = [
+                str(item.get("track_id") or "").strip()
+                for item in ordered_group
+                if str(item.get("track_id") or "").strip()
+            ]
+            unique_track_ids = list(dict.fromkeys(track_ids))
+
+            all_frames: list[dict[str, object]] = []
+            for item in ordered_group:
+                frames = item.get("tracklet_frames")
+                if isinstance(frames, list):
+                    all_frames.extend(frame for frame in frames if isinstance(frame, dict))
+            all_frames.sort(
+                key=lambda frame: (
+                    float(frame.get("timestamp_second") or 0.0),
+                    int(frame.get("frame_idx") or 0),
+                )
+            )
+
+            all_timeline: list[dict[str, object]] = []
+            for item in ordered_group:
+                timeline = item.get("timeline")
+                if isinstance(timeline, list):
+                    all_timeline.extend(segment for segment in timeline if isinstance(segment, dict))
+            all_timeline.sort(
+                key=lambda segment: (
+                    float(segment.get("start_second") or 0.0),
+                    float(segment.get("end_second") or 0.0),
+                )
+            )
+
+            semantic_tokens: list[str] = []
+            for item in ordered_group:
+                values = item.get("semantic_attributes")
+                if isinstance(values, list):
+                    semantic_tokens.extend(str(value).strip() for value in values if str(value).strip())
+            merged_semantic_attributes = list(dict.fromkeys(semantic_tokens))
+
+            merged_visibility: dict[str, float] = {}
+            visibility_weights: dict[str, float] = {}
+            for item in ordered_group:
+                visibility = item.get("visibility_scores")
+                if not isinstance(visibility, dict):
+                    continue
+                weight = LocalVideoIngestionPipeline._person_merge_weight(item)
+                for key, value in visibility.items():
+                    if not isinstance(value, (int, float)):
+                        continue
+                    merged_visibility[key] = merged_visibility.get(key, 0.0) + float(value) * weight
+                    visibility_weights[key] = visibility_weights.get(key, 0.0) + weight
+            for key, total_weight in visibility_weights.items():
+                if total_weight > 1e-8:
+                    merged_visibility[key] = round(merged_visibility[key] / total_weight, 6)
+
+            merged_action_payload = deepcopy(base.get("action_semantic_embedding")) if isinstance(base.get("action_semantic_embedding"), dict) else {}
+            merged_segments: list[dict[str, object]] = []
+            if isinstance(merged_action_payload.get("segments"), list):
+                merged_segments.extend(segment for segment in merged_action_payload["segments"] if isinstance(segment, dict))
+            for item in ordered_group[1:]:
+                action_payload = item.get("action_semantic_embedding")
+                if not isinstance(action_payload, dict):
+                    continue
+                segments = action_payload.get("segments")
+                if isinstance(segments, list):
+                    merged_segments.extend(segment for segment in segments if isinstance(segment, dict))
+            merged_segments.sort(key=lambda segment: str(segment.get("clip_id") or ""))
+            if merged_action_payload:
+                merged_action_payload["segments"] = merged_segments
+
+            merged_quality = {
+                "accepted": True,
+                "average_confidence": round(
+                    sum(float(_quality_or_zero(item, "average_confidence")) for item in ordered_group) / max(len(ordered_group), 1),
+                    6,
+                ),
+                "average_laplacian": round(
+                    sum(float(_quality_or_zero(item, "average_laplacian")) for item in ordered_group) / max(len(ordered_group), 1),
+                    6,
+                ),
+                "frame_count": sum(int(_quality_or_zero(item, "frame_count")) for item in ordered_group),
+                "duration_seconds": round(
+                    sum(float(_quality_or_zero(item, "duration_seconds")) for item in ordered_group),
+                    6,
+                ),
+                "merged_tracklet_count": len(ordered_group),
+            }
+
+            representative_frame = all_frames[0] if all_frames else {}
+            base["candidate_id"] = human_key
+            base["video_id"] = video_id
+            base["track_id"] = unique_track_ids[0] if unique_track_ids else str(base.get("track_id") or "")
+            base["track_ids"] = unique_track_ids
+            base["human_key"] = human_key
+            base["merged_tracklet_count"] = len(ordered_group)
+            base["tracklet_frames"] = all_frames
+            base["timeline"] = all_timeline
+            base["matched_segments"] = all_timeline
+            base["semantic_attributes"] = merged_semantic_attributes
+            base["visibility_scores"] = merged_visibility or (base.get("visibility_scores") if isinstance(base.get("visibility_scores"), dict) else {})
+            base["tracklet_quality"] = merged_quality
+            base["frame_idx"] = int(representative_frame.get("frame_idx") or base.get("frame_idx") or 0)
+            if "bbox" in representative_frame and isinstance(representative_frame.get("bbox"), list):
+                base["bbox"] = representative_frame["bbox"]
+                base["representative_bbox"] = representative_frame["bbox"]
+            for field_name in ("attribute_embedding_vector", "appearance_embedding_vector", "embedding_vector"):
+                merged_vector = LocalVideoIngestionPipeline._merge_embedding_vectors(ordered_group, field_name=field_name)
+                if merged_vector is not None:
+                    base[field_name] = merged_vector
+            if merged_action_payload:
+                base["action_semantic_embedding"] = merged_action_payload
+            merged_people.append(base)
+
+        merged_people.sort(
+            key=lambda item: (
+                str(item.get("camera_id") or ""),
+                float(item.get("frame_idx") or 0),
+                str(item.get("candidate_id") or ""),
+            )
+        )
+        return merged_people
+
+    def _materialize_people(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        tracklets: tuple[LocalTracklet, ...],
+        sampled_fps: int,
+        memory_bank: TrackletMemoryBank,
+        metadata_path: Path,
+    ) -> tuple[list[dict[str, object]], int]:
+        if not tracklets:
+            return [], 0
+
+        quality_results = {
+            tracklet.track_id: self.quality_scorer.score(tracklet)
+            for tracklet in tracklets
+        }
+        people = self.metadata_assembler.build_people(
+            video_id=video_id,
+            camera_id=camera_id,
+            tracklets=tracklets,
+            quality_results=quality_results,
+            sampled_fps=sampled_fps,
+        )
+        accepted_tracklet_count = len(people)
+        if not people:
+            return [], 0
+
+        for person in people:
+            track_frames = person.get("tracklet_frames") or []
+            last_ts = float(track_frames[-1].get("timestamp_second") or 0.0) if track_frames else 0.0
+            embedding = person.get("embedding_vector")
+            if not isinstance(embedding, list):
+                embedding = None
+            global_identity = memory_bank.resolve_identity(
+                embedding_vector=embedding,
+                timestamp_second=last_ts,
+            )
+            person["human_key"] = f"{camera_id or video_id}:{global_identity}"
+
+        merged_people = self._merge_people_by_identity(video_id=video_id, people=people)
+        with metadata_path.open("a", encoding="utf-8") as fh:
+            for person in merged_people:
+                fh.write(json.dumps(person, ensure_ascii=False))
+                fh.write("\n")
+        return merged_people, accepted_tracklet_count
+
     def run(
         self,
         *,
@@ -778,34 +1056,23 @@ class LocalVideoIngestionPipeline:
         recorded_start: datetime | None,
         metadata: dict[str, object],
     ) -> LocalIngestionOutput:
-        batch_size = max(1, int(os.environ.get("MCPT_FRAME_BATCH_SIZE", "150")))
         LOGGER.info(
-            "Local ingestion started source=%s sample_fps=%s batch_size=%s",
-            source_path, self.sample_fps, batch_size,
-        )
-
-        # Batched streaming: each batch of frames is decoded, detected, then freed.
-        # Peak RAM = batch_size × frame_bytes (~900 MB) instead of all_frames × frame_bytes (~18 GB).
-        detections_by_frame: dict[int, tuple[FrameDetection, ...]] = {}
-        total_sampled = 0
-        for batch in self.sampler.stream_batched(source_path, batch_size=batch_size):
-            batch_dets = self.detector.detect(batch)
-            detections_by_frame.update(batch_dets)
-            total_sampled += len(batch)
-            # batch goes out of scope here — full-resolution frames are GC'd immediately
-        detection_count = sum(len(items) for items in detections_by_frame.values())
-        LOGGER.info(
-            "Local ingestion detect+stream completed frames=%s detections=%s",
-            total_sampled, detection_count,
+            "Local ingestion started source=%s sample_fps=%s",
+            source_path, self.sample_fps,
         )
 
         video_id = compressed_path.name
         self.tracker.reset()
         memory_bank = TrackletMemoryBank()
         people: list[dict[str, object]] = []
+        finalized_tracklets_buffer: list[LocalTracklet] = []
         sampled_frame_count = 0
         tracklet_count = 0
-        batch_size = max(8, int(os.environ.get("MCPT_STREAM_BATCH_SIZE", "150")))
+        detector_batch_size = max(1, int(os.environ.get("MCPT_DETECTOR_BATCH_SIZE", "8")))
+        batch_size = max(
+            detector_batch_size * 3,
+            int(os.environ.get("MCPT_STREAM_BATCH_SIZE", str(max(detector_batch_size * 3, 150)))),
+        )
 
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         metadata_path.write_text("", encoding="utf-8")
@@ -823,32 +1090,7 @@ class LocalVideoIngestionPipeline:
                 detections_by_frame=detections_by_frame,
             )
             if finalized_tracklets:
-                quality_results = {
-                    tracklet.track_id: self.quality_scorer.score(tracklet)
-                    for tracklet in finalized_tracklets
-                }
-                finalized_people = self.metadata_assembler.build_people(
-                    video_id=video_id,
-                    camera_id=camera_id,
-                    tracklets=finalized_tracklets,
-                    quality_results=quality_results,
-                    sampled_fps=self.sample_fps,
-                )
-                for person in finalized_people:
-                    track_frames = person.get("tracklet_frames") or []
-                    last_ts = float(track_frames[-1].get("timestamp_second") or 0.0) if track_frames else 0.0
-                    embedding = person.get("embedding_vector")
-                    if not isinstance(embedding, list):
-                        embedding = None
-                    global_identity = memory_bank.resolve_identity(
-                        embedding_vector=embedding,
-                        timestamp_second=last_ts,
-                    )
-                    person["human_key"] = f"{camera_id or video_id}:{global_identity}"
-                    people.append(person)
-                    with metadata_path.open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(person, ensure_ascii=False))
-                        fh.write("\n")
+                finalized_tracklets_buffer.extend(finalized_tracklets)
                 tracklet_count += len(finalized_tracklets)
 
             # Release raw frame memory aggressively after each batch.
@@ -860,35 +1102,32 @@ class LocalVideoIngestionPipeline:
                 "Local ingestion batch completed batch=%s sampled_frames=%s people=%s",
                 batch_idx,
                 sampled_frame_count,
-                len(people),
+                len(finalized_tracklets_buffer),
             )
 
         tail_tracklets = self.tracker.finalize_all(video_id=video_id, camera_id=camera_id)
         if tail_tracklets:
-            quality_results = {tracklet.track_id: self.quality_scorer.score(tracklet) for tracklet in tail_tracklets}
-            finalized_people = self.metadata_assembler.build_people(
-                video_id=video_id,
-                camera_id=camera_id,
-                tracklets=tail_tracklets,
-                quality_results=quality_results,
-                sampled_fps=self.sample_fps,
-            )
-            for person in finalized_people:
-                track_frames = person.get("tracklet_frames") or []
-                last_ts = float(track_frames[-1].get("timestamp_second") or 0.0) if track_frames else 0.0
-                embedding = person.get("embedding_vector")
-                if not isinstance(embedding, list):
-                    embedding = None
-                global_identity = memory_bank.resolve_identity(
-                    embedding_vector=embedding,
-                    timestamp_second=last_ts,
-                )
-                person["human_key"] = f"{camera_id or video_id}:{global_identity}"
-                people.append(person)
-                with metadata_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(person, ensure_ascii=False))
-                    fh.write("\n")
+            finalized_tracklets_buffer.extend(tail_tracklets)
             tracklet_count += len(tail_tracklets)
+
+        LOGGER.info(
+            "Local ingestion tracking phase completed sampled_frames=%s finalized_tracklets=%s",
+            sampled_frame_count,
+            len(finalized_tracklets_buffer),
+        )
+        people, accepted_tracklet_count = self._materialize_people(
+            video_id=video_id,
+            camera_id=camera_id,
+            tracklets=tuple(finalized_tracklets_buffer),
+            sampled_fps=self.sample_fps,
+            memory_bank=memory_bank,
+            metadata_path=metadata_path,
+        )
+        LOGGER.info(
+            "Local ingestion feature phase completed tracklets=%s accepted_people=%s",
+            tracklet_count,
+            len(people),
+        )
 
         processed_at = datetime.now(timezone.utc).replace(microsecond=0)
         video_payload: dict[str, object] = {
@@ -899,10 +1138,10 @@ class LocalVideoIngestionPipeline:
             "metadata_path": str(metadata_path),
             "recorded_start": recorded_start.isoformat() if recorded_start else None,
             "sample_fps": self.sample_fps,
-            "sampled_frame_count": total_sampled,
+            "sampled_frame_count": sampled_frame_count,
             "tracklet_count": tracklet_count,
-            "accepted_tracklet_count": len(people),
-            "rejected_tracklet_count": max(tracklet_count - len(people), 0),
+            "accepted_tracklet_count": accepted_tracklet_count,
+            "rejected_tracklet_count": max(tracklet_count - accepted_tracklet_count, 0),
             "processing_backend": "strict_tracking_service",
             "ingestion_metadata": metadata,
             "processed_at": processed_at.isoformat().replace("+00:00", "Z"),

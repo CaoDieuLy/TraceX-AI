@@ -70,9 +70,11 @@ STRICT_PIPELINE: dict = {
         },
     },
     "runtime_defaults": {
-        "detector_precision": "fp16",
+        "detector_precision": "auto_bf16_on_ampere",
         "association_mode": "geometry_then_reid_then_corrective_cascade",
         "search_mode": "itself_attention_guided",
+        "query_embedding_precision": "auto_bf16_on_ampere",
+        "trace_output_fps_cap": 12,
     },
     "hyperparameters": {
         "detector": {"confidence_threshold": 0.32, "person_class_only": True, "max_queries": 300},
@@ -82,7 +84,12 @@ STRICT_PIPELINE: dict = {
             "new_track_threshold": 0.55,
             "iou_gate": 0.18,
             "appearance_gate": 0.22,
-            "corrective_buffer_seconds": 14.0,
+            "motion_proximity_gate": 0.30,
+            "center_distance_gate": 1.85,
+            "min_scale_similarity": 0.45,
+            "corrective_buffer_seconds": 45.0,
+            "inactive_finalize_seconds": 15.0,
+            "max_frame_gap": 8,
             "world_gate_max_speed_mps": 2.8,
         },
         "reid": {
@@ -91,9 +98,15 @@ STRICT_PIPELINE: dict = {
             "cross_camera_match_threshold": 0.27,
         },
         "semantic_search": {
-            "fetch_multiplier": 10,
+            "fetch_multiplier": 8,
             "topk": 10,
-            "score_weights": {"embedding": 0.58, "semantic_overlap": 0.22, "visibility": 0.12, "world_position": 0.08},
+            "dedup_similarity_threshold": 0.84,
+            "score_weights": {"app": 0.42, "act": 0.20, "meta": 0.18, "sem": 0.12, "vis": 0.05, "world": 0.03},
+        },
+        "trace": {
+            "max_segments_per_candidate": 2,
+            "source_resolve_workers_cap": 8,
+            "ordered_readback": True,
         },
     },
 }
