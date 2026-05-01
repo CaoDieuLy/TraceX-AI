@@ -314,6 +314,19 @@ def ingestion_job_status(job_id: str) -> dict:
     return job
 
 
+@app.get("/api/v1/ingestion/jobs")
+def ingestion_jobs_list() -> dict:
+    """Return all jobs in the current session with summary stats."""
+    with _job_store_lock:
+        jobs = {jid: {k: v for k, v in job.items() if k != "result"} for jid, job in _job_store.items()}
+    counts = {"queued": 0, "processing": 0, "done": 0, "failed": 0}
+    for job in jobs.values():
+        s = job.get("status", "unknown")
+        if s in counts:
+            counts[s] += 1
+    return {"jobs": jobs, "counts": counts, "queue_size": _ingestion_queue.qsize()}
+
+
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)
 def candidate_search(payload: CandidateSearchRequest) -> dict:
     return search_candidates_remote(
