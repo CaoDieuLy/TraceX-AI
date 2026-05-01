@@ -322,7 +322,7 @@ def _matrix_vector_similarity_scores(
         device = torch.device("cuda")
         matrix_tensor = torch.as_tensor(matrix, device=device)
         vector_tensor = torch.as_tensor(vector, device=device)
-        return (matrix_tensor @ vector_tensor).detach().cpu().numpy()
+        return (matrix_tensor @ vector_tensor).float().detach().cpu().numpy()
     return matrix @ vector
 
 
