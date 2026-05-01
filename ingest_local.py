@@ -217,13 +217,20 @@ def submit_job(file_id: str, filename: str, camera_id: str | None) -> str:
         "camera_id": camera_id,
         "metadata": {"source_mode": "storage_ingest"},
     }
-    r = httpx.post(
-        f"{LIGHTNING_URL}/api/v1/ingestion/process",
-        json=payload,
-        headers=_headers(),
-        timeout=60,
-    )
-    r.raise_for_status()
+    for attempt in range(1, 5):  # retry up to 4x on 503 (queue full / startup)
+        r = httpx.post(
+            f"{LIGHTNING_URL}/api/v1/ingestion/process",
+            json=payload,
+            headers=_headers(),
+            timeout=60,
+        )
+        if r.status_code == 503:
+            wait = 15 * attempt
+            log.warning("[submit] 503 queue full, retry %d/4 in %ds ...", attempt, wait)
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        break
     data = r.json()
     job_id = data.get("job_id")
     if not job_id:
