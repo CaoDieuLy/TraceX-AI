@@ -333,6 +333,15 @@ def run(dry_run: bool = False, clear_db: bool = False):
         filename  = f["name"]
         file_id   = f["id"]
         camera_id = parse_camera_id(filename)
+
+        # Skip videos already processed (have candidates in DB)
+        video_id = filename
+        with SessionLocal() as session:
+            already_done = session.query(PersonCandidate).filter_by(video_id=video_id).first()
+        if already_done:
+            log.info("[%d/%d] SKIP %s — already in DB", i, len(files), filename)
+            continue
+
         log.info("[%d/%d] %s  camera=%s", i, len(files), filename, camera_id)
 
         try:
