@@ -211,22 +211,16 @@ class VideoIngestionRuntime:
         *,
         source_url: str,
         source_filename: str | None,
-    ) -> Path | str:
+    ) -> Path:
         source_url = str(source_url or "").strip()
-        # Local file path
+        # Local file path — return directly
         local_source = Path(source_url).expanduser()
         if local_source.exists():
             return local_source
-        # Non-Drive HTTP URL: return as-is for cv2 direct streaming
-        if source_url.startswith(("http://", "https://")) and "drive.google.com" not in source_url:
-            return source_url
-        # Google Drive URL: use FIFO pipe on Linux (zero disk write) or download on Windows
+        # HTTP URL: download to temp file.
+        # cv2.VideoCapture requires a seekable file; MP4 moov atoms are often at
+        # the end of the container, so named-pipe / stream-only approaches fail.
         filename = Path(source_filename or "video.mp4").name
-        import platform
-        if platform.system() == "Linux":
-            LOGGER.info("Streaming %s via FIFO pipe (no download)", filename)
-            return self._stream_url_to_pipe(source_url, filename)
-        # Windows fallback: download to temp file
         target_path = self.default_source_dir / filename
         self._download_with_retry(source_url, target_path)
         return target_path
