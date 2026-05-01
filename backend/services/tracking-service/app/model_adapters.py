@@ -255,7 +255,7 @@ class TransReIDHub:
         if not pil_crops:
             return np.zeros((0, 768), dtype=np.float32)
         tensors = [self._transform(img.convert("RGB")) for img in pil_crops]
-        batch_size = _env_batch_size("MCPT_REID_BATCH_SIZE", len(tensors))
+        batch_size = _env_batch_size("MCPT_REID_BATCH_SIZE", min(len(tensors), 256))
         outputs: list[np.ndarray] = []
         for start in range(0, len(tensors), batch_size):
             batch = self._torch.stack(tensors[start:start + batch_size]).to(self._device)
@@ -354,31 +354,44 @@ class VideoMAEHub:
         return cls.squeeze(0).float().cpu().numpy()
 
     def extract_features_batch(self, clips_frames: list[list["Image.Image"]]) -> "np.ndarray":
-        """Batch version: process N clips in one forward pass. Returns [N, 1024]."""
+        """
+        Batch version: process N clips chunked to avoid OOM. Returns [N, 1024].
+
+        Chunk size controlled by MCPT_VMAE_CHUNK_SIZE (default 8).
+        Each clip is [16, 3, 224, 224] ≈ 12 MB fp32; 8 clips ≈ 96 MB — safe on A100.
+        """
         self._ensure_loaded()
         import numpy as _np
         if not clips_frames:
             return _np.zeros((0, 1024), dtype=_np.float32)
-        batch_tensors = []
-        for pil_frames in clips_frames:
-            n = len(pil_frames)
-            if n == 0:
-                batch_tensors.append(self._torch.zeros(16, 3, 224, 224))
-                continue
-            indices = [int(i * (n - 1) / 15) for i in range(16)] if n >= 2 else [0] * 16
-            frames_16 = [pil_frames[idx].convert("RGB") for idx in indices]
-            tensors = [self._transform(f) for f in frames_16]
-            batch_tensors.append(self._torch.stack(tensors))  # [16, 3, 224, 224]
-        clip_batch = self._torch.stack(batch_tensors).to(self._device)  # [N, 16, 3, 224, 224]
-        with _gpu_inference_scope(
-            self._torch, self._device,
-            precision_env="MCPT_VLM_PRECISION",
-            default_precision="fp32",
-        ):
-            out = self._model(pixel_values=clip_batch)
-        cls = out.last_hidden_state[:, 0]  # [N, 1024]
-        cls = cls / cls.norm(dim=-1, keepdim=True)
-        return cls.float().cpu().numpy()
+
+        chunk_size = max(1, int(os.environ.get("MCPT_VMAE_CHUNK_SIZE", "8")))
+        outputs: list[_np.ndarray] = []
+
+        for chunk_start in range(0, len(clips_frames), chunk_size):
+            chunk = clips_frames[chunk_start: chunk_start + chunk_size]
+            batch_tensors = []
+            for pil_frames in chunk:
+                n = len(pil_frames)
+                if n == 0:
+                    batch_tensors.append(self._torch.zeros(16, 3, 224, 224))
+                    continue
+                indices = [int(i * (n - 1) / 15) for i in range(16)] if n >= 2 else [0] * 16
+                frames_16 = [pil_frames[idx].convert("RGB") for idx in indices]
+                tensors   = [self._transform(f) for f in frames_16]
+                batch_tensors.append(self._torch.stack(tensors))  # [16, 3, 224, 224]
+            clip_batch = self._torch.stack(batch_tensors).to(self._device)
+            with _gpu_inference_scope(
+                self._torch, self._device,
+                precision_env="MCPT_VLM_PRECISION",
+                default_precision="fp32",
+            ):
+                out = self._model(pixel_values=clip_batch)
+            cls = out.last_hidden_state[:, 0]  # [chunk, 1024]
+            cls = cls / cls.norm(dim=-1, keepdim=True)
+            outputs.append(cls.float().cpu().numpy())
+
+        return _np.concatenate(outputs, axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +450,7 @@ class SigLIP2ModelHub:
         if not pil_images:
             return np.zeros((0, 1024), dtype=np.float32)
         tensors = [self._preprocess(img) for img in pil_images]
-        batch_size = _env_batch_size("MCPT_EMBEDDING_BATCH_SIZE", len(tensors))
+        batch_size = _env_batch_size("MCPT_EMBEDDING_BATCH_SIZE", min(len(tensors), 128))
         outputs: list[np.ndarray] = []
         for start in range(0, len(tensors), batch_size):
             batch = self._torch.stack(tensors[start:start + batch_size]).to(self._device)
