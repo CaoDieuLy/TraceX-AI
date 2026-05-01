@@ -267,7 +267,7 @@ class TransReIDHub:
             ):
                 feats = self._model(batch)
             feats = feats / feats.norm(dim=-1, keepdim=True)
-            outputs.append(feats.cpu().numpy().astype(np.float32))
+            outputs.append(feats.float().cpu().numpy())
         return np.concatenate(outputs, axis=0)
 
 
@@ -351,7 +351,7 @@ class VideoMAEHub:
             out = self._model(pixel_values=clip)
         cls = out.last_hidden_state[:, 0]  # CLS token [1, 1024]
         cls = cls / cls.norm(dim=-1, keepdim=True)
-        return cls.squeeze(0).cpu().numpy().astype(np.float32)
+        return cls.squeeze(0).float().cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +422,7 @@ class SigLIP2ModelHub:
             ):
                 feats = self._model.encode_image(batch)
             feats = feats / feats.norm(dim=-1, keepdim=True)
-            outputs.append(feats.cpu().numpy().astype(np.float32))
+            outputs.append(feats.float().cpu().numpy())
         return np.concatenate(outputs, axis=0)
 
     def text_features(self, texts: list[str]) -> np.ndarray:
@@ -446,7 +446,7 @@ class SigLIP2ModelHub:
             ):
                 feats = self._model.encode_text(tokens)
             feats = feats / feats.norm(dim=-1, keepdim=True)
-            outputs.append(feats.cpu().numpy().astype(np.float32))
+            outputs.append(feats.float().cpu().numpy())
         result = np.concatenate(outputs, axis=0)
         self._text_embed_cache[key] = result
         return result
