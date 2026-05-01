@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     storage_ingest_enabled: bool = True
     storage_ingest_root: str = str(PROJECT_ROOT / "storage")
     storage_ingest_source_backend: str = "filesystem"
-    storage_ingest_batch_size: int = 50
+    storage_ingest_batch_size: int = 150
     storage_ingest_min_file_age_seconds: int = 2
     storage_ingest_processed_dir_name: str = "ProcessedStorage"
     google_drive_enabled: bool = False

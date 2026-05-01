@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
+from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from .schemas import (
@@ -28,7 +29,8 @@ from .config import settings
 from .service import (
     build_tracking_video_remote,
     get_runtime_config,
-    process_video_ingestion,
+    get_ingestion_background_status,
+    process_video_ingestion_background,
     process_video_query,
     resolve_tracking_artifact_paths,
     run_tracking,
@@ -252,6 +254,7 @@ def tracking_run(payload: TrackingRequest) -> dict:
     return run_tracking(payload.candidate_info)
 
 
+<<<<<<< HEAD
 @app.post("/api/v1/ingestion/process")
 def ingestion_process(payload: VideoIngestionRequest) -> dict:
     """Enqueue a video ingestion job. Returns immediately with job_id."""
@@ -309,6 +312,48 @@ def ingestion_job_status(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Ingestion job not found: {job_id}")
     return job
+=======
+@app.post("/api/v1/ingestion/process", response_model=VideoIngestionResponse)
+def ingestion_process(payload: VideoIngestionRequest, background_tasks: BackgroundTasks) -> dict:
+    try:
+        job_id = uuid4().hex
+        background_tasks.add_task(
+            process_video_ingestion_background,
+            job_id,
+            payload.model_dump(),
+        )
+        return {
+            "status": "accepted",
+            "message": "Video is being processed in background",
+            "job_id": job_id,
+            "source_path": payload.source_url,
+            "video": {},
+            "people": [],
+            "person_count": 0,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Video ingestion failed for source_filename=%s camera_id=%s",
+            payload.source_filename,
+            payload.camera_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": type(exc).__name__,
+                "message": str(exc),
+                "source_filename": payload.source_filename,
+                "camera_id": payload.camera_id,
+            },
+        ) from exc
+>>>>>>> f76bfdd62a7f681d71b6f236730c4f1afa3e2504
+
+
+@app.get("/api/v1/ingestion/jobs/{job_id}")
+def ingestion_job_status(job_id: str) -> dict:
+    return get_ingestion_background_status(job_id)
 
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)

@@ -58,20 +58,22 @@ class VideoIngestionRequest(BaseModel):
 
 class VideoIngestionResponse(BaseModel):
     status: str
-    processing_backend: str
+    message: str | None = None
+    job_id: str | None = None
+    processing_backend: str | None = None
     detected_hardware: dict[str, Any] | None = None
     acceleration_state: dict[str, Any] | None = None
-    source_path: str
-    compressed_path: str
-    metadata_path: str
+    source_path: str = ""
+    compressed_path: str = ""
+    metadata_path: str = ""
     drive_video_file_id: str | None = None
     drive_metadata_file_id: str | None = None
     drive_video_link: str | None = None
     drive_metadata_link: str | None = None
-    video: dict[str, Any]
+    video: dict[str, Any] = Field(default_factory=dict)
     people: list[dict[str, Any]] = Field(default_factory=list)
-    person_count: int
-    processed_at: datetime
+    person_count: int = 0
+    processed_at: datetime | None = None
 
 
 class CandidateSearchRequest(BaseModel):

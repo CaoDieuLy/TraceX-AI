@@ -4,11 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
+import gc
 import json
 import logging
 import os
 from pathlib import Path
 import threading
+from typing import Iterator
 
 import cv2
 import numpy as np
@@ -22,6 +24,7 @@ from .tracklet_feature_pipeline import (
 
 
 LOGGER = logging.getLogger(__name__)
+gpu_lock = threading.Semaphore(1)
 
 
 def _default_tracklet_worker_count() -> int:
@@ -143,18 +146,10 @@ class VideoFrameSampler:
 
     sample_fps: int = 5
 
-    def stream_batched(self, video_path: Path, batch_size: int = 150):
-        """
-        Generator: yields successive batches of SampledFrame.
-
-        Each batch holds at most `batch_size` full-resolution frames.
-        Callers must process and discard each batch before requesting the next
-        so that peak RAM stays at  batch_size × frame_bytes  instead of
-        total_frames × frame_bytes  (typically 900 MB vs 18 GB for a 10-min video).
-        """
+    def sample(self, video_path: Path) -> tuple[SampledFrame, ...]:
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
-            raise FileNotFoundError(f"Could not open source video: {video_path}")
+            raise FileNotFoundError(f"Could not open source video: {source_url}")
 
         source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         if source_fps <= 0.0:
@@ -162,8 +157,6 @@ class VideoFrameSampler:
 
         next_emit_second = 0.0
         source_frame_index = 0
-        sampled_index = 0
-        batch: list[SampledFrame] = []
 
         try:
             while True:
@@ -176,35 +169,21 @@ class VideoFrameSampler:
                     source_frame_index += 1
                     continue
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                laplacian_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                batch.append(
-                    SampledFrame(
-                        frame_index=sampled_index,
-                        timestamp_second=round(timestamp_second, 6),
-                        image=frame,
-                        laplacian_score=round(laplacian_score, 6),
-                    )
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            laplacian_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            sampled_frames.append(
+                SampledFrame(
+                    frame_index=len(sampled_frames),
+                    timestamp_second=round(timestamp_second, 6),
+                    image=frame,
+                    laplacian_score=round(laplacian_score, 6),
                 )
-                sampled_index += 1
-                next_emit_second += 1.0 / max(self.sample_fps, 1)
-                source_frame_index += 1
+            )
+            next_emit_second += 1.0 / max(self.sample_fps, 1)
+            source_frame_index += 1
 
-                if len(batch) >= batch_size:
-                    yield tuple(batch)
-                    batch.clear()
-        finally:
-            capture.release()
-
-        if batch:
-            yield tuple(batch)
-
-    def sample(self, video_path: Path) -> tuple[SampledFrame, ...]:
-        """Load all frames at once — only safe for short clips or tests."""
-        all_frames: list[SampledFrame] = []
-        for batch in self.stream_batched(video_path):
-            all_frames.extend(batch)
-        return tuple(all_frames)
+        capture.release()
+        return tuple(sampled_frames)
 
 
 class RFDETRPersonDetector:
@@ -274,7 +253,8 @@ class RFDETRPersonDetector:
             batch_frames = frames[batch_start: batch_start + batch_size]
             pils = [_PILImage.fromarray(cv2.cvtColor(f.image, cv2.COLOR_BGR2RGB)) for f in batch_frames]
             try:
-                batch_dets = self._model.predict(pils, threshold=self.confidence_threshold)
+                with gpu_lock:
+                    batch_dets = self._model.predict(pils, threshold=self.confidence_threshold)
             except Exception:
                 for f in batch_frames:
                     result[f.frame_index] = ()
@@ -336,6 +316,121 @@ class OCMCTrackStyleTracker:
     appearance_gate: float = 0.22
     corrective_buffer_seconds: float = 14.0
     max_frame_gap: int = 3
+    inactive_finalize_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.active: dict[str, list[TrackletObservation]] = {}
+        self.active_last_bbox: dict[str, BoundingBox] = {}
+        self.active_last_ts: dict[str, float] = {}
+        self.active_appearance: dict[str, np.ndarray] = {}
+        self.buffer: dict[str, list[TrackletObservation]] = {}
+        self.buffer_last_bbox: dict[str, BoundingBox] = {}
+        self.buffer_last_ts: dict[str, float] = {}
+        self.buffer_appearance: dict[str, np.ndarray] = {}
+        self.next_id = 1
+
+    def track_incremental(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        detections_by_frame: dict[int, tuple[FrameDetection, ...]],
+    ) -> tuple[LocalTracklet, ...]:
+        completed: list[LocalTracklet] = []
+        for frame_idx in sorted(detections_by_frame):
+            dets = list(detections_by_frame.get(frame_idx) or ())
+            if not dets:
+                continue
+            frame_ts = dets[0].timestamp_second
+            completed.extend(self._expire_stale(video_id=video_id, camera_id=camera_id, frame_idx=frame_idx, frame_ts=frame_ts))
+
+            high_dets = [d for d in dets if d.confidence >= self.high_confidence_threshold]
+            low_dets = [d for d in dets if self.low_confidence_threshold <= d.confidence < self.high_confidence_threshold]
+            unmatched_high: list[FrameDetection] = []
+            active_unmatched = set(self.active.keys())
+
+            for det in high_dets:
+                best_tid, best_score = self._best_match(det, self.active_last_bbox, self.active_appearance, active_unmatched)
+                if best_tid is not None and best_score >= self.iou_gate:
+                    self._update_track(self.active, self.active_last_bbox, self.active_last_ts, self.active_appearance, best_tid, det, frame_ts)
+                    active_unmatched.discard(best_tid)
+                else:
+                    unmatched_high.append(det)
+
+            for det in low_dets:
+                best_tid, best_score = self._best_match(det, self.active_last_bbox, self.active_appearance, active_unmatched)
+                if best_tid is not None and best_score >= self.iou_gate:
+                    self._update_track(self.active, self.active_last_bbox, self.active_last_ts, self.active_appearance, best_tid, det, frame_ts)
+                    active_unmatched.discard(best_tid)
+
+            buffer_unmatched = set(self.buffer.keys())
+            for det in list(unmatched_high):
+                best_tid, best_score = self._best_match(det, self.buffer_last_bbox, self.buffer_appearance, buffer_unmatched)
+                if best_tid is not None and best_score >= self.iou_gate:
+                    obs_list = self.buffer.pop(best_tid)
+                    self.buffer_last_bbox.pop(best_tid, None)
+                    self.buffer_last_ts.pop(best_tid, None)
+                    self.buffer_appearance.pop(best_tid, None)
+                    obs = self._make_observation(det, frame_ts)
+                    self.active[best_tid] = obs_list + [obs]
+                    self.active_last_bbox[best_tid] = det.bbox
+                    self.active_last_ts[best_tid] = frame_ts
+                    self.active_appearance[best_tid] = self._appearance_descriptor(det)
+                    buffer_unmatched.discard(best_tid)
+                    unmatched_high.remove(det)
+
+            for det in unmatched_high:
+                if det.confidence >= self.new_track_threshold:
+                    tid = str(self.next_id)
+                    self.next_id += 1
+                    self.active[tid] = [self._make_observation(det, frame_ts)]
+                    self.active_last_bbox[tid] = det.bbox
+                    self.active_last_ts[tid] = frame_ts
+                    self.active_appearance[tid] = self._appearance_descriptor(det)
+        return tuple(t for t in completed if t.observations)
+
+    def _expire_stale(
+        self,
+        *,
+        video_id: str,
+        camera_id: str | None,
+        frame_idx: int,
+        frame_ts: float,
+    ) -> list[LocalTracklet]:
+        completed: list[LocalTracklet] = []
+        expired = [tid for tid, ts in self.buffer_last_ts.items() if frame_ts - ts > self.corrective_buffer_seconds]
+        for tid in expired:
+            completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(self.buffer.pop(tid, []))))
+            self.buffer_last_bbox.pop(tid, None)
+            self.buffer_last_ts.pop(tid, None)
+            self.buffer_appearance.pop(tid, None)
+
+        stale = [tid for tid in self.active.keys() if frame_idx - self._last_frame_idx(self.active[tid]) > self.max_frame_gap]
+        for tid in stale:
+            self.buffer[tid] = self.active.pop(tid)
+            self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
+            self.buffer_last_ts[tid] = self.active_last_ts.pop(tid)
+            self.buffer_appearance[tid] = self.active_appearance.pop(tid, np.zeros(16))
+
+        finalized = [tid for tid, ts in self.buffer_last_ts.items() if frame_ts - ts >= self.inactive_finalize_seconds]
+        for tid in finalized:
+            completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(self.buffer.pop(tid, []))))
+            self.buffer_last_bbox.pop(tid, None)
+            self.buffer_last_ts.pop(tid, None)
+            self.buffer_appearance.pop(tid, None)
+        return completed
+
+    def finalize_all(self, *, video_id: str, camera_id: str | None) -> tuple[LocalTracklet, ...]:
+        completed: list[LocalTracklet] = []
+        for tracks in (self.active, self.buffer):
+            for tid, obs_list in tracks.items():
+                if obs_list:
+                    completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs_list)))
+        self.reset()
+        return tuple(completed)
 
     def track(
         self,
@@ -344,101 +439,9 @@ class OCMCTrackStyleTracker:
         camera_id: str | None,
         detections_by_frame: dict[int, tuple[FrameDetection, ...]],
     ) -> tuple[LocalTracklet, ...]:
-        active: dict[str, list[TrackletObservation]] = {}
-        active_last_bbox: dict[str, BoundingBox] = {}
-        active_last_ts: dict[str, float] = {}
-        active_appearance: dict[str, np.ndarray] = {}
-
-        buffer: dict[str, list[TrackletObservation]] = {}
-        buffer_last_bbox: dict[str, BoundingBox] = {}
-        buffer_last_ts: dict[str, float] = {}
-        buffer_appearance: dict[str, np.ndarray] = {}
-
-        completed: list[LocalTracklet] = []
-        next_id = 1
-
-        for frame_idx in sorted(detections_by_frame):
-            dets = list(detections_by_frame.get(frame_idx) or ())
-            if not dets:
-                continue
-            frame_ts = dets[0].timestamp_second
-
-            # Expire buffer entries beyond corrective window
-            expired = [tid for tid, ts in buffer_last_ts.items() if frame_ts - ts > self.corrective_buffer_seconds]
-            for tid in expired:
-                completed.append(LocalTracklet(
-                    video_id=video_id, camera_id=camera_id,
-                    track_id=tid, observations=tuple(buffer.pop(tid, []))
-                ))
-                buffer_last_bbox.pop(tid, None)
-                buffer_last_ts.pop(tid, None)
-                buffer_appearance.pop(tid, None)
-
-            # Move stale active → buffer
-            stale = [tid for tid, ts in active_last_ts.items() if frame_idx - self._last_frame_idx(active[tid]) > self.max_frame_gap]
-            for tid in stale:
-                buffer[tid] = active.pop(tid)
-                buffer_last_bbox[tid] = active_last_bbox.pop(tid)
-                buffer_last_ts[tid] = active_last_ts.pop(tid)
-                buffer_appearance[tid] = active_appearance.pop(tid, np.zeros(16))
-
-            high_dets = [d for d in dets if d.confidence >= self.high_confidence_threshold]
-            low_dets = [d for d in dets if self.low_confidence_threshold <= d.confidence < self.high_confidence_threshold]
-            new_dets = [d for d in dets if d.confidence >= self.new_track_threshold]
-
-            unmatched_high: list[FrameDetection] = []
-            active_unmatched = set(active.keys())
-
-            # Stage 1: high-confidence dets → active tracks
-            for det in high_dets:
-                best_tid, best_score = self._best_match(
-                    det, active_last_bbox, active_appearance, active_unmatched
-                )
-                if best_tid is not None and best_score >= self.iou_gate:
-                    self._update_track(active, active_last_bbox, active_last_ts, active_appearance, best_tid, det, frame_ts)
-                    active_unmatched.discard(best_tid)
-                else:
-                    unmatched_high.append(det)
-
-            # Stage 2: low-confidence dets → remaining active tracks
-            for det in low_dets:
-                best_tid, best_score = self._best_match(det, active_last_bbox, active_appearance, active_unmatched)
-                if best_tid is not None and best_score >= self.iou_gate:
-                    self._update_track(active, active_last_bbox, active_last_ts, active_appearance, best_tid, det, frame_ts)
-                    active_unmatched.discard(best_tid)
-
-            # Corrective stage: unmatched high-conf dets → buffer tracks
-            buffer_unmatched = set(buffer.keys())
-            for det in list(unmatched_high):
-                best_tid, best_score = self._best_match(det, buffer_last_bbox, buffer_appearance, buffer_unmatched)
-                if best_tid is not None and best_score >= self.iou_gate:
-                    obs_list = buffer.pop(best_tid)
-                    bbox_prev = buffer_last_bbox.pop(best_tid)
-                    ts_prev = buffer_last_ts.pop(best_tid, frame_ts)
-                    app_prev = buffer_appearance.pop(best_tid, np.zeros(16))
-                    obs = self._make_observation(det, frame_ts)
-                    active[best_tid] = obs_list + [obs]
-                    active_last_bbox[best_tid] = det.bbox
-                    active_last_ts[best_tid] = frame_ts
-                    active_appearance[best_tid] = self._appearance_descriptor(det)
-                    buffer_unmatched.discard(best_tid)
-                    unmatched_high.remove(det)
-
-            # New tracks from unmatched high-conf dets above new_track_threshold
-            for det in unmatched_high:
-                if det.confidence >= self.new_track_threshold:
-                    tid = str(next_id); next_id += 1
-                    active[tid] = [self._make_observation(det, frame_ts)]
-                    active_last_bbox[tid] = det.bbox
-                    active_last_ts[tid] = frame_ts
-                    active_appearance[tid] = self._appearance_descriptor(det)
-
-        # Finalize all remaining tracks
-        for container, tracks in [(active, active), (buffer, buffer)]:
-            for tid, obs_list in tracks.items():
-                if obs_list:
-                    completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs_list)))
-
+        self.reset()
+        completed = list(self.track_incremental(video_id=video_id, camera_id=camera_id, detections_by_frame=detections_by_frame))
+        completed.extend(self.finalize_all(video_id=video_id, camera_id=camera_id))
         return tuple(t for t in completed if t.observations)
 
     def _best_match(
@@ -661,6 +664,56 @@ class LocalMetadataAssembler:
         return aggregated_metadata
 
 
+@dataclass
+class TrackletMemoryBank:
+    """
+    Keep short-term identity history and resolve stable human keys across tracklets.
+    """
+
+    similarity_threshold: float = 0.85
+    history_seconds: float = 600.0
+    next_global_id: int = 1
+    memory: list[dict[str, object]] = field(default_factory=list)
+
+    def resolve_identity(
+        self,
+        *,
+        embedding_vector: list[float] | None,
+        timestamp_second: float,
+    ) -> str:
+        self.memory = [item for item in self.memory if timestamp_second - float(item["timestamp_second"]) <= self.history_seconds]
+        if not embedding_vector:
+            global_id = f"global-{self.next_global_id}"
+            self.next_global_id += 1
+            return global_id
+
+        query = np.asarray(embedding_vector, dtype=np.float32)
+        query_norm = float(np.linalg.norm(query)) or 1.0
+        best_id = None
+        best_score = -1.0
+        for item in self.memory:
+            ref = np.asarray(item["embedding_vector"], dtype=np.float32)
+            denom = (float(np.linalg.norm(ref)) or 1.0) * query_norm
+            score = float(np.dot(query, ref) / denom)
+            if score > best_score:
+                best_score = score
+                best_id = str(item["identity"])
+
+        if best_id is not None and best_score >= self.similarity_threshold:
+            identity = best_id
+        else:
+            identity = f"global-{self.next_global_id}"
+            self.next_global_id += 1
+        self.memory.append(
+            {
+                "identity": identity,
+                "timestamp_second": timestamp_second,
+                "embedding_vector": list(embedding_vector),
+            }
+        )
+        return identity
+
+
 def _default_detector():
     """RF-DETR 2x-large — strict production detector on LightningAI GPU."""
     return RFDETRPersonDetector()
@@ -694,52 +747,113 @@ class LocalVideoIngestionPipeline:
     def run(
         self,
         *,
-        source_path: Path,
+        source_path: Path | str,
         compressed_path: Path,
         metadata_path: Path,
         camera_id: str | None,
         recorded_start: datetime | None,
         metadata: dict[str, object],
     ) -> LocalIngestionOutput:
-        batch_size = max(1, int(os.environ.get("MCPT_FRAME_BATCH_SIZE", "150")))
-        LOGGER.info(
-            "Local ingestion started source=%s sample_fps=%s batch_size=%s",
-            source_path, self.sample_fps, batch_size,
-        )
+        LOGGER.info("Local ingestion sampling started source=%s sample_fps=%s", source_path, self.sample_fps)
+        sampled_frames = self.sampler.sample(source_path)
+        LOGGER.info("Local ingestion sampling completed frames=%s source=%s", len(sampled_frames), source_path)
 
-        # Batched streaming: each batch of frames is decoded, detected, then freed.
-        # Peak RAM = batch_size × frame_bytes (~900 MB) instead of all_frames × frame_bytes (~18 GB).
-        detections_by_frame: dict[int, tuple[FrameDetection, ...]] = {}
-        total_sampled = 0
-        for batch in self.sampler.stream_batched(source_path, batch_size=batch_size):
-            batch_dets = self.detector.detect(batch)
-            detections_by_frame.update(batch_dets)
-            total_sampled += len(batch)
-            # batch goes out of scope here — full-resolution frames are GC'd immediately
+        LOGGER.info("Local ingestion detection started frames=%s", len(sampled_frames))
+        detections_by_frame = self.detector.detect(sampled_frames)
         detection_count = sum(len(items) for items in detections_by_frame.values())
-        LOGGER.info(
-            "Local ingestion detect+stream completed frames=%s detections=%s",
-            total_sampled, detection_count,
-        )
+        LOGGER.info("Local ingestion detection completed detections=%s", detection_count)
 
         video_id = compressed_path.name
-        LOGGER.info("Local ingestion tracking started video_id=%s", video_id)
-        tracklets = self.tracker.track(
-            video_id=video_id,
-            camera_id=camera_id,
-            detections_by_frame=detections_by_frame,
-        )
-        LOGGER.info("Local ingestion tracking completed tracklets=%s", len(tracklets))
-        quality_results = {tracklet.track_id: self.quality_scorer.score(tracklet) for tracklet in tracklets}
-        LOGGER.info("Local ingestion metadata assembly started accepted_tracklets=%s", sum(1 for result in quality_results.values() if result.accepted))
-        people = self.metadata_assembler.build_people(
-            video_id=video_id,
-            camera_id=camera_id,
-            tracklets=tracklets,
-            quality_results=quality_results,
-            sampled_fps=self.sample_fps,
-        )
-        LOGGER.info("Local ingestion metadata assembly completed people=%s", len(people))
+        self.tracker.reset()
+        memory_bank = TrackletMemoryBank()
+        people: list[dict[str, object]] = []
+        sampled_frame_count = 0
+        tracklet_count = 0
+        batch_size = max(8, int(os.environ.get("MCPT_STREAM_BATCH_SIZE", "150")))
+
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text("", encoding="utf-8")
+        LOGGER.info("Local ingestion streaming started source=%s sample_fps=%s batch=%s", source_path, self.sample_fps, batch_size)
+
+        for batch_idx, sampled_batch in enumerate(
+            self.sampler.stream_batches(source_path, batch_size=batch_size),
+            start=1,
+        ):
+            sampled_frame_count += len(sampled_batch)
+            detections_by_frame = self.detector.detect(sampled_batch)
+            finalized_tracklets = self.tracker.track_incremental(
+                video_id=video_id,
+                camera_id=camera_id,
+                detections_by_frame=detections_by_frame,
+            )
+            if finalized_tracklets:
+                quality_results = {
+                    tracklet.track_id: self.quality_scorer.score(tracklet)
+                    for tracklet in finalized_tracklets
+                }
+                finalized_people = self.metadata_assembler.build_people(
+                    video_id=video_id,
+                    camera_id=camera_id,
+                    tracklets=finalized_tracklets,
+                    quality_results=quality_results,
+                    sampled_fps=self.sample_fps,
+                )
+                for person in finalized_people:
+                    track_frames = person.get("tracklet_frames") or []
+                    last_ts = float(track_frames[-1].get("timestamp_second") or 0.0) if track_frames else 0.0
+                    embedding = person.get("embedding_vector")
+                    if not isinstance(embedding, list):
+                        embedding = None
+                    global_identity = memory_bank.resolve_identity(
+                        embedding_vector=embedding,
+                        timestamp_second=last_ts,
+                    )
+                    person["human_key"] = f"{camera_id or video_id}:{global_identity}"
+                    people.append(person)
+                    with metadata_path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(person, ensure_ascii=False))
+                        fh.write("\n")
+                tracklet_count += len(finalized_tracklets)
+
+            # Release raw frame memory aggressively after each batch.
+            del sampled_batch
+            del detections_by_frame
+            del finalized_tracklets
+            gc.collect()
+            LOGGER.info(
+                "Local ingestion batch completed batch=%s sampled_frames=%s people=%s",
+                batch_idx,
+                sampled_frame_count,
+                len(people),
+            )
+
+        tail_tracklets = self.tracker.finalize_all(video_id=video_id, camera_id=camera_id)
+        if tail_tracklets:
+            quality_results = {tracklet.track_id: self.quality_scorer.score(tracklet) for tracklet in tail_tracklets}
+            finalized_people = self.metadata_assembler.build_people(
+                video_id=video_id,
+                camera_id=camera_id,
+                tracklets=tail_tracklets,
+                quality_results=quality_results,
+                sampled_fps=self.sample_fps,
+            )
+            for person in finalized_people:
+                track_frames = person.get("tracklet_frames") or []
+                last_ts = float(track_frames[-1].get("timestamp_second") or 0.0) if track_frames else 0.0
+                embedding = person.get("embedding_vector")
+                if not isinstance(embedding, list):
+                    embedding = None
+                global_identity = memory_bank.resolve_identity(
+                    embedding_vector=embedding,
+                    timestamp_second=last_ts,
+                )
+                person["human_key"] = f"{camera_id or video_id}:{global_identity}"
+                people.append(person)
+                with metadata_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(person, ensure_ascii=False))
+                    fh.write("\n")
+            tracklet_count += len(tail_tracklets)
+
         processed_at = datetime.now(timezone.utc).replace(microsecond=0)
         video_payload: dict[str, object] = {
             "video_id": video_id,
@@ -749,20 +863,20 @@ class LocalVideoIngestionPipeline:
             "metadata_path": str(metadata_path),
             "recorded_start": recorded_start.isoformat() if recorded_start else None,
             "sample_fps": self.sample_fps,
-            "sampled_frame_count": total_sampled,
+            "sampled_frame_count": len(sampled_frames),
             "tracklet_count": len(tracklets),
             "accepted_tracklet_count": len(people),
-            "rejected_tracklet_count": max(len(tracklets) - len(people), 0),
+            "rejected_tracklet_count": max(tracklet_count - len(people), 0),
             "processing_backend": "strict_tracking_service",
             "ingestion_metadata": metadata,
             "processed_at": processed_at.isoformat().replace("+00:00", "Z"),
         }
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        metadata_path.write_text(
+        sidecar_path = metadata_path.with_suffix(".summary.json")
+        sidecar_path.write_text(
             json.dumps({"video": video_payload, "people": people}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        LOGGER.info("Local ingestion metadata written path=%s", metadata_path)
+        LOGGER.info("Local ingestion metadata written stream=%s summary=%s", metadata_path, sidecar_path)
         return LocalIngestionOutput(
             video=video_payload,
             people=people,
