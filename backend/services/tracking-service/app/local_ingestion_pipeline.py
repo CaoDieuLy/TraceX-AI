@@ -157,7 +157,7 @@ class VideoFrameSampler:
         """
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
-            raise FileNotFoundError(f"Could not open source video: {source_url}")
+            raise FileNotFoundError(f"Could not open source video: {video_path}")
 
         source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         if source_fps <= 0.0:
