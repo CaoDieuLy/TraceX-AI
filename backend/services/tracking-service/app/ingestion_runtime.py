@@ -138,18 +138,26 @@ class VideoIngestionRuntime:
         os.mkfifo(pipe_str)
 
         def _writer() -> None:
+            # Open write end FIRST so cv2 reader never blocks forever on EOF.
+            # If download fails, fh is closed immediately → cv2 gets empty stream.
+            try:
+                fh = open(pipe_str, "wb")
+            except Exception as exc:
+                LOGGER.error("Pipe open failed for %s: %s", source_filename, exc)
+                return
             try:
                 session = _req.Session()
                 resp = self._resolve_drive_response(session, url)
                 bytes_sent = 0
-                with open(pipe_str, "wb") as fh:
-                    for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB
-                        if chunk:
-                            fh.write(chunk)
-                            bytes_sent += len(chunk)
+                for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB
+                    if chunk:
+                        fh.write(chunk)
+                        bytes_sent += len(chunk)
                 LOGGER.info("Pipe stream complete filename=%s bytes=%s", source_filename, bytes_sent)
             except Exception as exc:
                 LOGGER.error("Pipe writer failed for %s: %s", source_filename, exc)
+            finally:
+                fh.close()
                 try:
                     pipe_path.unlink(missing_ok=True)
                 except Exception:
