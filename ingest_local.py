@@ -44,6 +44,7 @@ DRIVE_FOLDER_ID  = os.environ["GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID"]
 POLL_INTERVAL    = int(os.environ.get("QUEUE_POLL_INTERVAL_SECONDS", "30"))
 MAX_WAIT_SECONDS = 1800   # 30 min per video
 
+import httpx
 from urllib.parse import quote_plus
 
 PG_HOST = os.environ.get("LOCAL_POSTGRES_HOST") or "localhost"  # override Docker service name
