@@ -21,12 +21,12 @@ type AuthResponse = {
 };
 
 function friendlyErrorByStatus(status: number): string {
-  if (status === 400) return "Thong tin dang nhap khong hop le.";
-  if (status === 401) return "Email hoac mat khau khong dung.";
-  if (status === 403) return "Tai khoan khong co quyen truy cap.";
-  if (status === 404) return "Khong tim thay dich vu dang nhap. Vui long thu lai sau.";
-  if (status >= 500) return "He thong dang ban. Vui long thu lai sau it phut.";
-  return "Dang nhap that bai. Vui long thu lai.";
+  if (status === 400) return "Thông tin đăng nhập không hợp lệ.";
+  if (status === 401) return "Email hoặc mật khẩu không đúng.";
+  if (status === 403) return "Tài khoản không có quyền truy cập.";
+  if (status === 404) return "Không tìm thấy dịch vụ đăng nhập. Vui lòng thử lại sau.";
+  if (status >= 500) return "Hệ thống đang bận. Vui lòng thử lại sau ít phút.";
+  return "Đăng nhập thất bại. Vui lòng thử lại.";
 }
 
 async function readError(response: Response): Promise<string> {
@@ -75,14 +75,14 @@ export function LoginPage() {
     const identifier = email.trim();
     const nextFieldErrors: { email?: string; password?: string } = {};
     if (!identifier) {
-      nextFieldErrors.email = "Email khong duoc de trong.";
+      nextFieldErrors.email = "Email không được để trống.";
     }
     if (!password.trim()) {
-      nextFieldErrors.password = "Password khong duoc de trong.";
+      nextFieldErrors.password = "Password không được để trống.";
     }
     if (Object.keys(nextFieldErrors).length > 0) {
       setFieldErrors(nextFieldErrors);
-      showToast("Vui long kiem tra lai thong tin dang nhap.", "error");
+      showToast("Vui lòng kiểm tra lại thông tin đăng nhập.", "error");
       return;
     }
 
@@ -91,15 +91,15 @@ export function LoginPage() {
       const response = await loginWithFallback(identifier, password);
       if (!response.ok) {
         const errorMessage = await readError(response);
-        setFieldErrors({ email: "Thong tin dang nhap khong hop le.", password: "Thong tin dang nhap khong hop le." });
+        setFieldErrors({ email: "Thông tin đăng nhập không hợp lệ.", password: "Thông tin đăng nhập không hợp lệ." });
         throw new Error(errorMessage);
       }
       const payload = await parseJsonOrThrow<AuthResponse>(response);
       saveSession(payload.access_token, payload.user);
-      showToast(`Dang nhap thanh cong. Xin chao ${payload.user.email}!`, "success");
+      showToast(`Đăng nhập thành công. Xin chào ${payload.user.email}!`, "success");
       router.push("/home");
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Dang nhap that bai.";
+      const message = err instanceof Error ? err.message : "Đăng nhập thất bại.";
       showToast(mapBackendErrorMessage(message), "error");
     } finally {
       setIsLoading(false);
@@ -133,34 +133,34 @@ export function LoginPage() {
           </div>
 
           <h1 className="mt-7 max-w-3xl text-4xl font-bold leading-tight md:text-6xl">
-            <span className="text-[#F6FAFF] drop-shadow-[0_2px_6px_rgba(10,30,60,0.42)]">Giam sat thong minh,</span>
+            <span className="text-[#F6FAFF] drop-shadow-[0_2px_6px_rgba(10,30,60,0.42)]">Hệ Thống Tìm Người,</span>
             <br />
-            <span className="text-[#5DD4FF] drop-shadow-[0_2px_10px_rgba(34,200,255,0.45)]">an toàn vượt trội.</span>
+            <span className="text-[#5DD4FF] drop-shadow-[0_2px_10px_rgba(34,200,255,0.45)]">Nhận Diện Hành Động.</span>
           </h1>
           <p className="mt-4 max-w-2xl text-base leading-relaxed text-[#E8F2FF] md:text-lg">
-            Công cụ tìm kiếm thông minh dựa trên AI để giúp bạn nhanh chóng tìm kiếm và truy vết đối tượng trong hệ thống CCTV.
+            Nền tảng tìm kiếm và theo dõi đối tượng trên hệ thống nhiều camera. Ứng dụng trí tuệ nhân tạo để phân tích ngoại hình, nhận diện hành động và khoanh vùng vị trí một cách tự động.
           </p>
 
           <div className="mt-8 max-w-xl space-y-3">
             <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
               <img src="/images/auth/img_icon_Ai.png" alt="AI" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
-                <p className="text-xl font-semibold text-[#F5FAFF]">AI Thong minh</p>
-                <p className="text-sm text-[#DFECFF]">Tìm kiếm và truy vết đối tượng từ mô tả hoặc ảnh minh họa trên toàn bộ lịch sử lưu trữ của hệ thống camera.</p>
+                <p className="text-xl font-semibold text-[#F5FAFF]">Tìm Kiếm Đa Chiều</p>
+                <p className="text-sm text-[#DFECFF]">Tìm nhanh mục tiêu bằng cách kết hợp đặc điểm ngoại hình, trang phục và hành động.</p>
               </div>
             </div>
             <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
               <img src="/images/auth/img_icon_cam.png" alt="Camera" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
-                <p className="text-xl font-semibold text-[#F5FAFF]">Giam sat toan dien</p>
-                <p className="text-sm text-[#DFECFF]">fjdkdfkf</p>
+                <p className="text-xl font-semibold text-[#F5FAFF]">Vẽ Lại Lộ Trình</p>
+                <p className="text-sm text-[#DFECFF]">Hệ thống tự động liên kết hình ảnh thu được từ các camera khác nhau để dựng lại chính xác hành trình di chuyển của đối tượng.</p>
               </div>
             </div>
             <div className="flex items-start gap-3 rounded-2xl border border-white/18 bg-white/8 p-3.5 transition-[border-color,background-color,box-shadow] duration-300 hover:border-white/35 hover:bg-white/14 hover:shadow-[0_12px_30px_rgba(2,8,23,0.28)]">
               <img src="/images/auth/img_icon_se2.png" alt="Search" className="mt-0.5 h-12 w-12 rounded-lg object-contain" />
               <div>
-                <p className="text-xl font-semibold text-[#F5FAFF]">Tim nguoi theo mo ta</p>
-                <p className="text-sm text-[#DFECFF]">Tim kiem nguoi qua dac diem hoac trang phuc.</p>
+                <p className="text-xl font-semibold text-[#F5FAFF]">Tốc Độ Vượt Trội</p>
+                <p className="text-sm text-[#DFECFF]">Trải nghiệm tra cứu mượt mà nhờ hệ thống được tối ưu đặc biệt, trả về kết quả tìm kiếm ngay nhanh chóng.</p>
               </div>
             </div>
           </div>
@@ -168,15 +168,15 @@ export function LoginPage() {
           <div className="mt-7 flex flex-wrap items-center gap-6 text-sm text-[#EAF3FF]">
             <div className="flex items-center gap-2">
               <img src="/images/auth/img_icon_se2.png" alt="safe" className="h-5 w-5 rounded-md border border-white/70 bg-white/90 p-0.5 shadow-sm object-contain" />
-              <span>Bao mat cao</span>
+              <span>Kết quả chuẩn xác</span>
             </div>
             <div className="flex items-center gap-2">
               <img src="/images/auth/img_icon_cloud.png" alt="cloud" className="h-5 w-5 rounded-md border border-white/70 bg-white/90 p-0.5 shadow-sm object-contain" />
-              <span>Luu tru linh hoat</span>
+              <span>Phân tích thông minh</span>
             </div>
             <div className="flex items-center gap-2">
               <img src="/images/auth/img_icon_thunder.png" alt="realtime" className="h-5 w-5 rounded-md border border-white/70 bg-white/90 p-0.5 shadow-sm object-contain" />
-              <span>Xu ly real-time</span>
+              <span>Phản hồi dưới 5 giây</span>
             </div>
           </div>
         </section>
@@ -185,7 +185,7 @@ export function LoginPage() {
           <div className="w-full max-w-md rounded-3xl border border-white/52 bg-gradient-to-br from-white/84 via-white/72 to-sky-100/62 p-8 shadow-[0_18px_50px_rgba(15,23,42,0.28)] backdrop-blur-2xl transition-[background-color,border-color,box-shadow] duration-300 hover:border-white/70 hover:shadow-[0_28px_70px_rgba(15,23,42,0.36)] md:p-9">
             <div className="mb-8 text-center">
               <h2 className="text-2xl font-semibold text-ink">Log in</h2>
-              <p className="mt-2 text-sm text-ink-secondary">Su dung email va password de tiep tuc</p>
+              <p className="mt-2 text-sm text-ink-secondary">Sử dụng email và password để tiếp tục</p>
             </div>
 
             <form className="flex flex-col gap-4" onSubmit={handleLogin}>
@@ -241,12 +241,12 @@ export function LoginPage() {
                 disabled={isLoading}
                 className="mt-2 rounded-2xl bg-blue-600 py-3 text-sm font-semibold text-white shadow-card transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isLoading ? "Dang xu ly..." : "Log in"}
+                {isLoading ? "Đang xử lý..." : "Log in"}
               </button>
 
               <button
                 type="button"
-                onClick={() => showToast("Tinh nang forgot password se duoc bo sung sau.", "info")}
+                onClick={() => showToast("Tính năng forgot password sẽ được bổ sung sau.", "info")}
                 className="rounded-2xl border border-surface-muted bg-white py-3 text-sm font-semibold text-ink-secondary transition hover:bg-surface hover:text-ink"
               >
                 Forgot password
