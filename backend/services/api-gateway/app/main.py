@@ -524,19 +524,26 @@ async def ai_process(payload: dict[str, Any], request: Request) -> dict:
 
 @app.get("/api/v1/candidates")
 async def candidates(
+    request: Request,
     query: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     try:
-        return await _get_json(f"{settings.metadata_service_url}/api/v1/candidates", params={"query": query, "limit": limit})
+        headers = _forward_auth_headers(request)
+        return await _get_json(
+            f"{settings.metadata_service_url}/api/v1/candidates",
+            params={"query": query, "limit": limit},
+            headers=headers,
+        )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Metadata service error: {exc}") from exc
 
 
 @app.get("/api/v1/candidates/{candidate_id}")
-async def candidate_detail(candidate_id: str) -> dict:
+async def candidate_detail(candidate_id: str, request: Request) -> dict:
     try:
-        return await _get_json(f"{settings.metadata_service_url}/api/v1/candidates/{candidate_id}")
+        headers = _forward_auth_headers(request)
+        return await _get_json(f"{settings.metadata_service_url}/api/v1/candidates/{candidate_id}", headers=headers)
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
     except httpx.HTTPError as exc:
@@ -544,9 +551,19 @@ async def candidate_detail(candidate_id: str) -> dict:
 
 
 @app.get("/api/v1/candidates/{candidate_id}/preview")
-async def candidate_preview(candidate_id: str) -> Response:
+async def candidate_preview(
+    candidate_id: str,
+    request: Request,
+    access_token: str | None = Query(default=None, description="Optional token fallback for image tags"),
+) -> Response:
     try:
-        content, content_type = await _get_bytes(f"{settings.metadata_service_url}/api/v1/candidates/{candidate_id}/preview")
+        headers = _forward_auth_headers(request)
+        if not headers and access_token:
+            headers = {"Authorization": f"Bearer {access_token}"}
+        content, content_type = await _get_bytes(
+            f"{settings.metadata_service_url}/api/v1/candidates/{candidate_id}/preview",
+            headers=headers or None,
+        )
         return Response(content=content, media_type=content_type)
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc

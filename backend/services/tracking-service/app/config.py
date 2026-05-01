@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # PostgreSQL
     postgres_host: str = "localhost"
     postgres_port: int = 5432
-    postgres_database: str = "video_tracking"
+    postgres_database: str = "mcpt_video_tracking_full"
     postgres_user: str = "mcpt_user"
     postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
 
