@@ -8,7 +8,6 @@ from functools import partial
 import gc
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import threading
@@ -27,7 +26,6 @@ from .tracklet_feature_pipeline import (
 
 LOGGER = logging.getLogger(__name__)
 gpu_lock = threading.Semaphore(1)
-_APPEARANCE_DESCRIPTOR_DIM = 40
 
 
 def _default_tracklet_worker_count() -> int:
@@ -328,47 +326,75 @@ class RFDETRPersonDetector:
 
 
 @dataclass
-class OCMCTrackStyleTracker:
+class BoTSORTTracker:
     """
-    OCMCTrack-style corrective cascade tracker — strict production tracker.
+    BoT-SORT style tracker — TransReID 768-dim embeddings replace HSV appearance.
 
-    Two-stage matching cascade:
-    Stage 1 – high-confidence detections (conf ≥ high_confidence_threshold) matched
-              to active tracks via IoU gate + appearance gate.
-    Stage 2 – low-confidence detections (conf ≥ low_confidence_threshold) matched
-              to remaining unmatched tracks with relaxed criteria.
-    Corrective buffer – recently-lost tracks (< corrective_buffer_seconds) kept alive
-                        for re-association to resolve temporal occlusions.
-    New tracks – created only when detection confidence ≥ new_track_threshold.
+    Per-batch matching cascade:
+      Stage 1  – IoU matching (high-conf dets → active tracks)
+      Stage 1b – IoU matching (low-conf dets → remaining active tracks)
+      Stage 2  – ReID cosine matching (unmatched high-conf → unmatched active tracks)
+      Stage 3  – ReID buffer re-entry (still-unmatched → buffer tracks)
+      New tracks for truly unmatched high-conf dets above new_track_threshold.
 
-    Hyperparameters match strict_pipeline.py exactly.
+    All TransReID forward passes for a frame-batch are batched into a single GPU call.
     """
 
-    high_confidence_threshold: float = 0.45
-    low_confidence_threshold: float = 0.12
-    new_track_threshold: float = 0.55
-    iou_gate: float = 0.18
-    appearance_gate: float = 0.22
-    motion_proximity_gate: float = 0.30
-    center_distance_gate: float = 1.85
-    min_scale_similarity: float = 0.45
-    corrective_buffer_seconds: float = 45.0
-    max_frame_gap: int = 8
-    inactive_finalize_seconds: float = 15.0
+    high_confidence_threshold: float = 0.40
+    low_confidence_threshold: float = 0.10
+    new_track_threshold: float = 0.45
+    iou_threshold: float = 0.15
+    reid_active_threshold: float = 0.40
+    reid_buffer_threshold: float = 0.35
+    reid_ema_alpha: float = 0.90
+    max_frame_gap: int = 20
+    inactive_finalize_seconds: float = 90.0
+    corrective_buffer_seconds: float = 180.0
 
     def __post_init__(self) -> None:
+        self._reid_hub: object | None = None
         self.reset()
 
     def reset(self) -> None:
         self.active: dict[str, list[TrackletObservation]] = {}
         self.active_last_bbox: dict[str, BoundingBox] = {}
         self.active_last_ts: dict[str, float] = {}
-        self.active_appearance: dict[str, np.ndarray] = {}
+        self.active_reid: dict[str, np.ndarray] = {}
         self.buffer: dict[str, list[TrackletObservation]] = {}
         self.buffer_last_bbox: dict[str, BoundingBox] = {}
         self.buffer_last_ts: dict[str, float] = {}
-        self.buffer_appearance: dict[str, np.ndarray] = {}
+        self.buffer_reid: dict[str, np.ndarray] = {}
         self.next_id = 1
+
+    def _get_reid_hub(self):
+        if self._reid_hub is None:
+            from .model_adapters import TransReIDHub
+            self._reid_hub = TransReIDHub()
+        return self._reid_hub
+
+    def _extract_embeddings(self, dets: list[FrameDetection]) -> list[np.ndarray]:
+        """Batch-extract 768-dim TransReID embeddings for a list of detections (one GPU call)."""
+        zeros = np.zeros(768, dtype=np.float32)
+        result: list[np.ndarray] = [zeros.copy() for _ in dets]
+        if not dets:
+            return result
+        pil_crops: list = []
+        valid_indices: list[int] = []
+        for i, det in enumerate(dets):
+            if det.crop_bgr is not None and det.crop_bgr.size > 0:
+                from PIL import Image as _PIL
+                rgb = cv2.cvtColor(np.asarray(det.crop_bgr, dtype=np.uint8), cv2.COLOR_BGR2RGB)
+                pil_crops.append(_PIL.fromarray(rgb))
+                valid_indices.append(i)
+        if not pil_crops:
+            return result
+        try:
+            embeddings = self._get_reid_hub().embed_crops(pil_crops)
+            for k, idx in enumerate(valid_indices):
+                result[idx] = embeddings[k]
+        except Exception as exc:
+            LOGGER.warning("BoTSORT: ReID extraction failed, using zero embeddings: %s", exc)
+        return result
 
     def track_incremental(
         self,
@@ -378,56 +404,97 @@ class OCMCTrackStyleTracker:
         detections_by_frame: dict[int, tuple[FrameDetection, ...]],
     ) -> tuple[LocalTracklet, ...]:
         completed: list[LocalTracklet] = []
-        for frame_idx in sorted(detections_by_frame):
-            dets = list(detections_by_frame.get(frame_idx) or ())
+
+        # Batch-extract ReID for ALL detections in this frame-batch with one GPU call
+        frame_keys = sorted(detections_by_frame)
+        all_dets_flat: list[FrameDetection] = []
+        frame_slices: dict[int, tuple[int, int]] = {}
+        for fk in frame_keys:
+            dets = list(detections_by_frame.get(fk) or ())
+            s = len(all_dets_flat)
+            all_dets_flat.extend(dets)
+            frame_slices[fk] = (s, len(all_dets_flat))
+
+        all_embs = self._extract_embeddings(all_dets_flat)
+
+        for fk in frame_keys:
+            dets = list(detections_by_frame.get(fk) or ())
             if not dets:
                 continue
+            s, e = frame_slices[fk]
+            det_embs = all_embs[s:e]
             frame_ts = dets[0].timestamp_second
-            completed.extend(self._expire_stale(video_id=video_id, camera_id=camera_id, frame_idx=frame_idx, frame_ts=frame_ts))
 
-            high_dets = [d for d in dets if d.confidence >= self.high_confidence_threshold]
-            low_dets = [d for d in dets if self.low_confidence_threshold <= d.confidence < self.high_confidence_threshold]
-            unmatched_high: list[FrameDetection] = []
+            completed.extend(self._expire_stale(
+                video_id=video_id, camera_id=camera_id, frame_idx=fk, frame_ts=frame_ts,
+            ))
+
+            high = [(i, dets[i]) for i in range(len(dets)) if dets[i].confidence >= self.high_confidence_threshold]
+            low  = [(i, dets[i]) for i in range(len(dets)) if self.low_confidence_threshold <= dets[i].confidence < self.high_confidence_threshold]
             active_unmatched = set(self.active.keys())
 
-            for det in high_dets:
-                best_tid, best_score = self._best_match(det, self.active_last_bbox, self.active_appearance, active_unmatched)
-                if best_tid is not None and best_score >= self.iou_gate:
-                    self._update_track(self.active, self.active_last_bbox, self.active_last_ts, self.active_appearance, best_tid, det, frame_ts)
+            # Stage 1: IoU — high-conf dets → active tracks
+            unmatched_high: list[int] = []
+            for i, det in high:
+                best_tid, best_iou = self._best_iou(det.bbox, self.active_last_bbox, active_unmatched)
+                if best_tid is not None and best_iou >= self.iou_threshold:
+                    self._update_active(best_tid, det, det_embs[i], frame_ts)
                     active_unmatched.discard(best_tid)
                 else:
-                    unmatched_high.append(det)
+                    unmatched_high.append(i)
 
-            for det in low_dets:
-                best_tid, best_score = self._best_match(det, self.active_last_bbox, self.active_appearance, active_unmatched)
-                if best_tid is not None and best_score >= self.iou_gate:
-                    self._update_track(self.active, self.active_last_bbox, self.active_last_ts, self.active_appearance, best_tid, det, frame_ts)
+            # Stage 1b: IoU — low-conf dets → remaining active tracks
+            for i, det in low:
+                best_tid, best_iou = self._best_iou(det.bbox, self.active_last_bbox, active_unmatched)
+                if best_tid is not None and best_iou >= self.iou_threshold:
+                    self._update_active(best_tid, det, det_embs[i], frame_ts)
                     active_unmatched.discard(best_tid)
 
+            # Stage 2: ReID — unmatched high-conf dets → unmatched active tracks
+            still_unmatched: list[int] = []
+            for i in unmatched_high:
+                if not active_unmatched:
+                    still_unmatched.append(i)
+                    continue
+                best_tid, best_sim = self._best_reid(det_embs[i], self.active_reid, active_unmatched)
+                if best_tid is not None and best_sim >= self.reid_active_threshold:
+                    self._update_active(best_tid, dets[i], det_embs[i], frame_ts)
+                    active_unmatched.discard(best_tid)
+                else:
+                    still_unmatched.append(i)
+
+            # Stage 3: ReID — still-unmatched → buffer tracks (re-entry)
             buffer_unmatched = set(self.buffer.keys())
-            for det in list(unmatched_high):
-                best_tid, best_score = self._best_match(det, self.buffer_last_bbox, self.buffer_appearance, buffer_unmatched)
-                if best_tid is not None and best_score >= self.iou_gate:
+            new_track_indices: list[int] = []
+            for i in still_unmatched:
+                best_tid, best_sim = self._best_reid(det_embs[i], self.buffer_reid, buffer_unmatched)
+                if best_tid is not None and best_sim >= self.reid_buffer_threshold:
                     obs_list = self.buffer.pop(best_tid)
+                    obs_list.append(self._make_obs(dets[i], frame_ts))
+                    self.active[best_tid] = obs_list
+                    self.active_last_bbox[best_tid] = dets[i].bbox
+                    self.active_last_ts[best_tid] = frame_ts
+                    old_emb = self.buffer_reid.pop(best_tid, None)
+                    self.active_reid[best_tid] = (
+                        self.reid_ema_alpha * old_emb + (1.0 - self.reid_ema_alpha) * det_embs[i]
+                        if old_emb is not None else det_embs[i].copy()
+                    )
                     self.buffer_last_bbox.pop(best_tid, None)
                     self.buffer_last_ts.pop(best_tid, None)
-                    self.buffer_appearance.pop(best_tid, None)
-                    obs = self._make_observation(det, frame_ts)
-                    self.active[best_tid] = obs_list + [obs]
-                    self.active_last_bbox[best_tid] = det.bbox
-                    self.active_last_ts[best_tid] = frame_ts
-                    self.active_appearance[best_tid] = self._appearance_descriptor(det)
                     buffer_unmatched.discard(best_tid)
-                    unmatched_high.remove(det)
+                else:
+                    new_track_indices.append(i)
 
-            for det in unmatched_high:
-                if det.confidence >= self.new_track_threshold:
+            # Create new tracks for truly unmatched high-conf dets
+            for i in new_track_indices:
+                if dets[i].confidence >= self.new_track_threshold:
                     tid = str(self.next_id)
                     self.next_id += 1
-                    self.active[tid] = [self._make_observation(det, frame_ts)]
-                    self.active_last_bbox[tid] = det.bbox
+                    self.active[tid] = [self._make_obs(dets[i], frame_ts)]
+                    self.active_last_bbox[tid] = dets[i].bbox
                     self.active_last_ts[tid] = frame_ts
-                    self.active_appearance[tid] = self._appearance_descriptor(det)
+                    self.active_reid[tid] = det_embs[i].copy()
+
         return tuple(t for t in completed if t.observations)
 
     def _expire_stale(
@@ -439,29 +506,31 @@ class OCMCTrackStyleTracker:
         frame_ts: float,
     ) -> list[LocalTracklet]:
         completed: list[LocalTracklet] = []
-        expired = [tid for tid, ts in self.buffer_last_ts.items() if frame_ts - ts > self.corrective_buffer_seconds]
+
+        # Remove buffer tracks past the absolute corrective window
+        expired = [tid for tid, ts in list(self.buffer_last_ts.items()) if frame_ts - ts > self.corrective_buffer_seconds]
         for tid in expired:
             completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(self.buffer.pop(tid, []))))
             self.buffer_last_bbox.pop(tid, None)
             self.buffer_last_ts.pop(tid, None)
-            self.buffer_appearance.pop(tid, None)
+            self.buffer_reid.pop(tid, None)
 
-        stale = [tid for tid in self.active.keys() if frame_idx - self._last_frame_idx(self.active[tid]) > self.max_frame_gap]
+        # Move stale active tracks (no detection for > max_frame_gap frames) to buffer
+        stale = [tid for tid in list(self.active.keys()) if frame_idx - self._last_frame_idx(self.active[tid]) > self.max_frame_gap]
         for tid in stale:
             self.buffer[tid] = self.active.pop(tid)
             self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
             self.buffer_last_ts[tid] = self.active_last_ts.pop(tid)
-            self.buffer_appearance[tid] = self.active_appearance.pop(
-                tid,
-                np.zeros(_APPEARANCE_DESCRIPTOR_DIM, dtype=np.float32),
-            )
+            self.buffer_reid[tid] = self.active_reid.pop(tid)
 
-        finalized = [tid for tid, ts in self.buffer_last_ts.items() if frame_ts - ts >= self.inactive_finalize_seconds]
+        # Finalize buffer tracks inactive long enough to be considered complete
+        finalized = [tid for tid, ts in list(self.buffer_last_ts.items()) if frame_ts - ts >= self.inactive_finalize_seconds]
         for tid in finalized:
             completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(self.buffer.pop(tid, []))))
             self.buffer_last_bbox.pop(tid, None)
             self.buffer_last_ts.pop(tid, None)
-            self.buffer_appearance.pop(tid, None)
+            self.buffer_reid.pop(tid, None)
+
         return completed
 
     def finalize_all(self, *, video_id: str, camera_id: str | None) -> tuple[LocalTracklet, ...]:
@@ -485,56 +554,53 @@ class OCMCTrackStyleTracker:
         completed.extend(self.finalize_all(video_id=video_id, camera_id=camera_id))
         return tuple(t for t in completed if t.observations)
 
-    def _best_match(
-        self,
-        det: FrameDetection,
+    def _update_active(self, tid: str, det: FrameDetection, emb: np.ndarray, frame_ts: float) -> None:
+        self.active[tid].append(self._make_obs(det, frame_ts))
+        self.active_last_bbox[tid] = det.bbox
+        self.active_last_ts[tid] = frame_ts
+        old = self.active_reid.get(tid)
+        self.active_reid[tid] = (
+            self.reid_ema_alpha * old + (1.0 - self.reid_ema_alpha) * emb
+            if old is not None else emb.copy()
+        )
+
+    @staticmethod
+    def _best_iou(
+        det_bbox: BoundingBox,
         last_bbox: dict[str, BoundingBox],
-        appearance: dict[str, np.ndarray],
         candidates: set[str],
     ) -> tuple[str | None, float]:
         best_tid = None
         best_score = -1.0
-        det_app = self._appearance_descriptor(det)
         for tid in candidates:
-            iou = _bbox_iou(last_bbox[tid], det.bbox)
-            motion_score = self._motion_proximity(last_bbox[tid], det.bbox)
-            geometry_score = max(iou, motion_score)
-            if iou < self.iou_gate and motion_score < self.motion_proximity_gate:
-                continue
-            app_sim = self._cosine_sim(
-                appearance.get(tid, np.zeros(_APPEARANCE_DESCRIPTOR_DIM, dtype=np.float32)),
-                det_app,
-            )
-            # Enforce appearance consistency unless geometry is very strong.
-            if app_sim < self.appearance_gate and geometry_score < max(self.motion_proximity_gate + 0.22, 0.58):
-                continue
-            score = (
-                0.45 * geometry_score +
-                0.35 * iou +
-                0.20 * max(app_sim, 0.0)
-            )
-            if score > best_score:
-                best_score = score
+            iou = _bbox_iou(last_bbox[tid], det_bbox)
+            if iou > best_score:
+                best_score = iou
                 best_tid = tid
         return best_tid, best_score
 
     @staticmethod
-    def _update_track(
-        active: dict,
-        bbox_map: dict,
-        ts_map: dict,
-        app_map: dict,
-        tid: str,
-        det: FrameDetection,
-        frame_ts: float,
-    ) -> None:
-        active[tid].append(OCMCTrackStyleTracker._make_observation(det, frame_ts))
-        bbox_map[tid] = det.bbox
-        ts_map[tid] = frame_ts
-        app_map[tid] = OCMCTrackStyleTracker._appearance_descriptor(det)
+    def _best_reid(
+        query: np.ndarray,
+        reid_map: dict[str, np.ndarray],
+        candidates: set[str],
+    ) -> tuple[str | None, float]:
+        best_tid = None
+        best_sim = -1.0
+        q_norm = float(np.linalg.norm(query)) or 1.0
+        for tid in candidates:
+            emb = reid_map.get(tid)
+            if emb is None:
+                continue
+            g_norm = float(np.linalg.norm(emb)) or 1.0
+            sim = float(np.dot(query, emb) / (q_norm * g_norm))
+            if sim > best_sim:
+                best_sim = sim
+                best_tid = tid
+        return best_tid, best_sim
 
     @staticmethod
-    def _make_observation(det: FrameDetection, frame_ts: float) -> TrackletObservation:
+    def _make_obs(det: FrameDetection, frame_ts: float) -> TrackletObservation:
         return TrackletObservation(
             frame_index=det.frame_index,
             timestamp_second=frame_ts,
@@ -543,44 +609,6 @@ class OCMCTrackStyleTracker:
             laplacian_score=det.laplacian_score,
             crop_bgr=det.crop_bgr,
         )
-
-    @staticmethod
-    def _appearance_descriptor(det: FrameDetection) -> np.ndarray:
-        """Compact HSV descriptor for fast appearance gating in the tracker."""
-        crop = det.crop_bgr
-        if crop is None or crop.size == 0:
-            return np.zeros(_APPEARANCE_DESCRIPTOR_DIM, dtype=np.float32)
-        hsv = cv2.cvtColor(np.asarray(crop, dtype=np.uint8), cv2.COLOR_BGR2HSV)
-        hue_hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten().astype(np.float32)
-        sat_hist = cv2.calcHist([hsv], [1], None, [12], [0, 256]).flatten().astype(np.float32)
-        val_hist = cv2.calcHist([hsv], [2], None, [8], [0, 256]).flatten().astype(np.float32)
-        descriptor = np.concatenate([hue_hist, sat_hist, val_hist], axis=0)
-        norm = float(descriptor.sum()) or 1.0
-        return descriptor / norm
-
-    @staticmethod
-    def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-        na = float(np.linalg.norm(a)) or 1.0
-        nb = float(np.linalg.norm(b)) or 1.0
-        return float(np.dot(a, b) / (na * nb))
-
-    def _motion_proximity(self, lhs: BoundingBox, rhs: BoundingBox) -> float:
-        if lhs.area <= 0 or rhs.area <= 0:
-            return 0.0
-        lhs_center_x = (lhs.x1 + lhs.x2) * 0.5
-        lhs_center_y = (lhs.y1 + lhs.y2) * 0.5
-        rhs_center_x = (rhs.x1 + rhs.x2) * 0.5
-        rhs_center_y = (rhs.y1 + rhs.y2) * 0.5
-        center_distance = math.hypot(lhs_center_x - rhs_center_x, lhs_center_y - rhs_center_y)
-        mean_diag = math.hypot((lhs.width + rhs.width) * 0.5, (lhs.height + rhs.height) * 0.5)
-        if mean_diag <= 1e-6:
-            return 0.0
-        distance_ratio = center_distance / mean_diag
-        distance_score = max(0.0, 1.0 - distance_ratio / max(self.center_distance_gate, 1e-6))
-        scale_similarity = min(lhs.area, rhs.area) / max(lhs.area, rhs.area)
-        if scale_similarity < self.min_scale_similarity:
-            return 0.0
-        return 0.7 * distance_score + 0.3 * scale_similarity
 
     @staticmethod
     def _last_frame_idx(obs_list: list[TrackletObservation]) -> int:
@@ -850,7 +878,7 @@ class LocalMetadataAssembler:
         for idx, (pil_crops, weights) in enumerate(zip(per_t_pil_crops, per_t_weights)):
             s, e = reid_slices[idx]
             if not pil_crops:
-                empty = tuple(0.0 for _ in range(512))
+                empty = tuple(0.0 for _ in range(768))
                 all_app_embed.append(AppearanceEmbeddingResult(
                     embedding_model="transreid-vit-base-msmt17-kpr",
                     embedding_vector=empty, tracklet_vectors=(empty,),
@@ -1222,7 +1250,7 @@ class LocalMetadataAssembler:
         for idx, (pil_crops, weights) in enumerate(zip(per_t_pil_crops, per_t_weights)):
             s, e = reid_slices[idx]
             if not pil_crops:
-                empty = tuple(0.0 for _ in range(512))
+                empty = tuple(0.0 for _ in range(768))
                 all_appearance_embed.append(AppearanceEmbeddingResult(
                     embedding_model="transreid-vit-base-msmt17-kpr",
                     embedding_vector=empty, tracklet_vectors=(empty,),
@@ -1446,10 +1474,10 @@ class TrackletMemoryBank:
     person are compared against the same stable reference, not a drifted chain.
     """
 
-    similarity_threshold: float = 0.75  # cosine; 0.60 caused chain-merging of different people
+    similarity_threshold: float = 0.92  # cosine; high to avoid merging similar-looking people
     history_seconds: float = 600.0
     next_global_id: int = 1
-    # id → {"ts": float, "uv": np.ndarray | None, "count": int}
+    # id → {"ts": float, "uv": np.ndarray | None}  (fixed embedding, no drift)
     _centroids: dict[str, dict[str, object]] = field(default_factory=dict)
 
     # Keep dataclass field name stable for any external pickle/copy consumers.
@@ -1472,7 +1500,7 @@ class TrackletMemoryBank:
         if not embedding_vector:
             gid = f"global-{self.next_global_id}"
             self.next_global_id += 1
-            self._centroids[gid] = {"ts": timestamp_second, "uv": None, "count": 1}
+            self._centroids[gid] = {"ts": timestamp_second, "uv": None}
             return gid
 
         q = np.asarray(embedding_vector, dtype=np.float32)
@@ -1494,16 +1522,13 @@ class TrackletMemoryBank:
             identity = f"global-{self.next_global_id}"
             self.next_global_id += 1
 
-        # Update centroid: running weighted average keeps the reference stable.
-        if identity in self._centroids and self._centroids[identity]["uv"] is not None:
-            count = int(self._centroids[identity]["count"])
-            old_uv = self._centroids[identity]["uv"]
-            new_uv = (old_uv * count + unit) / (count + 1)
-            norm = float(np.linalg.norm(new_uv))
-            new_uv = new_uv / norm if norm > 1e-8 else new_uv
-            self._centroids[identity] = {"ts": timestamp_second, "uv": new_uv, "count": count + 1}
+        # Freeze embedding on first assignment — no running average to prevent centroid drift.
+        # Drift turns a specific person's embedding into a generic "person in this scene" vector
+        # that matches everyone, collapsing many different people into one identity.
+        if identity not in self._centroids or self._centroids[identity]["uv"] is None:
+            self._centroids[identity] = {"ts": timestamp_second, "uv": unit}
         else:
-            self._centroids[identity] = {"ts": timestamp_second, "uv": unit, "count": 1}
+            self._centroids[identity]["ts"] = timestamp_second  # refresh timestamp only
 
         return identity
 
@@ -1514,8 +1539,8 @@ def _default_detector():
 
 
 def _default_tracker():
-    """OCMCTrack-style corrective cascade — always available (pure Python + numpy)."""
-    return OCMCTrackStyleTracker()
+    """BoT-SORT style tracker using TransReID Re-ID embeddings."""
+    return BoTSORTTracker()
 
 
 @dataclass
@@ -1531,7 +1556,7 @@ class LocalVideoIngestionPipeline:
     sample_fps: int = 4
     sampler: VideoFrameSampler = field(default_factory=VideoFrameSampler)
     detector: RFDETRPersonDetector = field(default_factory=_default_detector)
-    tracker: OCMCTrackStyleTracker = field(default_factory=_default_tracker)
+    tracker: BoTSORTTracker = field(default_factory=_default_tracker)
     quality_scorer: TrackletQualityScorer = field(default_factory=TrackletQualityScorer)
     metadata_assembler: LocalMetadataAssembler = field(default_factory=LocalMetadataAssembler)
 
