@@ -398,18 +398,18 @@ class HeadBoxTracker:
     low_thresh: float = 0.10
     new_track_threshold: float = 0.45
     max_match_cost: float = 0.80
-    max_buffer_match_cost: float = 0.85
-    max_head_center_distance: float = 85.0
-    max_predicted_distance: float = 120.0
+    max_buffer_match_cost: float = 0.90      # relaxed: long-gap re-entry cost runs higher
+    max_head_center_distance: float = 120.0  # wider gate: 4fps = 0.25s between frames
+    max_predicted_distance: float = 180.0    # wider gate: velocity estimate less reliable at 4fps
     iou_weight: float = 0.20
     distance_weight: float = 0.55
     velocity_weight: float = 0.25
-    track_buffer: int = 12
-    max_buffer_frames: int = 30
+    track_buffer: int = 20                   # 5s @ 4fps (was 3s)
+    max_buffer_frames: int = 300             # 75s @ 4fps (was 7.5s) — people behind shelves
     head_ratio: float = 0.35
     shrink_x: float = 0.08
-    min_track_frames: int = 8
-    min_track_density: float = 0.35
+    min_track_frames: int = 9               # 9 frames × 0.25s = 2.25s ≥ minimum_duration_seconds
+    min_track_density: float = 0.10         # re-entry obs span includes buffer gap → density deflated
 
     def __post_init__(self) -> None:
         self.reset()
@@ -597,7 +597,11 @@ class HeadBoxTracker:
         frame_delta = max(observations[-1].frame_index - observations[-2].frame_index, 1)
         vx = (last_center[0] - previous_center[0]) / float(frame_delta)
         vy = (last_center[1] - previous_center[1]) / float(frame_delta)
-        predict_steps = max(target_frame_idx - observations[-1].frame_index, 0)
+        raw_steps = max(target_frame_idx - observations[-1].frame_index, 0)
+        # Cap extrapolation: beyond track_buffer * 2 frames the velocity estimate is stale.
+        # Without this cap, buffer tracks with any velocity produce predicted positions
+        # hundreds of pixels off-screen, making Stage-3 re-entry matching impossible.
+        predict_steps = min(raw_steps, self.track_buffer * 2)
         predicted_center = (
             last_center[0] + vx * predict_steps,
             last_center[1] + vy * predict_steps,
@@ -668,8 +672,8 @@ class TrackletQualityScorer:
     """Filter blurry or weak tracklets before feature extraction."""
 
     minimum_confidence_score: float = 0.3
-    minimum_frame_count: int = 8
-    minimum_frame_density: float = 0.25
+    minimum_frame_count: int = 9            # aligned with HeadBoxTracker.min_track_frames
+    minimum_frame_density: float = 0.10    # re-entry tracklets span buffer gap → density deflated
     minimum_average_laplacian: float = 12.0
     minimum_duration_seconds: float = 2.0
 
@@ -1160,6 +1164,114 @@ class LocalVideoIngestionPipeline:
         return [round(float(value), 6) for value in merged.tolist()]
 
     @staticmethod
+    def _resolve_within_camera_identities(
+        people: list[dict[str, object]],
+        *,
+        reid_threshold: float = 0.82,
+        max_overlap_ratio: float = 0.15,
+    ) -> list[dict[str, object]]:
+        """
+        Merge same-camera tracklet fragments belonging to the same person by
+        comparing TransReID appearance embeddings.
+
+        Two fragments are merged when BOTH conditions hold:
+          1. Temporal non-overlap: the shorter tracklet overlaps the other by
+             at most max_overlap_ratio — enforces "one person, one location at
+             a time" and prevents merging concurrently visible different people.
+          2. Embedding similarity: cosine similarity of appearance_embedding_vector
+             >= reid_threshold — enforces visual identity.
+
+        Union-Find gives transitive closure so fragments A≈B and B≈C → same
+        identity even if A and C are never directly compared.
+        All members of a merged group adopt the human_key of the highest-quality
+        fragment so that the existing _merge_people_by_identity machinery handles
+        the data-level merge.
+        """
+        if len(people) < 2:
+            return people
+
+        n = len(people)
+        parent = list(range(n))
+
+        def _find(x: int) -> int:
+            root = x
+            while parent[root] != root:
+                root = parent[root]
+            while parent[x] != root:
+                parent[x], x = root, parent[x]
+            return root
+
+        def _union(x: int, y: int) -> None:
+            px, py = _find(x), _find(y)
+            if px != py:
+                parent[py] = px
+
+        # Group indices by camera so comparisons stay within-camera only
+        by_camera: dict[str, list[int]] = {}
+        for i, person in enumerate(people):
+            cam = str(person.get("camera_id") or "")
+            by_camera.setdefault(cam, []).append(i)
+
+        for cam_indices in by_camera.values():
+            if len(cam_indices) < 2:
+                continue
+
+            # Pre-compute L2-normalised TransReID vectors and frame ranges
+            vectors: dict[int, np.ndarray] = {}
+            starts:  dict[int, int] = {}
+            ends:    dict[int, int] = {}
+            for i in cam_indices:
+                p   = people[i]
+                raw = p.get("appearance_embedding_vector")
+                if not isinstance(raw, list) or not raw:
+                    continue
+                v   = np.asarray(raw, dtype=np.float32)
+                nrm = float(np.linalg.norm(v))
+                if nrm < 1e-8:
+                    continue
+                vectors[i] = v / nrm
+                starts[i]  = int(p.get("tracklet_frame_start_idx") or 0)
+                ends[i]    = int(p.get("tracklet_frame_end_idx")   or 0)
+
+            eligible = [i for i in cam_indices if i in vectors]
+            for a_pos in range(len(eligible)):
+                ia = eligible[a_pos]
+                for b_pos in range(a_pos + 1, len(eligible)):
+                    ib = eligible[b_pos]
+                    if _find(ia) == _find(ib):
+                        continue
+
+                    # Guard 1: temporal — same person cannot be in two places at once
+                    s_a, e_a = starts[ia], ends[ia]
+                    s_b, e_b = starts[ib], ends[ib]
+                    overlap  = max(0, min(e_a, e_b) - max(s_a, s_b))
+                    shorter  = min(max(e_a - s_a, 1), max(e_b - s_b, 1))
+                    if overlap / shorter > max_overlap_ratio:
+                        continue
+
+                    # Guard 2: embedding similarity
+                    if float(np.dot(vectors[ia], vectors[ib])) >= reid_threshold:
+                        _union(ia, ib)
+
+        # Elect a shared human_key per merged group (best quality fragment wins)
+        groups: dict[int, list[int]] = {}
+        for i in range(n):
+            groups.setdefault(_find(i), []).append(i)
+
+        result = [dict(p) for p in people]
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            best = max(members, key=lambda i: LocalVideoIngestionPipeline._person_merge_weight(people[i]))
+            shared_key = str(people[best].get("human_key") or "")
+            if not shared_key:
+                continue
+            for i in members:
+                result[i]["human_key"] = shared_key
+
+        return result
+
+    @staticmethod
     def _merge_people_by_identity(
         *,
         video_id: str,
@@ -1393,9 +1505,13 @@ class LocalVideoIngestionPipeline:
         if not people:
             return [], 0
 
-        # human_key is already set in _build_people_batch as f"{camera_id or video_id}:{track_id}"
-        # No global merge here — the tracker is a candidate generator only.
-        # Cross-camera identity resolution happens downstream via search/trace.
+        # Phase 1: within-camera identity resolution.
+        # Fragments of the same person (non-overlapping in time, high TransReID
+        # similarity) are assigned the same human_key so _merge_people_by_identity
+        # folds them into a single candidate record with merged embeddings.
+        people = self._resolve_within_camera_identities(people)
+
+        # Phase 2: data-level merge by human_key.
         merged_people = self._merge_people_by_identity(video_id=video_id, people=people)
         metadata_people = self._metadata_people_with_full_tracklet_frames(
             people=merged_people,
@@ -1423,6 +1539,21 @@ class LocalVideoIngestionPipeline:
         )
 
         video_id = compressed_path.name
+
+        # Probe video duration so the tracker buffer never expires mid-video.
+        # All buffer tracks survive until finalize_all() at the end of the stream,
+        # eliminating hard-break fragmentation from buffer timeout.
+        try:
+            _cap = cv2.VideoCapture(str(source_path))
+            _src_fps = float(_cap.get(cv2.CAP_PROP_FPS) or self.sample_fps)
+            _total_src = int(_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            _cap.release()
+            _duration_s = _total_src / max(_src_fps, 1.0) if _total_src > 0 else 0.0
+            _total_sampled = int(math.ceil(_duration_s * self.sample_fps)) + 1 if _duration_s > 0 else self.tracker.max_buffer_frames
+        except Exception:
+            _total_sampled = self.tracker.max_buffer_frames
+        self.tracker.max_buffer_frames = max(self.tracker.max_buffer_frames, _total_sampled)
+
         self.tracker.reset()
         people: list[dict[str, object]] = []
         finalized_tracklets_buffer: list[LocalTracklet] = []
