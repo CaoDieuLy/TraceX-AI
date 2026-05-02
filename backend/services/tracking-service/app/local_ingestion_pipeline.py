@@ -344,12 +344,12 @@ class BoTSORTTracker:
     low_confidence_threshold: float = 0.10
     new_track_threshold: float = 0.45
     iou_threshold: float = 0.15
-    reid_active_threshold: float = 0.40
-    reid_buffer_threshold: float = 0.35
+    reid_active_threshold: float = 0.75   # high threshold: top-down cameras make ReID less reliable
+    reid_buffer_threshold: float = 0.70   # high threshold: prefer IoU for spatial continuity
     reid_ema_alpha: float = 0.90
-    max_frame_gap: int = 20
-    inactive_finalize_seconds: float = 90.0
-    corrective_buffer_seconds: float = 180.0
+    max_frame_gap: int = 10
+    inactive_finalize_seconds: float = 30.0
+    corrective_buffer_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         self._reid_hub: object | None = None
