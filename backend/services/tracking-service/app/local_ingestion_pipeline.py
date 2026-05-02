@@ -326,75 +326,55 @@ class RFDETRPersonDetector:
 
 
 @dataclass
-class BoTSORTTracker:
+class HeadBoxTracker:
     """
-    BoT-SORT style tracker — TransReID 768-dim embeddings replace HSV appearance.
+    ByteTrack-style tracker — pure head-box IoU, no GPU during tracking.
 
-    Per-batch matching cascade:
-      Stage 1  – IoU matching (high-conf dets → active tracks)
-      Stage 1b – IoU matching (low-conf dets → remaining active tracks)
-      Stage 2  – ReID cosine matching (unmatched high-conf → unmatched active tracks)
-      Stage 3  – ReID buffer re-entry (still-unmatched → buffer tracks)
-      New tracks for truly unmatched high-conf dets above new_track_threshold.
+    Designed for top-down / bird's-eye surveillance cameras where person-ReID
+    models trained on eye-level data (MSMT17) are unreliable. TransReID is still
+    used downstream in _build_people_batch for appearance_embedding_vector.
 
-    All TransReID forward passes for a frame-batch are batched into a single GPU call.
+    Head box: top head_ratio of bbox height, x-shrunk by shrink_x on each side.
+
+    Matching cascade per frame:
+      Stage 1 — high-conf dets  → active tracks  (head-box IoU ≥ match_thresh)
+      Stage 2 — low-conf dets   → active tracks  (head-box IoU ≥ match_thresh)
+      Stage 3 — high-conf unmatched → buffer tracks (head-box IoU ≥ buffer_match_thresh)
+      New track for remaining unmatched high-conf dets above new_track_threshold.
     """
 
-    high_confidence_threshold: float = 0.40
-    low_confidence_threshold: float = 0.10
+    track_thresh: float = 0.40
+    low_thresh: float = 0.10
     new_track_threshold: float = 0.45
-    iou_threshold: float = 0.15
-    reid_active_threshold: float = 0.75   # high threshold: top-down cameras make ReID less reliable
-    reid_buffer_threshold: float = 0.70   # high threshold: prefer IoU for spatial continuity
-    reid_ema_alpha: float = 0.90
-    max_frame_gap: int = 10
-    inactive_finalize_seconds: float = 30.0
-    corrective_buffer_seconds: float = 60.0
+    match_thresh: float = 0.70
+    buffer_match_thresh: float = 0.50
+    track_buffer: int = 20
+    max_buffer_frames: int = 60
+    head_ratio: float = 0.30
+    shrink_x: float = 0.12
 
     def __post_init__(self) -> None:
-        self._reid_hub: object | None = None
         self.reset()
 
     def reset(self) -> None:
         self.active: dict[str, list[TrackletObservation]] = {}
         self.active_last_bbox: dict[str, BoundingBox] = {}
-        self.active_last_ts: dict[str, float] = {}
-        self.active_reid: dict[str, np.ndarray] = {}
+        self.active_last_frame: dict[str, int] = {}
         self.buffer: dict[str, list[TrackletObservation]] = {}
         self.buffer_last_bbox: dict[str, BoundingBox] = {}
-        self.buffer_last_ts: dict[str, float] = {}
-        self.buffer_reid: dict[str, np.ndarray] = {}
+        self.buffer_entry_frame: dict[str, int] = {}
         self.next_id = 1
 
-    def _get_reid_hub(self):
-        if self._reid_hub is None:
-            from .model_adapters import TransReIDHub
-            self._reid_hub = TransReIDHub()
-        return self._reid_hub
-
-    def _extract_embeddings(self, dets: list[FrameDetection]) -> list[np.ndarray]:
-        """Batch-extract 768-dim TransReID embeddings for a list of detections (one GPU call)."""
-        zeros = np.zeros(768, dtype=np.float32)
-        result: list[np.ndarray] = [zeros.copy() for _ in dets]
-        if not dets:
-            return result
-        pil_crops: list = []
-        valid_indices: list[int] = []
-        for i, det in enumerate(dets):
-            if det.crop_bgr is not None and det.crop_bgr.size > 0:
-                from PIL import Image as _PIL
-                rgb = cv2.cvtColor(np.asarray(det.crop_bgr, dtype=np.uint8), cv2.COLOR_BGR2RGB)
-                pil_crops.append(_PIL.fromarray(rgb))
-                valid_indices.append(i)
-        if not pil_crops:
-            return result
-        try:
-            embeddings = self._get_reid_hub().embed_crops(pil_crops)
-            for k, idx in enumerate(valid_indices):
-                result[idx] = embeddings[k]
-        except Exception as exc:
-            LOGGER.warning("BoTSORT: ReID extraction failed, using zero embeddings: %s", exc)
-        return result
+    def _head_bbox(self, bbox: BoundingBox) -> BoundingBox:
+        x1, y1, x2, y2 = float(bbox.x1), float(bbox.y1), float(bbox.x2), float(bbox.y2)
+        w = x2 - x1
+        h = y2 - y1
+        return BoundingBox(
+            x1=int(x1 + w * self.shrink_x),
+            y1=int(y1),
+            x2=int(x2 - w * self.shrink_x),
+            y2=int(y1 + h * self.head_ratio),
+        )
 
     def track_incremental(
         self,
@@ -405,140 +385,94 @@ class BoTSORTTracker:
     ) -> tuple[LocalTracklet, ...]:
         completed: list[LocalTracklet] = []
 
-        # Batch-extract ReID for ALL detections in this frame-batch with one GPU call
-        frame_keys = sorted(detections_by_frame)
-        all_dets_flat: list[FrameDetection] = []
-        frame_slices: dict[int, tuple[int, int]] = {}
-        for fk in frame_keys:
+        for fk in sorted(detections_by_frame):
             dets = list(detections_by_frame.get(fk) or ())
-            s = len(all_dets_flat)
-            all_dets_flat.extend(dets)
-            frame_slices[fk] = (s, len(all_dets_flat))
+            frame_ts = dets[0].timestamp_second if dets else 0.0
 
-        all_embs = self._extract_embeddings(all_dets_flat)
+            # Move stale active tracks to buffer (no match for > track_buffer frames)
+            stale = [tid for tid in self.active if fk - self.active_last_frame.get(tid, fk) > self.track_buffer]
+            for tid in stale:
+                self.buffer[tid] = self.active.pop(tid)
+                self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
+                self.buffer_entry_frame[tid] = fk
+                self.active_last_frame.pop(tid, None)
 
-        for fk in frame_keys:
-            dets = list(detections_by_frame.get(fk) or ())
+            # Finalize buffer tracks that have been waiting too long
+            expired = [tid for tid in self.buffer if fk - self.buffer_entry_frame.get(tid, fk) > self.max_buffer_frames]
+            for tid in expired:
+                obs = self.buffer.pop(tid, [])
+                if obs:
+                    completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs)))
+                self.buffer_last_bbox.pop(tid, None)
+                self.buffer_entry_frame.pop(tid, None)
+
             if not dets:
                 continue
-            s, e = frame_slices[fk]
-            det_embs = all_embs[s:e]
-            frame_ts = dets[0].timestamp_second
 
-            completed.extend(self._expire_stale(
-                video_id=video_id, camera_id=camera_id, frame_idx=fk, frame_ts=frame_ts,
-            ))
-
-            high = [(i, dets[i]) for i in range(len(dets)) if dets[i].confidence >= self.high_confidence_threshold]
-            low  = [(i, dets[i]) for i in range(len(dets)) if self.low_confidence_threshold <= dets[i].confidence < self.high_confidence_threshold]
+            high = [d for d in dets if d.confidence >= self.track_thresh]
+            low  = [d for d in dets if self.low_thresh <= d.confidence < self.track_thresh]
             active_unmatched = set(self.active.keys())
+            active_heads = {tid: self._head_bbox(self.active_last_bbox[tid]) for tid in active_unmatched}
 
-            # Stage 1: IoU — high-conf dets → active tracks
-            unmatched_high: list[int] = []
-            for i, det in high:
-                best_tid, best_iou = self._best_iou(det.bbox, self.active_last_bbox, active_unmatched)
-                if best_tid is not None and best_iou >= self.iou_threshold:
-                    self._update_active(best_tid, det, det_embs[i], frame_ts)
+            # Stage 1: high-conf → active tracks
+            unmatched_high: list[FrameDetection] = []
+            for det in high:
+                best_tid, best_iou = self._best_iou(self._head_bbox(det.bbox), active_heads, active_unmatched)
+                if best_tid is not None and best_iou >= self.match_thresh:
+                    self._update_active(best_tid, det, fk, frame_ts)
                     active_unmatched.discard(best_tid)
+                    active_heads.pop(best_tid, None)
                 else:
-                    unmatched_high.append(i)
+                    unmatched_high.append(det)
 
-            # Stage 1b: IoU — low-conf dets → remaining active tracks
-            for i, det in low:
-                best_tid, best_iou = self._best_iou(det.bbox, self.active_last_bbox, active_unmatched)
-                if best_tid is not None and best_iou >= self.iou_threshold:
-                    self._update_active(best_tid, det, det_embs[i], frame_ts)
-                    active_unmatched.discard(best_tid)
-
-            # Stage 2: ReID — unmatched high-conf dets → unmatched active tracks
-            still_unmatched: list[int] = []
-            for i in unmatched_high:
+            # Stage 2: low-conf → remaining active tracks
+            for det in low:
                 if not active_unmatched:
-                    still_unmatched.append(i)
-                    continue
-                best_tid, best_sim = self._best_reid(det_embs[i], self.active_reid, active_unmatched)
-                if best_tid is not None and best_sim >= self.reid_active_threshold:
-                    self._update_active(best_tid, dets[i], det_embs[i], frame_ts)
+                    break
+                best_tid, best_iou = self._best_iou(self._head_bbox(det.bbox), active_heads, active_unmatched)
+                if best_tid is not None and best_iou >= self.match_thresh:
+                    self._update_active(best_tid, det, fk, frame_ts)
                     active_unmatched.discard(best_tid)
-                else:
-                    still_unmatched.append(i)
+                    active_heads.pop(best_tid, None)
 
-            # Stage 3: ReID — still-unmatched → buffer tracks (re-entry)
-            buffer_unmatched = set(self.buffer.keys())
-            new_track_indices: list[int] = []
-            for i in still_unmatched:
-                best_tid, best_sim = self._best_reid(det_embs[i], self.buffer_reid, buffer_unmatched)
-                if best_tid is not None and best_sim >= self.reid_buffer_threshold:
-                    obs_list = self.buffer.pop(best_tid)
-                    obs_list.append(self._make_obs(dets[i], frame_ts))
-                    self.active[best_tid] = obs_list
-                    self.active_last_bbox[best_tid] = dets[i].bbox
-                    self.active_last_ts[best_tid] = frame_ts
-                    old_emb = self.buffer_reid.pop(best_tid, None)
-                    self.active_reid[best_tid] = (
-                        self.reid_ema_alpha * old_emb + (1.0 - self.reid_ema_alpha) * det_embs[i]
-                        if old_emb is not None else det_embs[i].copy()
-                    )
+            # Stage 3: high-conf unmatched → buffer tracks (re-entry)
+            buffer_candidates = set(self.buffer.keys())
+            buffer_heads = {tid: self._head_bbox(self.buffer_last_bbox[tid]) for tid in buffer_candidates}
+            new_dets: list[FrameDetection] = []
+            for det in unmatched_high:
+                if not buffer_candidates:
+                    new_dets.append(det)
+                    continue
+                best_tid, best_iou = self._best_iou(self._head_bbox(det.bbox), buffer_heads, buffer_candidates)
+                if best_tid is not None and best_iou >= self.buffer_match_thresh:
+                    obs = self.buffer.pop(best_tid)
+                    obs.append(self._make_obs(det, frame_ts))
+                    self.active[best_tid] = obs
+                    self.active_last_bbox[best_tid] = det.bbox
+                    self.active_last_frame[best_tid] = fk
                     self.buffer_last_bbox.pop(best_tid, None)
-                    self.buffer_last_ts.pop(best_tid, None)
-                    buffer_unmatched.discard(best_tid)
+                    self.buffer_entry_frame.pop(best_tid, None)
+                    buffer_candidates.discard(best_tid)
+                    buffer_heads.pop(best_tid, None)
                 else:
-                    new_track_indices.append(i)
+                    new_dets.append(det)
 
-            # Create new tracks for truly unmatched high-conf dets
-            for i in new_track_indices:
-                if dets[i].confidence >= self.new_track_threshold:
+            # New tracks for truly unmatched high-conf dets
+            for det in new_dets:
+                if det.confidence >= self.new_track_threshold:
                     tid = str(self.next_id)
                     self.next_id += 1
-                    self.active[tid] = [self._make_obs(dets[i], frame_ts)]
-                    self.active_last_bbox[tid] = dets[i].bbox
-                    self.active_last_ts[tid] = frame_ts
-                    self.active_reid[tid] = det_embs[i].copy()
+                    self.active[tid] = [self._make_obs(det, frame_ts)]
+                    self.active_last_bbox[tid] = det.bbox
+                    self.active_last_frame[tid] = fk
 
         return tuple(t for t in completed if t.observations)
 
-    def _expire_stale(
-        self,
-        *,
-        video_id: str,
-        camera_id: str | None,
-        frame_idx: int,
-        frame_ts: float,
-    ) -> list[LocalTracklet]:
-        completed: list[LocalTracklet] = []
-
-        # Remove buffer tracks past the absolute corrective window
-        expired = [tid for tid, ts in list(self.buffer_last_ts.items()) if frame_ts - ts > self.corrective_buffer_seconds]
-        for tid in expired:
-            completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(self.buffer.pop(tid, []))))
-            self.buffer_last_bbox.pop(tid, None)
-            self.buffer_last_ts.pop(tid, None)
-            self.buffer_reid.pop(tid, None)
-
-        # Move stale active tracks (no detection for > max_frame_gap frames) to buffer
-        stale = [tid for tid in list(self.active.keys()) if frame_idx - self._last_frame_idx(self.active[tid]) > self.max_frame_gap]
-        for tid in stale:
-            self.buffer[tid] = self.active.pop(tid)
-            self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
-            self.buffer_last_ts[tid] = self.active_last_ts.pop(tid)
-            self.buffer_reid[tid] = self.active_reid.pop(tid)
-
-        # Finalize buffer tracks inactive long enough to be considered complete
-        finalized = [tid for tid, ts in list(self.buffer_last_ts.items()) if frame_ts - ts >= self.inactive_finalize_seconds]
-        for tid in finalized:
-            completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(self.buffer.pop(tid, []))))
-            self.buffer_last_bbox.pop(tid, None)
-            self.buffer_last_ts.pop(tid, None)
-            self.buffer_reid.pop(tid, None)
-
-        return completed
-
     def finalize_all(self, *, video_id: str, camera_id: str | None) -> tuple[LocalTracklet, ...]:
         completed: list[LocalTracklet] = []
-        for tracks in (self.active, self.buffer):
-            for tid, obs_list in tracks.items():
-                if obs_list:
-                    completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs_list)))
+        for tid, obs_list in list(self.active.items()) + list(self.buffer.items()):
+            if obs_list:
+                completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs_list)))
         self.reset()
         return tuple(completed)
 
@@ -554,50 +488,28 @@ class BoTSORTTracker:
         completed.extend(self.finalize_all(video_id=video_id, camera_id=camera_id))
         return tuple(t for t in completed if t.observations)
 
-    def _update_active(self, tid: str, det: FrameDetection, emb: np.ndarray, frame_ts: float) -> None:
+    def _update_active(self, tid: str, det: FrameDetection, frame_idx: int, frame_ts: float) -> None:
         self.active[tid].append(self._make_obs(det, frame_ts))
         self.active_last_bbox[tid] = det.bbox
-        self.active_last_ts[tid] = frame_ts
-        old = self.active_reid.get(tid)
-        self.active_reid[tid] = (
-            self.reid_ema_alpha * old + (1.0 - self.reid_ema_alpha) * emb
-            if old is not None else emb.copy()
-        )
+        self.active_last_frame[tid] = frame_idx
 
     @staticmethod
     def _best_iou(
         det_bbox: BoundingBox,
-        last_bbox: dict[str, BoundingBox],
+        head_bboxes: dict[str, BoundingBox],
         candidates: set[str],
     ) -> tuple[str | None, float]:
         best_tid = None
         best_score = -1.0
         for tid in candidates:
-            iou = _bbox_iou(last_bbox[tid], det_bbox)
+            hb = head_bboxes.get(tid)
+            if hb is None:
+                continue
+            iou = _bbox_iou(hb, det_bbox)
             if iou > best_score:
                 best_score = iou
                 best_tid = tid
         return best_tid, best_score
-
-    @staticmethod
-    def _best_reid(
-        query: np.ndarray,
-        reid_map: dict[str, np.ndarray],
-        candidates: set[str],
-    ) -> tuple[str | None, float]:
-        best_tid = None
-        best_sim = -1.0
-        q_norm = float(np.linalg.norm(query)) or 1.0
-        for tid in candidates:
-            emb = reid_map.get(tid)
-            if emb is None:
-                continue
-            g_norm = float(np.linalg.norm(emb)) or 1.0
-            sim = float(np.dot(query, emb) / (q_norm * g_norm))
-            if sim > best_sim:
-                best_sim = sim
-                best_tid = tid
-        return best_tid, best_sim
 
     @staticmethod
     def _make_obs(det: FrameDetection, frame_ts: float) -> TrackletObservation:
@@ -609,10 +521,6 @@ class BoTSORTTracker:
             laplacian_score=det.laplacian_score,
             crop_bgr=det.crop_bgr,
         )
-
-    @staticmethod
-    def _last_frame_idx(obs_list: list[TrackletObservation]) -> int:
-        return obs_list[-1].frame_index if obs_list else 0
 
 
 @dataclass
@@ -1539,8 +1447,8 @@ def _default_detector():
 
 
 def _default_tracker():
-    """BoT-SORT style tracker using TransReID Re-ID embeddings."""
-    return BoTSORTTracker()
+    """ByteTrack-style tracker using head-box IoU only (no GPU during tracking)."""
+    return HeadBoxTracker()
 
 
 @dataclass
@@ -1548,15 +1456,14 @@ class LocalVideoIngestionPipeline:
     """
     Video ingestion pipeline.
 
-    Production path: RF-DETR 2x-large (detector) + OCMCTrack-style corrective
-    cascade (tracker) + TrackletFeaturePipelineProcessor with CLIP / SOLIDER+KPR
-    adapters.  Falls back to HOG + GreedyIoU when rfdetr package is absent.
+    RF-DETR 2x-large detector + HeadBoxTracker (ByteTrack-style, pure IoU) +
+    TrackletFeaturePipelineProcessor (SigLIP2, TransReID, VideoMAE).
     """
 
     sample_fps: int = 4
     sampler: VideoFrameSampler = field(default_factory=VideoFrameSampler)
     detector: RFDETRPersonDetector = field(default_factory=_default_detector)
-    tracker: BoTSORTTracker = field(default_factory=_default_tracker)
+    tracker: HeadBoxTracker = field(default_factory=_default_tracker)
     quality_scorer: TrackletQualityScorer = field(default_factory=TrackletQualityScorer)
     metadata_assembler: LocalMetadataAssembler = field(default_factory=LocalMetadataAssembler)
 
@@ -1756,7 +1663,6 @@ class LocalVideoIngestionPipeline:
         camera_id: str | None,
         tracklets: tuple[LocalTracklet, ...],
         sampled_fps: int,
-        memory_bank: TrackletMemoryBank,
         metadata_path: Path,
     ) -> tuple[list[dict[str, object]], int]:
         if not tracklets:
@@ -1777,18 +1683,9 @@ class LocalVideoIngestionPipeline:
         if not people:
             return [], 0
 
-        for person in people:
-            track_frames = person.get("tracklet_frames") or []
-            last_ts = float(track_frames[-1].get("timestamp_second") or 0.0) if track_frames else 0.0
-            embedding = person.get("embedding_vector")
-            if not isinstance(embedding, list):
-                embedding = None
-            global_identity = memory_bank.resolve_identity(
-                embedding_vector=embedding,
-                timestamp_second=last_ts,
-            )
-            person["human_key"] = f"{camera_id or video_id}:{global_identity}"
-
+        # human_key is already set in _build_people_batch as f"{camera_id or video_id}:{track_id}"
+        # No global merge here — the tracker is a candidate generator only.
+        # Cross-camera identity resolution happens downstream via search/trace.
         merged_people = self._merge_people_by_identity(video_id=video_id, people=people)
         with metadata_path.open("a", encoding="utf-8") as fh:
             for person in merged_people:
@@ -1813,7 +1710,6 @@ class LocalVideoIngestionPipeline:
 
         video_id = compressed_path.name
         self.tracker.reset()
-        memory_bank = TrackletMemoryBank()
         people: list[dict[str, object]] = []
         finalized_tracklets_buffer: list[LocalTracklet] = []
         sampled_frame_count = 0
@@ -1870,7 +1766,6 @@ class LocalVideoIngestionPipeline:
             camera_id=camera_id,
             tracklets=tuple(finalized_tracklets_buffer),
             sampled_fps=self.sample_fps,
-            memory_bank=memory_bank,
             metadata_path=metadata_path,
         )
         LOGGER.info(
