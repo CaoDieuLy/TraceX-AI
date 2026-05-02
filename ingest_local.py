@@ -153,7 +153,7 @@ def _walk_folder(service, folder_id: str, out: list[dict]):
     while True:
         resp = service.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
-            fields="nextPageToken, files(id, name, mimeType, size)",
+            fields="nextPageToken, files(id, name, mimeType, size, webViewLink, webContentLink)",
             pageSize=200,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
@@ -276,10 +276,75 @@ def poll_job(job_id: str) -> dict:
 _DB_CHUNK_SIZE = 50
 
 
+def _parse_recorded_start(filename: str) -> datetime | None:
+    """Parse recorded_start from filename like cam_01_2026-04-28_11-00.mp4."""
+    import re
+    m = re.search(r"_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2})", filename)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(f"{m.group(1)} {m.group(2).replace('-', ':')}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _person_abs_times(person: dict, recorded_start: datetime | None) -> tuple[str | None, str | None]:
+    """Return (abs_start_iso, abs_end_iso) for a person using timeline relative seconds."""
+    if not recorded_start:
+        return None, None
+    from datetime import timedelta
+    timeline = person.get("timeline") or []
+    quality  = person.get("tracklet_quality") or {}
+    if isinstance(timeline, list) and timeline:
+        starts = [float(s.get("start_second", 0)) for s in timeline if isinstance(s, dict)]
+        ends   = [float(s.get("end_second", 0))   for s in timeline if isinstance(s, dict)]
+        t_start = min(starts) if starts else 0.0
+        t_end   = max(ends)   if ends   else 0.0
+    else:
+        t_start = 0.0
+        t_end   = float(quality.get("duration_seconds") or 0.0)
+    abs_start = (recorded_start + timedelta(seconds=t_start)).isoformat()
+    abs_end   = (recorded_start + timedelta(seconds=t_end)).isoformat()
+    return abs_start, abs_end
+
+
 def save_result(session, result: dict, file: dict) -> int:
     """Persist ingestion result to DB. Returns number of candidates saved."""
     people: list[dict] = result.get("people", [])
-    camera_id = result.get("video", {}).get("camera_id") or file.get("camera_id")
+    video_meta = result.get("video", {})
+    camera_id = video_meta.get("camera_id") or file.get("camera_id")
+    video_id  = video_meta.get("video_id") or file.get("name")
+    filename  = file.get("name", video_id)
+
+    # Parse recorded_start from filename (most reliable source).
+    recorded_start = _parse_recorded_start(filename)
+    recorded_start_iso = recorded_start.isoformat() if recorded_start else video_meta.get("recorded_start")
+
+    # Insert queue_video_assets so trace + preview + clip-build work.
+    drive_id  = file.get("id", "")
+    view_link = file.get("webViewLink") or file.get("webContentLink") or ""
+    if not view_link and drive_id:
+        view_link = f"https://drive.google.com/file/d/{drive_id}/view"
+    existing_qva = session.query(QueueVideoAsset).filter_by(video_id=video_id).first()
+    if not existing_qva:
+        session.add(QueueVideoAsset(
+            video_id              = video_id,
+            camera_id             = camera_id,
+            title                 = filename,
+            source_filename       = filename,
+            source_mode           = "google_drive",
+            queue_position        = 0,
+            storage_backend       = "google_drive",
+            available_link_video  = view_link,
+            drive_video_file_id   = drive_id or None,
+            raw_video_metadata    = {
+                "recorded_start":      recorded_start_iso,
+                "tracklet_count":      video_meta.get("tracklet_count"),
+                "sampled_frame_count": video_meta.get("sampled_frame_count"),
+                "sample_fps":          video_meta.get("sample_fps"),
+            },
+        ))
+        session.commit()
 
     saved = 0
     pending = 0
@@ -287,6 +352,14 @@ def save_result(session, result: dict, file: dict) -> int:
         cid = person.get("candidate_id") or person.get("id")
         if not cid:
             continue
+        abs_start, abs_end = _person_abs_times(person, recorded_start)
+        if abs_start:
+            person["abs_start"] = abs_start
+        if abs_end:
+            person["abs_end"] = abs_end
+        if recorded_start_iso:
+            person["recorded_start"] = recorded_start_iso
+
         existing = session.query(PersonCandidate).filter_by(candidate_id=cid).first()
         if existing:
             existing.raw_metadata = person
