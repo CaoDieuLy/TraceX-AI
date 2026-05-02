@@ -1090,8 +1090,6 @@ class LocalMetadataAssembler:
 
         return people
 
-@dataclass
-
 def _default_detector():
     """RF-DETR 2x-large — strict production detector on LightningAI GPU."""
     return RFDETRPersonDetector()

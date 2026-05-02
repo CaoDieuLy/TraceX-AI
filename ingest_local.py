@@ -273,13 +273,16 @@ def poll_job(job_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # DB save helpers
 # ---------------------------------------------------------------------------
+_DB_CHUNK_SIZE = 50
+
+
 def save_result(session, result: dict, file: dict) -> int:
     """Persist ingestion result to DB. Returns number of candidates saved."""
     people: list[dict] = result.get("people", [])
     camera_id = result.get("video", {}).get("camera_id") or file.get("camera_id")
-    source_filename = result.get("video", {}).get("source_filename") or file["name"]
 
     saved = 0
+    pending = 0
     for person in people:
         cid = person.get("candidate_id") or person.get("id")
         if not cid:
@@ -300,7 +303,12 @@ def save_result(session, result: dict, file: dict) -> int:
                 raw_metadata  = person,
             ))
             saved += 1
-    session.commit()
+        pending += 1
+        if pending >= _DB_CHUNK_SIZE:
+            session.commit()
+            pending = 0
+    if pending:
+        session.commit()
     return saved
 
 # ---------------------------------------------------------------------------
