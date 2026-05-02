@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from functools import partial
 import gc
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import threading
-from typing import Iterator
 
 import cv2
 import numpy as np
@@ -87,6 +85,7 @@ class TrackletQualityResult:
     average_confidence: float
     average_laplacian: float
     frame_count: int
+    frame_density: float
     duration_seconds: float
     rejection_reason: str | None
 
@@ -139,6 +138,56 @@ def _bbox_iou(lhs: BoundingBox, rhs: BoundingBox) -> float:
         return 0.0
     union_area = lhs.area + rhs.area - inter_area
     return float(inter_area / union_area) if union_area > 0 else 0.0
+
+
+def _bbox_center(bbox: BoundingBox) -> tuple[float, float]:
+    return (
+        float(bbox.x1 + bbox.x2) / 2.0,
+        float(bbox.y1 + bbox.y2) / 2.0,
+    )
+
+
+def _point_distance(lhs: tuple[float, float], rhs: tuple[float, float]) -> float:
+    return math.hypot(lhs[0] - rhs[0], lhs[1] - rhs[1])
+
+
+def _serialize_tracklet_frames(
+    observations: tuple[TrackletObservation, ...] | list[TrackletObservation],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "frame_idx": item.frame_index,
+            "timestamp_second": item.timestamp_second,
+            "bbox": item.bbox.to_xyxy(),
+            "confidence": item.confidence,
+        }
+        for item in observations
+    ]
+
+
+def _compact_serialized_tracklet_frames(
+    frames: list[dict[str, object]],
+    *,
+    max_frames: int = 30,
+) -> list[dict[str, object]]:
+    if len(frames) <= max_frames:
+        return list(frames)
+    step = max(1, len(frames) // max_frames)
+    selected = list(frames[::step][:max_frames])
+    if selected and frames:
+        selected[-1] = frames[-1]
+    return selected
+
+
+def _compact_tracklet_frames(
+    observations: tuple[TrackletObservation, ...] | list[TrackletObservation],
+    *,
+    max_frames: int = 30,
+) -> list[dict[str, object]]:
+    return _compact_serialized_tracklet_frames(
+        _serialize_tracklet_frames(observations),
+        max_frames=max_frames,
+    )
 
 
 def _quality_or_zero(person: dict[str, object], field_name: str) -> float:
@@ -328,30 +377,39 @@ class RFDETRPersonDetector:
 @dataclass
 class HeadBoxTracker:
     """
-    ByteTrack-style tracker — pure head-box IoU, no GPU during tracking.
+    ByteTrack-style tracker using head-box geometry, center-distance,
+    velocity prediction, and IoU. No ReID/GPU during tracking.
 
     Designed for top-down / bird's-eye surveillance cameras where person-ReID
     models trained on eye-level data (MSMT17) are unreliable. TransReID is still
     used downstream in _build_people_batch for appearance_embedding_vector.
 
     Head box: top head_ratio of bbox height, x-shrunk by shrink_x on each side.
+    Matching cost = distance_weight * center_dist + velocity_weight * predicted_dist + iou_weight * (1 - iou).
 
     Matching cascade per frame:
-      Stage 1 — high-conf dets  → active tracks  (head-box IoU ≥ match_thresh)
-      Stage 2 — low-conf dets   → active tracks  (head-box IoU ≥ match_thresh)
-      Stage 3 — high-conf unmatched → buffer tracks (head-box IoU ≥ buffer_match_thresh)
+      Stage 1 — high-conf dets  → active tracks
+      Stage 2 — low-conf dets   → active tracks
+      Stage 3 — high-conf unmatched → buffer tracks
       New track for remaining unmatched high-conf dets above new_track_threshold.
     """
 
     track_thresh: float = 0.40
     low_thresh: float = 0.10
     new_track_threshold: float = 0.45
-    match_thresh: float = 0.70
-    buffer_match_thresh: float = 0.50
-    track_buffer: int = 20
-    max_buffer_frames: int = 60
-    head_ratio: float = 0.30
-    shrink_x: float = 0.12
+    max_match_cost: float = 0.80
+    max_buffer_match_cost: float = 0.85
+    max_head_center_distance: float = 85.0
+    max_predicted_distance: float = 120.0
+    iou_weight: float = 0.20
+    distance_weight: float = 0.55
+    velocity_weight: float = 0.25
+    track_buffer: int = 12
+    max_buffer_frames: int = 30
+    head_ratio: float = 0.35
+    shrink_x: float = 0.08
+    min_track_frames: int = 8
+    min_track_density: float = 0.35
 
     def __post_init__(self) -> None:
         self.reset()
@@ -401,7 +459,7 @@ class HeadBoxTracker:
             expired = [tid for tid in self.buffer if fk - self.buffer_entry_frame.get(tid, fk) > self.max_buffer_frames]
             for tid in expired:
                 obs = self.buffer.pop(tid, [])
-                if obs:
+                if obs and self._should_keep_tracklet(obs):
                     completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs)))
                 self.buffer_last_bbox.pop(tid, None)
                 self.buffer_entry_frame.pop(tid, None)
@@ -412,16 +470,28 @@ class HeadBoxTracker:
             high = [d for d in dets if d.confidence >= self.track_thresh]
             low  = [d for d in dets if self.low_thresh <= d.confidence < self.track_thresh]
             active_unmatched = set(self.active.keys())
-            active_heads = {tid: self._head_bbox(self.active_last_bbox[tid]) for tid in active_unmatched}
+            active_states = {
+                tid: self._build_match_state(
+                    observations=self.active[tid],
+                    last_bbox=self.active_last_bbox[tid],
+                    target_frame_idx=fk,
+                )
+                for tid in active_unmatched
+            }
 
             # Stage 1: high-conf → active tracks
             unmatched_high: list[FrameDetection] = []
             for det in high:
-                best_tid, best_iou = self._best_iou(self._head_bbox(det.bbox), active_heads, active_unmatched)
-                if best_tid is not None and best_iou >= self.match_thresh:
+                best_tid, best_cost = self._best_match(
+                    self._head_bbox(det.bbox),
+                    active_states,
+                    active_unmatched,
+                    max_cost=self.max_match_cost,
+                )
+                if best_tid is not None and best_cost <= self.max_match_cost:
                     self._update_active(best_tid, det, fk, frame_ts)
                     active_unmatched.discard(best_tid)
-                    active_heads.pop(best_tid, None)
+                    active_states.pop(best_tid, None)
                 else:
                     unmatched_high.append(det)
 
@@ -429,22 +499,39 @@ class HeadBoxTracker:
             for det in low:
                 if not active_unmatched:
                     break
-                best_tid, best_iou = self._best_iou(self._head_bbox(det.bbox), active_heads, active_unmatched)
-                if best_tid is not None and best_iou >= self.match_thresh:
+                best_tid, best_cost = self._best_match(
+                    self._head_bbox(det.bbox),
+                    active_states,
+                    active_unmatched,
+                    max_cost=self.max_match_cost,
+                )
+                if best_tid is not None and best_cost <= self.max_match_cost:
                     self._update_active(best_tid, det, fk, frame_ts)
                     active_unmatched.discard(best_tid)
-                    active_heads.pop(best_tid, None)
+                    active_states.pop(best_tid, None)
 
             # Stage 3: high-conf unmatched → buffer tracks (re-entry)
             buffer_candidates = set(self.buffer.keys())
-            buffer_heads = {tid: self._head_bbox(self.buffer_last_bbox[tid]) for tid in buffer_candidates}
+            buffer_states = {
+                tid: self._build_match_state(
+                    observations=self.buffer[tid],
+                    last_bbox=self.buffer_last_bbox[tid],
+                    target_frame_idx=fk,
+                )
+                for tid in buffer_candidates
+            }
             new_dets: list[FrameDetection] = []
             for det in unmatched_high:
                 if not buffer_candidates:
                     new_dets.append(det)
                     continue
-                best_tid, best_iou = self._best_iou(self._head_bbox(det.bbox), buffer_heads, buffer_candidates)
-                if best_tid is not None and best_iou >= self.buffer_match_thresh:
+                best_tid, best_cost = self._best_match(
+                    self._head_bbox(det.bbox),
+                    buffer_states,
+                    buffer_candidates,
+                    max_cost=self.max_buffer_match_cost,
+                )
+                if best_tid is not None and best_cost <= self.max_buffer_match_cost:
                     obs = self.buffer.pop(best_tid)
                     obs.append(self._make_obs(det, frame_ts))
                     self.active[best_tid] = obs
@@ -453,7 +540,7 @@ class HeadBoxTracker:
                     self.buffer_last_bbox.pop(best_tid, None)
                     self.buffer_entry_frame.pop(best_tid, None)
                     buffer_candidates.discard(best_tid)
-                    buffer_heads.pop(best_tid, None)
+                    buffer_states.pop(best_tid, None)
                 else:
                     new_dets.append(det)
 
@@ -471,7 +558,7 @@ class HeadBoxTracker:
     def finalize_all(self, *, video_id: str, camera_id: str | None) -> tuple[LocalTracklet, ...]:
         completed: list[LocalTracklet] = []
         for tid, obs_list in list(self.active.items()) + list(self.buffer.items()):
-            if obs_list:
+            if obs_list and self._should_keep_tracklet(obs_list):
                 completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs_list)))
         self.reset()
         return tuple(completed)
@@ -493,23 +580,76 @@ class HeadBoxTracker:
         self.active_last_bbox[tid] = det.bbox
         self.active_last_frame[tid] = frame_idx
 
-    @staticmethod
-    def _best_iou(
+    def _build_match_state(
+        self,
+        *,
+        observations: list[TrackletObservation],
+        last_bbox: BoundingBox,
+        target_frame_idx: int,
+    ) -> tuple[BoundingBox, tuple[float, float], tuple[float, float]]:
+        head_bbox = self._head_bbox(last_bbox)
+        last_center = _bbox_center(head_bbox)
+        if len(observations) < 2:
+            return head_bbox, last_center, last_center
+
+        previous_head_bbox = self._head_bbox(observations[-2].bbox)
+        previous_center = _bbox_center(previous_head_bbox)
+        frame_delta = max(observations[-1].frame_index - observations[-2].frame_index, 1)
+        vx = (last_center[0] - previous_center[0]) / float(frame_delta)
+        vy = (last_center[1] - previous_center[1]) / float(frame_delta)
+        predict_steps = max(target_frame_idx - observations[-1].frame_index, 0)
+        predicted_center = (
+            last_center[0] + vx * predict_steps,
+            last_center[1] + vy * predict_steps,
+        )
+        return head_bbox, last_center, predicted_center
+
+    def _best_match(
+        self,
         det_bbox: BoundingBox,
-        head_bboxes: dict[str, BoundingBox],
+        track_states: dict[str, tuple[BoundingBox, tuple[float, float], tuple[float, float]]],
         candidates: set[str],
+        *,
+        max_cost: float,
     ) -> tuple[str | None, float]:
+        det_center = _bbox_center(det_bbox)
         best_tid = None
-        best_score = -1.0
+        best_cost = max_cost + 1.0
+        best_iou = -1.0
         for tid in candidates:
-            hb = head_bboxes.get(tid)
-            if hb is None:
+            state = track_states.get(tid)
+            if state is None:
                 continue
-            iou = _bbox_iou(hb, det_bbox)
-            if iou > best_score:
-                best_score = iou
+            head_bbox, last_center, predicted_center = state
+            center_distance = _point_distance(last_center, det_center)
+            predicted_distance = _point_distance(predicted_center, det_center)
+            if (
+                center_distance > self.max_head_center_distance
+                and predicted_distance > self.max_predicted_distance
+            ):
+                continue
+
+            center_cost = min(center_distance / max(self.max_head_center_distance, 1e-6), 1.0)
+            predicted_cost = min(predicted_distance / max(self.max_predicted_distance, 1e-6), 1.0)
+            iou = _bbox_iou(head_bbox, det_bbox)
+            cost = (
+                self.distance_weight * center_cost
+                + self.velocity_weight * predicted_cost
+                + self.iou_weight * (1.0 - iou)
+            )
+            if cost < best_cost or (abs(cost - best_cost) <= 1e-6 and iou > best_iou):
+                best_cost = cost
+                best_iou = iou
                 best_tid = tid
-        return best_tid, best_score
+        return best_tid, best_cost
+
+    def _should_keep_tracklet(self, observations: list[TrackletObservation]) -> bool:
+        frame_count = len(observations)
+        if frame_count < self.min_track_frames:
+            return False
+        frame_span = max(observations[-1].frame_index - observations[0].frame_index + 1, 1)
+        density = frame_count / float(frame_span)
+        return density >= self.min_track_density
 
     @staticmethod
     def _make_obs(det: FrameDetection, frame_ts: float) -> TrackletObservation:
@@ -528,7 +668,8 @@ class TrackletQualityScorer:
     """Filter blurry or weak tracklets before feature extraction."""
 
     minimum_confidence_score: float = 0.3
-    minimum_frame_count: int = 3
+    minimum_frame_count: int = 8
+    minimum_frame_density: float = 0.25
     minimum_average_laplacian: float = 12.0
     minimum_duration_seconds: float = 2.0
 
@@ -538,19 +679,23 @@ class TrackletQualityScorer:
         average_confidence = round(sum(confidences) / max(len(confidences), 1), 6)
         average_laplacian = round(sum(laplacians) / max(len(laplacians), 1), 6)
         frame_count = len(tracklet.observations)
+        frame_span = max(tracklet.observations[-1].frame_index - tracklet.observations[0].frame_index + 1, 1) if frame_count else 1
+        frame_density = round(frame_count / float(frame_span), 6)
         duration_seconds = 0.0
         if frame_count >= 2:
             duration_seconds = max(tracklet.observations[-1].timestamp_second - tracklet.observations[0].timestamp_second, 0.0)
 
         if frame_count < self.minimum_frame_count:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "insufficient_frames")
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, frame_density, duration_seconds, "insufficient_frames")
+        if frame_density < self.minimum_frame_density:
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, frame_density, duration_seconds, "sparse_tracklet")
         if duration_seconds < self.minimum_duration_seconds:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "short_tracklet")
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, frame_density, duration_seconds, "short_tracklet")
         if average_confidence < self.minimum_confidence_score:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "low_confidence")
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, frame_density, duration_seconds, "low_confidence")
         if average_laplacian < self.minimum_average_laplacian:
-            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, duration_seconds, "blurry_tracklet")
-        return TrackletQualityResult(True, average_confidence, average_laplacian, frame_count, duration_seconds, None)
+            return TrackletQualityResult(False, average_confidence, average_laplacian, frame_count, frame_density, duration_seconds, "blurry_tracklet")
+        return TrackletQualityResult(True, average_confidence, average_laplacian, frame_count, frame_density, duration_seconds, None)
 
 
 @dataclass
@@ -592,377 +737,6 @@ class LocalMetadataAssembler:
         sampled_fps: int,
     ) -> list[dict[str, object]]:
         """
-        GPU-efficient batch feature extraction.
-
-        Runs each model once for ALL tracklets combined instead of N separate calls:
-          SigLIP2 image  — 1 forward pass (all selected crops concatenated)
-          TransReID      — 1 forward pass (all part-crops concatenated)
-          VideoMAE       — 1 forward pass (all action clips stacked)
-        Text features are cached inside SigLIP2ModelHub after the first call.
-        """
-        import cv2 as _cv2
-        from PIL import Image as _PILImage
-        from .model_adapters import (
-            SigLIP2ModelHub, TransReIDHub, VideoMAEHub,
-            _crop_pil, _selected_observations, _part_crops, _quality_weighted_pool,
-            _GENDER_PROMPTS, _AGE_PROMPTS,
-            _SHIRT_PROMPTS, _PANTS_PROMPTS, _HAIR_PROMPTS, _SKIN_PROMPTS,
-            _HAT_PROMPTS, _BAG_PROMPTS, _HEAD_ACCESSORY_PROMPTS, _SHOES_PROMPTS,
-        )
-        from .tracklet_feature_pipeline import (
-            ActionClipBuilder, TrackletFeatureAggregator, EMBEDDING_VOCABULARY,
-            StaticAttributeResult, AppearanceAttributeResult,
-            AppearanceEmbeddingResult, AttributeEmbeddingResult,
-            BehaviorAnalysisResult, SemanticEmbeddingResult,
-        )
-
-        siglip = SigLIP2ModelHub()
-        reid   = TransReIDHub()
-        vmae   = VideoMAEHub()
-
-        _PROMPT_MAP = {
-            "shirt": _SHIRT_PROMPTS, "pants": _PANTS_PROMPTS,
-            "hair_color": _HAIR_PROMPTS, "skin_tone": _SKIN_PROMPTS,
-            "hat": _HAT_PROMPTS, "bag": _BAG_PROMPTS,
-            "head_accessory": _HEAD_ACCESSORY_PROMPTS, "shoes": _SHOES_PROMPTS,
-        }
-
-        # ── Build TrackletFeatureInput payloads ──────────────────────────────
-        payloads: list[TrackletFeatureInput] = []
-        for tracklet, _ in accepted_tracklets:
-            payloads.append(TrackletFeatureInput(
-                video_id=video_id,
-                object_id=tracklet.track_id,
-                sampled_fps=sampled_fps,
-                frames=tuple(
-                    TrackletFrameObservation(
-                        frame_index=item.frame_index,
-                        timestamp_second=item.timestamp_second,
-                        bbox=item.bbox,
-                        detection_confidence=item.confidence,
-                        laplacian_score=item.laplacian_score,
-                        crop_bgr=item.crop_bgr,
-                    )
-                    for item in tracklet.observations
-                ),
-            ))
-
-        # ── Frame selection (CPU) ────────────────────────────────────────────
-        selections = [self.feature_pipeline.selector.select(p) for p in payloads]
-
-        # ── Batch SigLIP2 image features: 1 GPU call for all tracklets ───────
-        per_t_valid: list[list] = []
-        all_siglip_pils: list = []
-        siglip_slices: list[tuple[int, int]] = []
-
-        for payload, selection in zip(payloads, selections):
-            obs = _selected_observations(payload, selection)
-            valid = [(f, _crop_pil(f, None)) for f in obs]
-            valid = [(f, p) for f, p in valid if p is not None]
-            per_t_valid.append(valid)
-            s = len(all_siglip_pils)
-            all_siglip_pils.extend(p for _, p in valid)
-            siglip_slices.append((s, len(all_siglip_pils)))
-
-        all_img_feats = (
-            siglip.image_features(all_siglip_pils)
-            if all_siglip_pils
-            else np.zeros((0, 1024), dtype=np.float32)
-        )
-
-        # Pre-warm text cache (one shot — subsequent calls are dict lookups)
-        for _, prompts in _GENDER_PROMPTS + _AGE_PROMPTS:
-            siglip.text_features(prompts)
-        for prompt_list in _PROMPT_MAP.values():
-            for _, prompts in prompt_list:
-                siglip.text_features(prompts)
-
-        # ── Classify attributes per tracklet (pure CPU matmul) ───────────────
-        all_static:     list[StaticAttributeResult]     = []
-        all_appearance: list[AppearanceAttributeResult] = []
-
-        for idx, selection in enumerate(selections):
-            s, e    = siglip_slices[idx]
-            img_feats = all_img_feats[s:e]
-            valid   = per_t_valid[idx]
-            qmap    = {item.frame_index: item.quality_score for item in selection.selected_frames}
-
-            if len(img_feats) == 0:
-                all_static.append(StaticAttributeResult(gender=None, age_group=None, confidence=0.0))
-                all_appearance.append(AppearanceAttributeResult())
-                continue
-
-            gender_votes: dict = {}
-            age_votes:    dict = {}
-            for i, (frame, _) in enumerate(valid):
-                w    = qmap.get(frame.frame_index, 0.1)
-                feat = img_feats[i]
-                best_g, bg_s = None, -float("inf")
-                for label, prompts in _GENDER_PROMPTS:
-                    sc = float(np.mean(siglip.text_features(prompts) @ feat))
-                    if sc > bg_s:
-                        bg_s, best_g = sc, label
-                gender_votes[best_g] = gender_votes.get(best_g, 0.0) + w
-                best_a, ba_s = None, -float("inf")
-                for label, prompts in _AGE_PROMPTS:
-                    sc = float(np.mean(siglip.text_features(prompts) @ feat))
-                    if sc > ba_s:
-                        ba_s, best_a = sc, label
-                age_votes[best_a] = age_votes.get(best_a, 0.0) + w
-
-            gender    = max(gender_votes, key=gender_votes.get) if gender_votes else None
-            age_group = max(age_votes,    key=age_votes.get)    if age_votes    else None
-            all_static.append(StaticAttributeResult(
-                gender=gender, age_group=age_group,
-                confidence=0.45 if (gender or age_group) else 0.0,
-            ))
-
-            fields: dict[str, dict] = {k: {} for k in _PROMPT_MAP}
-            for i, (frame, _) in enumerate(valid):
-                w    = max(qmap.get(frame.frame_index, 0.1), 1e-4)
-                feat = img_feats[i]
-                for field_name, label_prompts in _PROMPT_MAP.items():
-                    best_label, bs = None, -float("inf")
-                    for label, prompts in label_prompts:
-                        sc = float(np.mean(siglip.text_features(prompts) @ feat))
-                        if sc > bs:
-                            bs, best_label = sc, label
-                    fields[field_name][best_label] = fields[field_name].get(best_label, 0.0) + w
-
-            def _best(votes: dict):
-                return max(votes, key=votes.get) if votes else None
-
-            all_appearance.append(AppearanceAttributeResult(
-                head_accessory=_best(fields["head_accessory"]),
-                hat=_best(fields["hat"]),
-                hair_color=_best(fields["hair_color"]),
-                skin_tone=_best(fields["skin_tone"]),
-                shirt=_best(fields["shirt"]),
-                pants=_best(fields["pants"]),
-                shoes=_best(fields["shoes"]),
-                bag=_best(fields["bag"]),
-            ))
-
-        # ── Batch TransReID: 1 GPU call for all crops ────────────────────────
-        per_t_pil_crops: list[list] = []
-        per_t_weights:   list[list[float]] = []
-        all_fulls: list = []
-        all_uppers: list = []
-        all_lowers: list = []
-        reid_slices: list[tuple[int, int]] = []
-
-        for payload, selection in zip(payloads, selections):
-            obs  = _selected_observations(payload, selection)
-            qmap = {item.frame_index: item.quality_score for item in selection.selected_frames}
-            pil_crops: list = []
-            weights:   list[float] = []
-            for frame in obs:
-                pil = _crop_pil(frame, None)
-                if pil is None:
-                    continue
-                pil_crops.append(pil)
-                weights.append(qmap.get(frame.frame_index, 0.1))
-            per_t_pil_crops.append(pil_crops)
-            per_t_weights.append(weights)
-            s = len(all_fulls)
-            for pil in pil_crops:
-                parts = _part_crops(pil)
-                all_fulls.append(parts[0])
-                all_uppers.append(parts[1])
-                all_lowers.append(parts[2])
-            reid_slices.append((s, len(all_fulls)))
-
-        _GW, _PW = 0.55, 0.45
-        if all_fulls:
-            all_reid = reid.embed_crops(all_fulls + all_uppers + all_lowers)  # [3M, 768]
-            M        = len(all_fulls)
-            gf_all   = all_reid[:M]
-            uf_all   = all_reid[M:2 * M]
-            lf_all   = all_reid[2 * M:]
-        else:
-            gf_all = uf_all = lf_all = np.zeros((0, 768), dtype=np.float32)
-
-        all_app_embed: list[AppearanceEmbeddingResult] = []
-        for idx, (pil_crops, weights) in enumerate(zip(per_t_pil_crops, per_t_weights)):
-            s, e = reid_slices[idx]
-            if not pil_crops:
-                empty = tuple(0.0 for _ in range(768))
-                all_app_embed.append(AppearanceEmbeddingResult(
-                    embedding_model="transreid-vit-base-msmt17-kpr",
-                    embedding_vector=empty, tracklet_vectors=(empty,),
-                ))
-                continue
-            gf, uf, lf = gf_all[s:e], uf_all[s:e], lf_all[s:e]
-            per_frame_vecs = []
-            for i in range(len(pil_crops)):
-                pm   = (uf[i] + lf[i]) / 2.0
-                pm  /= float(np.linalg.norm(pm)) or 1.0
-                fv   = _GW * gf[i] + _PW * pm
-                fv  /= float(np.linalg.norm(fv)) or 1.0
-                per_frame_vecs.append(fv.astype(np.float32))
-            fused   = _quality_weighted_pool(per_frame_vecs, weights)
-            fused_t = tuple(round(float(v), 6) for v in fused.tolist())
-            pf_t    = [tuple(round(float(v), 6) for v in gf[i].tolist()) for i in range(len(pil_crops))]
-            all_app_embed.append(AppearanceEmbeddingResult(
-                embedding_model="transreid-vit-base-msmt17-kpr",
-                embedding_vector=fused_t, tracklet_vectors=tuple(pf_t),
-            ))
-
-        # ── Batch VideoMAE: 1 GPU call for all clips ─────────────────────────
-        clip_builder = ActionClipBuilder()
-        all_clips_per_t: list[tuple] = [
-            clip_builder.build(p, sel.representative_frame.frame_index)
-            for p, sel in zip(payloads, selections)
-        ]
-        all_clips_flat = [clip for clips in all_clips_per_t for clip in clips]
-
-        def _clip_pils(clip) -> list:
-            out = []
-            for frame in clip.frames:
-                crop = frame.crop_bgr
-                if crop is not None and crop.size > 0:
-                    rgb = _cv2.cvtColor(np.asarray(crop, dtype=np.uint8), _cv2.COLOR_BGR2RGB)
-                    out.append(_PILImage.fromarray(rgb))
-            return out
-
-        clip_pils_list = [_clip_pils(clip) for clip in all_clips_flat]
-        vmae_feats = (
-            vmae.extract_features_batch(clip_pils_list)
-            if clip_pils_list
-            else np.zeros((0, 1024), dtype=np.float32)
-        )
-
-        vocab_labels  = list(EMBEDDING_VOCABULARY)
-        vocab_prompts = [
-            f"a surveillance footage of a person who is {lbl.replace('_', ' ')} in an indoor space"
-            for lbl in vocab_labels
-        ]
-        text_feats_vocab = siglip.text_features(vocab_prompts)  # [K, 1024], cached
-
-        clip_offset = 0
-        all_behavior_per_t: list[tuple] = []
-        all_semantic_per_t: list[tuple] = []
-
-        for clips in all_clips_per_t:
-            beh_results: list[BehaviorAnalysisResult] = []
-            sem_results: list[SemanticEmbeddingResult] = []
-            for clip in clips:
-                video_feat = vmae_feats[clip_offset] if clip_offset < len(vmae_feats) else np.zeros(1024, dtype=np.float32)
-                clip_offset += 1
-                scores    = text_feats_vocab @ video_feat
-                best_idx  = int(np.argmax(scores))
-                best_lbl  = vocab_labels[best_idx]
-                conf      = round(float(np.clip(scores[best_idx], 0.0, 1.0)), 6)
-                beh_results.append(BehaviorAnalysisResult(
-                    clip_id=clip.clip_id, action_summary=best_lbl,
-                    labels=(best_lbl,), confidence=conf,
-                    metadata={"scores": {lbl: round(float(s), 4) for lbl, s in zip(vocab_labels, scores)}},
-                ))
-                sem_text = f"a surveillance footage of a person who is {best_lbl.replace('_', ' ')} in an indoor space"
-                sem_feat = siglip.text_features([sem_text])[0]
-                sem_results.append(SemanticEmbeddingResult(
-                    clip_id=clip.clip_id,
-                    embedding_model="siglip2-vit-l16-512-action",
-                    vocabulary=tuple(EMBEDDING_VOCABULARY),
-                    embedding_vector=tuple(round(float(v), 6) for v in sem_feat.tolist()),
-                ))
-            all_behavior_per_t.append(tuple(beh_results))
-            all_semantic_per_t.append(tuple(sem_results))
-
-        # ── Attribute text embedding (SigLIP2 text, all cached) ──────────────
-        all_attr_embed: list[AttributeEmbeddingResult] = []
-        for static_attr in all_static:
-            parts = [p for p in [static_attr.gender, static_attr.age_group] if p]
-            text  = "a photo of a " + (" ".join(parts) if parts else "person")
-            feat  = siglip.text_features([text])[0]
-            all_attr_embed.append(AttributeEmbeddingResult(
-                embedding_model="siglip2-vit-l16-512-attr",
-                embedding_vector=tuple(round(float(v), 6) for v in feat.tolist()),
-            ))
-
-        # ── Aggregate and build final metadata dicts ─────────────────────────
-        aggregator  = TrackletFeatureAggregator()
-        runtime_meta = {"batch_optimized": True, "batch_size": len(accepted_tracklets)}
-        people: list[dict[str, object]] = []
-
-        for idx, ((tracklet, quality), payload, selection) in enumerate(
-            zip(accepted_tracklets, payloads, selections)
-        ):
-            try:
-                agg = aggregator.aggregate(
-                    tracklet=payload,
-                    selection=selection,
-                    static_attributes=all_static[idx],
-                    attribute_embedding=all_attr_embed[idx],
-                    appearance_attributes=all_appearance[idx],
-                    appearance_embedding=all_app_embed[idx],
-                    clips=all_clips_per_t[idx],
-                    behavior_results=all_behavior_per_t[idx],
-                    semantic_embeddings=all_semantic_per_t[idx],
-                    runtime_metadata=runtime_meta,
-                )
-                aggregated_metadata = agg.to_metadata()
-            except Exception:
-                LOGGER.warning("Batch aggregate failed for track_id=%s, falling back.", tracklet.track_id)
-                try:
-                    aggregated_metadata = self.feature_pipeline.process(payload).aggregated.to_metadata()
-                except Exception:
-                    continue
-
-            candidate_id = f"{video_id}:{tracklet.track_id}"
-            aggregated_metadata.update({
-                "candidate_id": candidate_id,
-                "camera_id": camera_id,
-                "video_id": video_id,
-                "track_id": tracklet.track_id,
-                "human_key": f"{camera_id or video_id}:{tracklet.track_id}",
-                "tracklet_frames": [
-                    {
-                        "frame_idx": item.frame_index,
-                        "timestamp_second": item.timestamp_second,
-                        "bbox": item.bbox.to_xyxy(),
-                        "confidence": item.confidence,
-                    }
-                    for item in tracklet.observations
-                ],
-                "tracklet_quality": {
-                    "accepted": quality.accepted,
-                    "average_confidence": quality.average_confidence,
-                    "average_laplacian": quality.average_laplacian,
-                    "frame_count": quality.frame_count,
-                    "duration_seconds": round(quality.duration_seconds, 6),
-                },
-            })
-            people.append(aggregated_metadata)
-
-        return people
-
-    def _build_person_metadata_from_item(
-        self,
-        item: tuple[LocalTracklet, TrackletQualityResult],
-        *,
-        video_id: str,
-        camera_id: str | None,
-        sampled_fps: int,
-    ) -> dict[str, object]:
-        tracklet, quality = item
-        return self._build_person_metadata(
-            video_id=video_id,
-            camera_id=camera_id,
-            tracklet=tracklet,
-            quality=quality,
-            sampled_fps=sampled_fps,
-        )
-
-    def _build_people_batch(
-        self,
-        *,
-        video_id: str,
-        camera_id: str | None,
-        accepted_tracklets: list[tuple["LocalTracklet", "TrackletQualityResult"]],
-        sampled_fps: int,
-    ) -> list[dict[str, object]]:
-        """
         Batch-optimized feature extraction: runs each model once for ALL tracklets.
         SigLIP2 image: 1 call instead of 2N  (static + appearance share the same batch)
         TransReID:     1 call instead of N
@@ -982,13 +756,13 @@ class LocalMetadataAssembler:
             _GENDER_PROMPTS, _AGE_PROMPTS,
             _SHIRT_PROMPTS, _PANTS_PROMPTS, _HAIR_PROMPTS, _SKIN_PROMPTS,
             _HAT_PROMPTS, _BAG_PROMPTS, _HEAD_ACCESSORY_PROMPTS, _SHOES_PROMPTS,
-            StaticAttributeResult, AppearanceAttributeResult,
-            AppearanceEmbeddingResult, AttributeEmbeddingResult,
-            BehaviorAnalysisResult, SemanticEmbeddingResult,
         )
         from .tracklet_feature_pipeline import (
             ActionClipBuilder, TrackletFeatureAggregator,
             EMBEDDING_VOCABULARY,
+            StaticAttributeResult, AppearanceAttributeResult,
+            AppearanceEmbeddingResult, AttributeEmbeddingResult,
+            BehaviorAnalysisResult, SemanticEmbeddingResult,
         )
 
         siglip = SigLIP2ModelHub()
@@ -1289,26 +1063,26 @@ class LocalMetadataAssembler:
 
             meta = agg.to_metadata()
             candidate_id = f"{video_id}:{tracklet.track_id}"
+            compact_tracklet_frames = _compact_tracklet_frames(tracklet.observations, max_frames=30)
+            tracklet_frame_count_full = len(tracklet.observations)
+            tracklet_frame_start_idx = int(tracklet.observations[0].frame_index) if tracklet.observations else 0
+            tracklet_frame_end_idx = int(tracklet.observations[-1].frame_index) if tracklet.observations else 0
             meta.update({
                 "candidate_id": candidate_id,
                 "camera_id": camera_id,
                 "video_id": video_id,
                 "track_id": tracklet.track_id,
                 "human_key": f"{camera_id or video_id}:{tracklet.track_id}",
-                "tracklet_frames": [
-                    {
-                        "frame_idx": item.frame_index,
-                        "timestamp_second": item.timestamp_second,
-                        "bbox": item.bbox.to_xyxy(),
-                        "confidence": item.confidence,
-                    }
-                    for item in tracklet.observations
-                ],
+                "tracklet_frames": compact_tracklet_frames,
+                "tracklet_frame_count_full": tracklet_frame_count_full,
+                "tracklet_frame_start_idx": tracklet_frame_start_idx,
+                "tracklet_frame_end_idx": tracklet_frame_end_idx,
                 "tracklet_quality": {
                     "accepted": quality.accepted,
                     "average_confidence": quality.average_confidence,
                     "average_laplacian": quality.average_laplacian,
                     "frame_count": quality.frame_count,
+                    "frame_density": quality.frame_density,
                     "duration_seconds": round(quality.duration_seconds, 6),
                 },
             })
@@ -1316,130 +1090,7 @@ class LocalMetadataAssembler:
 
         return people
 
-    def _build_person_metadata(
-        self,
-        *,
-        video_id: str,
-        camera_id: str | None,
-        tracklet: LocalTracklet,
-        quality: TrackletQualityResult,
-        sampled_fps: int,
-    ) -> dict[str, object]:
-        payload = TrackletFeatureInput(
-            video_id=video_id,
-            object_id=tracklet.track_id,
-            sampled_fps=sampled_fps,
-            frames=tuple(
-                TrackletFrameObservation(
-                    frame_index=item.frame_index,
-                    timestamp_second=item.timestamp_second,
-                    bbox=item.bbox,
-                    detection_confidence=item.confidence,
-                    laplacian_score=item.laplacian_score,
-                    crop_bgr=item.crop_bgr,
-                )
-                for item in tracklet.observations
-            ),
-        )
-        feature_output = self.feature_pipeline.process(payload)
-        aggregated_metadata = feature_output.aggregated.to_metadata()
-        candidate_id = f"{video_id}:{tracklet.track_id}"
-        aggregated_metadata.update(
-            {
-                "candidate_id": candidate_id,
-                "camera_id": camera_id,
-                "video_id": video_id,
-                "track_id": tracklet.track_id,
-                "human_key": f"{camera_id or video_id}:{tracklet.track_id}",
-                "tracklet_frames": [
-                    {
-                        "frame_idx": item.frame_index,
-                        "timestamp_second": item.timestamp_second,
-                        "bbox": item.bbox.to_xyxy(),
-                        "confidence": item.confidence,
-                    }
-                    for item in tracklet.observations
-                ],
-                "tracklet_quality": {
-                    "accepted": quality.accepted,
-                    "average_confidence": quality.average_confidence,
-                    "average_laplacian": quality.average_laplacian,
-                    "frame_count": quality.frame_count,
-                    "duration_seconds": round(quality.duration_seconds, 6),
-                },
-            }
-        )
-        return aggregated_metadata
-
-
 @dataclass
-class TrackletMemoryBank:
-    """
-    Keep short-term identity history and resolve stable human keys across tracklets.
-
-    One centroid per identity (no chaining): each identity is represented by a
-    running-average unit vector so that the 1st and 166th tracklet of the same
-    person are compared against the same stable reference, not a drifted chain.
-    """
-
-    similarity_threshold: float = 0.92  # cosine; high to avoid merging similar-looking people
-    history_seconds: float = 600.0
-    next_global_id: int = 1
-    # id → {"ts": float, "uv": np.ndarray | None}  (fixed embedding, no drift)
-    _centroids: dict[str, dict[str, object]] = field(default_factory=dict)
-
-    # Keep dataclass field name stable for any external pickle/copy consumers.
-    @property
-    def memory(self) -> dict[str, dict[str, object]]:
-        return self._centroids
-
-    def resolve_identity(
-        self,
-        *,
-        embedding_vector: list[float] | None,
-        timestamp_second: float,
-    ) -> str:
-        # Evict stale identities.
-        stale = [k for k, v in self._centroids.items()
-                 if timestamp_second - float(v["ts"]) > self.history_seconds]
-        for k in stale:
-            del self._centroids[k]
-
-        if not embedding_vector:
-            gid = f"global-{self.next_global_id}"
-            self.next_global_id += 1
-            self._centroids[gid] = {"ts": timestamp_second, "uv": None}
-            return gid
-
-        q = np.asarray(embedding_vector, dtype=np.float32)
-        n = float(np.linalg.norm(q))
-        unit = q / n if n > 0 else q
-
-        # Compare query against one centroid per identity — no chaining.
-        identity: str | None = None
-        valid = [(k, v) for k, v in self._centroids.items() if v["uv"] is not None]
-        if valid:
-            ids = [k for k, _ in valid]
-            mat = np.stack([v["uv"] for _, v in valid])  # [M, dim]
-            scores = mat @ unit                           # [M] cosine similarities
-            best_idx = int(np.argmax(scores))
-            if float(scores[best_idx]) >= self.similarity_threshold:
-                identity = ids[best_idx]
-
-        if identity is None:
-            identity = f"global-{self.next_global_id}"
-            self.next_global_id += 1
-
-        # Freeze embedding on first assignment — no running average to prevent centroid drift.
-        # Drift turns a specific person's embedding into a generic "person in this scene" vector
-        # that matches everyone, collapsing many different people into one identity.
-        if identity not in self._centroids or self._centroids[identity]["uv"] is None:
-            self._centroids[identity] = {"ts": timestamp_second, "uv": unit}
-        else:
-            self._centroids[identity]["ts"] = timestamp_second  # refresh timestamp only
-
-        return identity
-
 
 def _default_detector():
     """RF-DETR 2x-large — strict production detector on LightningAI GPU."""
@@ -1447,7 +1098,7 @@ def _default_detector():
 
 
 def _default_tracker():
-    """ByteTrack-style tracker using head-box IoU only (no GPU during tracking)."""
+    """ByteTrack-style tracker using head boxes plus motion-aware matching."""
     return HeadBoxTracker()
 
 
@@ -1456,7 +1107,7 @@ class LocalVideoIngestionPipeline:
     """
     Video ingestion pipeline.
 
-    RF-DETR 2x-large detector + HeadBoxTracker (ByteTrack-style, pure IoU) +
+    RF-DETR 2x-large detector + HeadBoxTracker (head box + distance + velocity) +
     TrackletFeaturePipelineProcessor (SigLIP2, TransReID, VideoMAE).
     """
 
@@ -1541,6 +1192,21 @@ class LocalVideoIngestionPipeline:
                 if str(item.get("track_id") or "").strip()
             ]
             unique_track_ids = list(dict.fromkeys(track_ids))
+            full_frame_counts = [
+                int(item.get("tracklet_frame_count_full") or _quality_or_zero(item, "frame_count") or 0)
+                for item in ordered_group
+            ]
+            frame_start_indices = [
+                int(item.get("tracklet_frame_start_idx") or item.get("frame_idx") or 0)
+                for item in ordered_group
+            ]
+            frame_end_indices = [
+                int(item.get("tracklet_frame_end_idx") or item.get("frame_idx") or 0)
+                for item in ordered_group
+            ]
+            merged_frame_count_full = sum(full_frame_counts)
+            merged_frame_start_idx = min(frame_start_indices) if frame_start_indices else 0
+            merged_frame_end_idx = max(frame_end_indices) if frame_end_indices else 0
 
             all_frames: list[dict[str, object]] = []
             for item in ordered_group:
@@ -1614,7 +1280,19 @@ class LocalVideoIngestionPipeline:
                     sum(float(_quality_or_zero(item, "average_laplacian")) for item in ordered_group) / max(len(ordered_group), 1),
                     6,
                 ),
-                "frame_count": sum(int(_quality_or_zero(item, "frame_count")) for item in ordered_group),
+                "frame_count": merged_frame_count_full,
+                "frame_density": round(
+                    (
+                        merged_frame_count_full
+                        / float(
+                            max(
+                                merged_frame_end_idx - merged_frame_start_idx + 1,
+                                1,
+                            )
+                        )
+                    ) if merged_frame_count_full > 0 else 0.0,
+                    6,
+                ),
                 "duration_seconds": round(
                     sum(float(_quality_or_zero(item, "duration_seconds")) for item in ordered_group),
                     6,
@@ -1629,7 +1307,10 @@ class LocalVideoIngestionPipeline:
             base["track_ids"] = unique_track_ids
             base["human_key"] = human_key
             base["merged_tracklet_count"] = len(ordered_group)
-            base["tracklet_frames"] = all_frames
+            base["tracklet_frames"] = _compact_serialized_tracklet_frames(all_frames, max_frames=30)
+            base["tracklet_frame_count_full"] = merged_frame_count_full
+            base["tracklet_frame_start_idx"] = merged_frame_start_idx
+            base["tracklet_frame_end_idx"] = merged_frame_end_idx
             base["timeline"] = all_timeline
             base["matched_segments"] = all_timeline
             base["semantic_attributes"] = merged_semantic_attributes
@@ -1655,6 +1336,37 @@ class LocalVideoIngestionPipeline:
             )
         )
         return merged_people
+
+    @staticmethod
+    def _metadata_people_with_full_tracklet_frames(
+        *,
+        people: list[dict[str, object]],
+        tracklets: tuple[LocalTracklet, ...],
+    ) -> list[dict[str, object]]:
+        tracklets_by_id = {tracklet.track_id: tracklet for tracklet in tracklets}
+        metadata_people: list[dict[str, object]] = []
+        for person in people:
+            metadata_person = deepcopy(person)
+            raw_track_ids = metadata_person.get("track_ids")
+            track_ids = [
+                str(track_id).strip()
+                for track_id in raw_track_ids
+                if str(track_id).strip()
+            ] if isinstance(raw_track_ids, list) else [str(metadata_person.get("track_id") or "").strip()]
+
+            full_observations: list[TrackletObservation] = []
+            for track_id in track_ids:
+                tracklet = tracklets_by_id.get(track_id)
+                if tracklet is not None:
+                    full_observations.extend(tracklet.observations)
+            full_observations.sort(key=lambda item: (float(item.timestamp_second), int(item.frame_index)))
+
+            metadata_person["tracklet_frames"] = _serialize_tracklet_frames(full_observations)
+            metadata_person["tracklet_frame_count_full"] = len(full_observations)
+            metadata_person["tracklet_frame_start_idx"] = int(full_observations[0].frame_index) if full_observations else 0
+            metadata_person["tracklet_frame_end_idx"] = int(full_observations[-1].frame_index) if full_observations else 0
+            metadata_people.append(metadata_person)
+        return metadata_people
 
     def _materialize_people(
         self,
@@ -1687,8 +1399,12 @@ class LocalVideoIngestionPipeline:
         # No global merge here — the tracker is a candidate generator only.
         # Cross-camera identity resolution happens downstream via search/trace.
         merged_people = self._merge_people_by_identity(video_id=video_id, people=people)
+        metadata_people = self._metadata_people_with_full_tracklet_frames(
+            people=merged_people,
+            tracklets=tracklets,
+        )
         with metadata_path.open("a", encoding="utf-8") as fh:
-            for person in merged_people:
+            for person in metadata_people:
                 fh.write(json.dumps(person, ensure_ascii=False))
                 fh.write("\n")
         return merged_people, accepted_tracklet_count

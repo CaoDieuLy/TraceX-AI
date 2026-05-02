@@ -30,6 +30,8 @@ ROLE_HIERARCHY: dict[str, int] = {
     "SUPER_ADMIN": 3,
 }
 
+PERSON_CANDIDATE_INSERT_CHUNK_SIZE = 50
+
 
 def _slugify(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-._") or "video"
@@ -329,25 +331,68 @@ def _trim_tracking_segments(segments: object, *, limit: int = 5) -> list[dict[st
     return trimmed
 
 
+def _trim_tracklet_frames(frames: object, *, limit: int = 5) -> list[dict[str, Any]]:
+    if not isinstance(frames, list):
+        return []
+    trimmed: list[dict[str, Any]] = []
+    for frame in frames[:limit]:
+        if not isinstance(frame, dict):
+            continue
+        trimmed.append(
+            {
+                "frame_idx": frame.get("frame_idx"),
+                "timestamp_second": frame.get("timestamp_second"),
+                "bbox": frame.get("bbox"),
+                "confidence": frame.get("confidence"),
+            }
+        )
+    return trimmed
+
+
 def _candidate_raw_metadata_subset(raw_metadata: object) -> dict[str, Any]:
     payload = raw_metadata if isinstance(raw_metadata, dict) else {}
     reduced: dict[str, Any] = {}
 
-    for key in (
-        "attribute_summary",
-        "appearance_summary",
-        "score",
-        "action_semantic_embedding",
-        "tracklet_feature_pipeline",
-    ):
+    for key in ("attribute_summary", "appearance_summary", "score", "tracklet_feature_pipeline"):
         value = payload.get(key)
         if value not in (None, "", [], {}):
             reduced[key] = value
 
-    for key in ("attribute_embedding_vector", "appearance_embedding_vector"):
+    action_payload = payload.get("action_semantic_embedding")
+    if isinstance(action_payload, dict) and action_payload:
+        reduced_action_payload = dict(action_payload)
+        reduced_action_payload["segments"] = _trim_tracking_segments(action_payload.get("segments"))
+        reduced["action_semantic_embedding"] = reduced_action_payload
+
+    for key in ("attribute_embedding_vector", "appearance_embedding_vector", "embedding_vector"):
         value = payload.get(key)
         if isinstance(value, list) and value:
             reduced[key] = value
+
+    for key in ("bbox", "representative_bbox"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            reduced[key] = value
+
+    frame_idx = payload.get("frame_idx")
+    if isinstance(frame_idx, (int, float)):
+        reduced["frame_idx"] = int(frame_idx)
+
+    for key in ("tracklet_frame_count_full", "tracklet_frame_start_idx", "tracklet_frame_end_idx"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            reduced[key] = int(value)
+
+    tracklet_quality = _coerce_mapping(payload.get("tracklet_quality"))
+    if tracklet_quality:
+        reduced["tracklet_quality"] = {
+            "accepted": bool(tracklet_quality.get("accepted", False)),
+            "average_confidence": tracklet_quality.get("average_confidence"),
+            "average_laplacian": tracklet_quality.get("average_laplacian"),
+            "frame_count": tracklet_quality.get("frame_count"),
+            "frame_density": tracklet_quality.get("frame_density"),
+            "duration_seconds": tracklet_quality.get("duration_seconds"),
+        }
 
     semantic_attributes = _coerce_string_list(payload.get("semantic_attributes"))
     if semantic_attributes:
@@ -368,6 +413,10 @@ def _candidate_raw_metadata_subset(raw_metadata: object) -> dict[str, Any]:
     timeline = _trim_tracking_segments(payload.get("timeline"))
     if timeline:
         reduced["timeline"] = timeline
+
+    tracklet_frames = _trim_tracklet_frames(payload.get("tracklet_frames"))
+    if tracklet_frames:
+        reduced["tracklet_frames"] = tracklet_frames
 
     return reduced
 
@@ -1663,6 +1712,7 @@ def delete_queue_video_asset(session: Session, video_id: str) -> None:
 def upsert_person_candidates(session: Session, people: list[dict], metadata_path: str | None = None) -> dict[str, int]:
     imported_count = 0
     updated_count = 0
+    normalized_people: list[dict[str, Any]] = []
 
     for person in people:
         if not isinstance(person, dict):
@@ -1671,8 +1721,8 @@ def upsert_person_candidates(session: Session, people: list[dict], metadata_path
         if not candidate_id:
             continue
 
-        existing = session.scalar(select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id))
-        values = {
+        normalized_people.append(
+            {
             "candidate_id": candidate_id,
             "camera_id": person.get("camera_id"),
             "video_id": person.get("video_id"),
@@ -1681,16 +1731,37 @@ def upsert_person_candidates(session: Session, people: list[dict], metadata_path
             "frame_idx": int(person.get("frame_idx") or 0),
             "search_text": _candidate_search_document(person),
             "metadata_path": metadata_path,
-            "raw_metadata": person,
-        }
+            "raw_metadata": _candidate_raw_metadata_subset(person),
+            }
+        )
+
+    if not normalized_people:
+        return {"imported_count": 0, "updated_count": 0}
+
+    existing_rows = session.scalars(
+        select(PersonCandidate).where(
+            PersonCandidate.candidate_id.in_([item["candidate_id"] for item in normalized_people])
+        )
+    ).all()
+    existing_by_candidate_id = {row.candidate_id: row for row in existing_rows}
+    insert_rows: list[dict[str, Any]] = []
+
+    for values in normalized_people:
+        existing = existing_by_candidate_id.get(str(values["candidate_id"]))
         if existing:
             for key, value in values.items():
                 setattr(existing, key, value)
             updated_count += 1
         else:
-            session.add(PersonCandidate(**values))
+            insert_rows.append(values)
             imported_count += 1
 
     session.flush()
+    for start in range(0, len(insert_rows), PERSON_CANDIDATE_INSERT_CHUNK_SIZE):
+        chunk = insert_rows[start: start + PERSON_CANDIDATE_INSERT_CHUNK_SIZE]
+        if chunk:
+            session.bulk_insert_mappings(PersonCandidate, chunk)
+            session.flush()
+
     return {"imported_count": imported_count, "updated_count": updated_count}
 
