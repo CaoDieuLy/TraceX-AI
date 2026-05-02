@@ -316,14 +316,37 @@ def _matrix_vector_similarity_scores(
     matrix: np.ndarray,
     vector: np.ndarray,
 ) -> np.ndarray:
+    """Cosine similarity: matrix [N, D] × vector [D] → scores [N].
+    Priority: FAISS-GPU → torch CUDA → numpy CPU.
+    Assumes matrix rows and vector are already L2-normalised.
+    """
     if matrix.size == 0:
         return np.zeros((0,), dtype=np.float32)
-    if torch.cuda.is_available() and matrix.shape[0] >= 1024:
+    m = matrix.astype(np.float32)
+    v = vector.astype(np.float32)
+
+    # ── FAISS-GPU (best for large N; single GPU call) ──────────────────────
+    try:
+        import faiss  # type: ignore
+        if faiss.get_num_gpus() > 0:
+            res = faiss.StandardGpuResources()
+            index_cpu = faiss.IndexFlatIP(m.shape[1])
+            index_gpu = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+            index_gpu.add(m)
+            scores, _ = index_gpu.search(v.reshape(1, -1), m.shape[0])
+            return scores[0].astype(np.float32)
+    except Exception:
+        pass
+
+    # ── torch CUDA (always use GPU when available) ─────────────────────────
+    if torch.cuda.is_available():
         device = torch.device("cuda")
-        matrix_tensor = torch.as_tensor(matrix, device=device)
-        vector_tensor = torch.as_tensor(vector, device=device)
-        return (matrix_tensor @ vector_tensor).float().detach().cpu().numpy()
-    return matrix @ vector
+        return (
+            torch.as_tensor(m, device=device) @ torch.as_tensor(v, device=device)
+        ).float().detach().cpu().numpy()
+
+    # ── numpy CPU fallback ─────────────────────────────────────────────────
+    return m @ v
 
 
 def _precompute_candidate_embedding_scores(query_embedding: np.ndarray | None, candidates: list[dict]) -> dict[int, float]:
@@ -670,6 +693,14 @@ def _build_lightning_headers() -> dict[str, str]:
         prefix = settings.lightning_api_auth_prefix or ""
         headers[settings.lightning_api_auth_header] = f"{prefix}{token}"
     return headers
+
+
+def _video_cache_root() -> Path:
+    """Persistent video cache shared across all artifact runs on this machine."""
+    env = os.environ.get("MCPT_VIDEO_CACHE_ROOT", "").strip()
+    root = Path(env) if env else Path(__file__).resolve().parent.parent.parent / "storage" / "video-cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _download_file(url: str, output_path: str, timeout: int = 180) -> None:
@@ -1239,8 +1270,16 @@ def search_candidates_remote(
 
 
 def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> Path:
-    source_root = _artifact_root() / artifact_id / "sources"
-    source_root.mkdir(parents=True, exist_ok=True)
+    cache_root = _video_cache_root()
+
+    def _cached_download(url: str, filename: str) -> Path:
+        cached = cache_root / filename
+        if cached.exists() and cached.stat().st_size > 0:
+            logger.info("Video cache hit: %s", cached)
+            return cached
+        logger.info("Video cache miss — downloading %s → %s", url, cached)
+        _download_file(url, str(cached))
+        return cached
 
     drive_file_id = str(candidate.get("drive_video_file_id") or "").strip()
     if drive_file_id:
@@ -1250,9 +1289,7 @@ def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> 
         ).name
         if not Path(filename).suffix:
             filename = f"{filename}.mp4"
-        target_path = source_root / filename
-        _download_file(public_url, str(target_path))
-        return target_path
+        return _cached_download(public_url, filename)
 
     for key in ("available_link_video", "storage_path", "local_video_path"):
         value = str(candidate.get(key) or "").strip()
@@ -1260,9 +1297,8 @@ def _resolve_remote_candidate_source_path(candidate: dict, artifact_id: str) -> 
             continue
         if value.startswith(("http://", "https://")):
             suffix = Path(urlparse(value).path).suffix or ".mp4"
-            target_path = source_root / f"{_tracking_slug(candidate.get('candidate_id') or 'candidate')}{suffix}"
-            _download_file(value, str(target_path))
-            return target_path
+            filename = f"{_tracking_slug(candidate.get('candidate_id') or 'candidate')}{suffix}"
+            return _cached_download(value, filename)
         path = Path(value).expanduser()
         if path.exists():
             return path
@@ -1328,6 +1364,50 @@ def _prepare_remote_tracking_jobs(
     return jobs
 
 
+def _open_video_writer(
+    output_path: Path,
+    fps: float,
+    size: tuple[int, int],
+):
+    """Open ffmpeg NVENC writer, fall back to libx264, then cv2 mp4v.
+    Returns (ffmpeg_proc | None, cv2_writer | None).
+    """
+    import subprocess, shutil as _sh
+    w, h = size
+    ffmpeg_bin = _sh.which("ffmpeg")
+    if ffmpeg_bin:
+        for codec in ("h264_nvenc", "libx264"):
+            try:
+                proc = subprocess.Popen(
+                    [
+                        ffmpeg_bin, "-y",
+                        "-f", "rawvideo", "-pix_fmt", "bgr24",
+                        "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0",
+                        "-c:v", codec,
+                        *(("-preset", "p4", "-rc", "vbr", "-cq", "23") if codec == "h264_nvenc" else ("-preset", "fast", "-crf", "23")),
+                        "-pix_fmt", "yuv420p",
+                        str(output_path),
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                logger.info("Video encoder: %s via ffmpeg", codec)
+                return proc, None
+            except Exception:
+                continue
+
+    import cv2 as _cv2
+    logger.info("Video encoder: mp4v via cv2 (CPU fallback)")
+    writer = _cv2.VideoWriter(
+        str(output_path),
+        _cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        size,
+    )
+    return None, writer
+
+
 def build_tracking_video_remote(
     *,
     selected_candidate_id: str,
@@ -1366,7 +1446,8 @@ def build_tracking_video_remote(
     output_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = None
+    writer = None        # ffmpeg subprocess or cv2.VideoWriter
+    ffmpeg_proc = None   # set when using NVENC path
     written_frames = 0
     output_fps_cap = float(runtime_defaults.get("trace_output_fps_cap") or 12.0)
     output_fps = output_fps_cap
@@ -1393,12 +1474,7 @@ def build_tracking_video_remote(
         if output_size is None:
             output_size = (width, height)
             output_fps = max(8.0, min(fps or output_fps_cap, output_fps_cap))
-            writer = cv2.VideoWriter(
-                str(output_path),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                output_fps,
-                output_size,
-            )
+            ffmpeg_proc, writer = _open_video_writer(output_path, output_fps, output_size)
         current_frame = 0
         for clip in job["clips"]:
             start_second = float(clip["start_second"])
@@ -1427,7 +1503,10 @@ def build_tracking_video_remote(
                 cv2.putText(frame, overlay_1[:120], (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 2)
                 cv2.putText(frame, overlay_2[:120], (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(frame, overlay_3[:120], (12, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 255, 180), 1)
-                if writer is not None:
+                if ffmpeg_proc is not None:
+                    ffmpeg_proc.stdin.write(frame.tobytes())
+                    written_frames += 1
+                elif writer is not None:
                     writer.write(frame)
                     written_frames += 1
             clips_manifest.append(
@@ -1443,7 +1522,10 @@ def build_tracking_video_remote(
             )
         cap.release()
 
-    if writer is not None:
+    if ffmpeg_proc is not None:
+        ffmpeg_proc.stdin.close()
+        ffmpeg_proc.wait()
+    elif writer is not None:
         writer.release()
 
     if written_frames <= 0 or not output_path.exists():

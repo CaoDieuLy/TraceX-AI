@@ -15,6 +15,7 @@ DB   : set DATABASE_URL env var, or uses POSTGRES_* from master.env.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -473,7 +474,7 @@ def run(
             log.info("[%d/%d] Done: %d people / %s tracklets", i, len(files), people_count, tracklet_count)
 
             with SessionLocal() as session:
-                saved = save_result(session, result, {"name": filename, "camera_id": camera_id})
+                saved = save_result(session, result, {**f, "camera_id": camera_id})
             total_saved += saved
             log.info("[%d/%d] Saved %d new candidates (total so far: %d)", i, len(files), saved, total_saved)
 
@@ -483,6 +484,106 @@ def run(
 
     log.info("[done] Shard %d/%d finished. Videos=%d, candidates saved=%d",
              shard, total_shards - 1, len(files), total_saved)
+
+
+def backfill(drive_folder_id: str = DRIVE_FOLDER_ID) -> None:
+    """
+    Backfill queue_video_assets + abs_start/abs_end/recorded_start in raw_metadata
+    for all person_candidates rows that were ingested before these fields existed.
+    Safe to run multiple times (skips videos already in queue_video_assets).
+    """
+    from datetime import timedelta
+
+    SessionLocal = setup_db(clear=False)
+    log.info("[backfill] Connecting to Drive …")
+    drive = build_drive_service()
+    all_files = list_drive_mp4s(drive, drive_folder_id)
+    drive_by_name = {f["name"]: f for f in all_files}
+    log.info("[backfill] Drive has %d mp4 files", len(drive_by_name))
+
+    with SessionLocal() as session:
+        video_ids = [
+            r[0] for r in session.execute(
+                text("SELECT DISTINCT video_id FROM person_candidates ORDER BY video_id")
+            ).fetchall()
+        ]
+    log.info("[backfill] %d distinct video_ids in person_candidates", len(video_ids))
+
+    for i, video_id in enumerate(video_ids, 1):
+        filename = video_id
+        recorded_start = _parse_recorded_start(filename)
+        recorded_start_iso = recorded_start.isoformat() if recorded_start else None
+
+        drive_file  = drive_by_name.get(filename, {})
+        drive_id    = drive_file.get("id", "")
+        view_link   = drive_file.get("webViewLink") or drive_file.get("webContentLink") or ""
+        if not view_link and drive_id:
+            view_link = f"https://drive.google.com/file/d/{drive_id}/view"
+        camera_id   = parse_camera_id(filename)
+
+        with SessionLocal() as session:
+            # ── queue_video_assets ─────────────────────────────────────────
+            existing_qva = session.query(QueueVideoAsset).filter_by(video_id=video_id).first()
+            if not existing_qva:
+                session.add(QueueVideoAsset(
+                    video_id             = video_id,
+                    camera_id            = camera_id,
+                    title                = filename,
+                    source_filename      = filename,
+                    source_mode          = "google_drive",
+                    queue_position       = 0,
+                    storage_backend      = "google_drive",
+                    available_link_video = view_link,
+                    drive_video_file_id  = drive_id or None,
+                    raw_video_metadata   = {"recorded_start": recorded_start_iso},
+                ))
+                session.commit()
+                log.info("[backfill %d/%d] inserted queue_video_assets for %s", i, len(video_ids), filename)
+            else:
+                log.info("[backfill %d/%d] queue_video_assets already exists for %s — skip", i, len(video_ids), filename)
+
+            # ── person_candidates raw_metadata ─────────────────────────────
+            candidates = session.execute(
+                text("SELECT id, raw_metadata FROM person_candidates WHERE video_id = :vid"),
+                {"vid": video_id},
+            ).fetchall()
+
+            pending = 0
+            for row_id, meta in candidates:
+                if not isinstance(meta, dict):
+                    continue
+                changed = False
+                if recorded_start_iso and not meta.get("recorded_start"):
+                    meta["recorded_start"] = recorded_start_iso
+                    changed = True
+                if recorded_start and not meta.get("abs_start"):
+                    timeline = meta.get("timeline") or []
+                    quality  = meta.get("tracklet_quality") or {}
+                    if isinstance(timeline, list) and timeline:
+                        starts  = [float(s.get("start_second", 0)) for s in timeline if isinstance(s, dict)]
+                        ends    = [float(s.get("end_second", 0))   for s in timeline if isinstance(s, dict)]
+                        t_start = min(starts) if starts else 0.0
+                        t_end   = max(ends)   if ends   else 0.0
+                    else:
+                        t_start = 0.0
+                        t_end   = float(quality.get("duration_seconds") or 0.0)
+                    meta["abs_start"] = (recorded_start + timedelta(seconds=t_start)).isoformat()
+                    meta["abs_end"]   = (recorded_start + timedelta(seconds=t_end)).isoformat()
+                    changed = True
+                if changed:
+                    session.execute(
+                        text("UPDATE person_candidates SET raw_metadata = :m, updated_at = NOW() WHERE id = :id"),
+                        {"m": json.dumps(meta, default=str), "id": row_id},
+                    )
+                    pending += 1
+                    if pending >= _DB_CHUNK_SIZE:
+                        session.commit()
+                        pending = 0
+            if pending:
+                session.commit()
+            log.info("[backfill %d/%d] updated %d candidates for %s", i, len(video_ids), pending, filename)
+
+    log.info("[backfill] done — %d videos processed", len(video_ids))
 
 
 if __name__ == "__main__":
@@ -496,8 +597,10 @@ Parallel execution (3 GPU servers, 50 videos):
   TRACKING_SERVICE_URL=https://gpu-2 python ingest_local.py --shard 2 --total-shards 3
 """,
     )
-    parser.add_argument("--dry-run", action="store_true", help="List videos only, no processing")
+    parser.add_argument("--dry-run",  action="store_true", help="List videos only, no processing")
     parser.add_argument("--clear-db", action="store_true", help="Truncate DB tables before run")
+    parser.add_argument("--backfill", action="store_true",
+                        help="Populate queue_video_assets and abs_start/abs_end for existing candidates")
     parser.add_argument("--shard", type=int, default=0, metavar="INDEX",
                         help="0-based shard index for parallel execution (default: 0)")
     parser.add_argument("--total-shards", type=int, default=1, metavar="TOTAL",
@@ -511,10 +614,13 @@ Parallel execution (3 GPU servers, 50 videos):
     if args.lightning_url:
         LIGHTNING_URL = args.lightning_url.rstrip("/")
 
-    run(
-        dry_run=args.dry_run,
-        clear_db=args.clear_db,
-        shard=args.shard,
-        total_shards=args.total_shards,
-        shard_mode=args.shard_mode,
-    )
+    if args.backfill:
+        backfill()
+    else:
+        run(
+            dry_run=args.dry_run,
+            clear_db=args.clear_db,
+            shard=args.shard,
+            total_shards=args.total_shards,
+            shard_mode=args.shard_mode,
+        )

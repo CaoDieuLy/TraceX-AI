@@ -15,7 +15,7 @@ import cv2
 import httpx
 from googleapiclient.http import MediaIoBaseDownload
 from passlib.exc import UnknownHashError
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from .auth import hash_password, verify_password
@@ -881,21 +881,29 @@ def _queue_video_map(session: Session, video_ids: list[str]) -> dict[str, QueueV
     return {row.video_id: row for row in rows}
 
 
-def search_candidates(session: Session, query: str | None = None, limit: int = 20) -> list[dict]:
+def search_candidates(
+    session: Session,
+    query: str | None = None,
+    limit: int = 20,
+    camera_ids: list[str] | None = None,
+) -> list[dict]:
     statement = select(PersonCandidate).order_by(PersonCandidate.updated_at.desc(), PersonCandidate.id.desc())
     cleaned_query = (query or "").strip()
     if cleaned_query:
-        pattern = f"%{cleaned_query}%"
-        statement = statement.where(
-            or_(
-                PersonCandidate.search_text.ilike(pattern),
-                PersonCandidate.camera_id.ilike(pattern),
-                PersonCandidate.video_id.ilike(pattern),
-                PersonCandidate.human_key.ilike(pattern),
-                PersonCandidate.track_id.ilike(pattern),
+        tokens = [t for t in cleaned_query.lower().split() if len(t) >= 2]
+        for token in tokens:
+            pattern = f"%{token}%"
+            statement = statement.where(
+                or_(
+                    PersonCandidate.search_text.ilike(pattern),
+                    PersonCandidate.camera_id.ilike(pattern),
+                    PersonCandidate.video_id.ilike(pattern),
+                    PersonCandidate.human_key.ilike(pattern),
+                )
             )
-        )
-    rows = session.scalars(statement.limit(max(1, min(limit, 100)))).all()
+    if camera_ids:
+        statement = statement.where(PersonCandidate.camera_id.in_(camera_ids))
+    rows = session.scalars(statement.limit(max(1, min(limit, 500)))).all()
     queue_map = _queue_video_map(session, [str(row.video_id or "") for row in rows])
     return [candidate_to_payload(row, queue_map.get(str(row.video_id or ""))) for row in rows]
 

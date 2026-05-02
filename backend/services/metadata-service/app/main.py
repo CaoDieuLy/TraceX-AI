@@ -114,6 +114,40 @@ def healthcheck() -> dict:
     return {"status": "ok", "service": "metadata-service"}
 
 
+class FrontendSearchRequest(BaseModel):
+    query: str = ""
+    top_k: int = Field(default=20, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+    camera_ids: list[str] | None = None
+    time_from: str | None = None
+    time_to: str | None = None
+
+
+@app.post("/search")
+def frontend_search(
+    payload: FrontendSearchRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Adapter endpoint matching frontend API contract → metadata-service search."""
+    items = search_candidates(
+        session=session,
+        query=payload.query or None,
+        limit=payload.top_k + payload.offset,
+        camera_ids=payload.camera_ids or None,
+    )
+    items = items[payload.offset: payload.offset + payload.top_k]
+    results = [
+        {
+            "id": item["candidate_id"],
+            "thumbnail_url": item.get("preview_image_url", ""),
+            "description": item.get("search_text") or item.get("camera_id") or item["candidate_id"],
+        }
+        for item in items
+    ]
+    return {"results": results}
+
+
 @app.post("/api/v1/auth/register")
 def register() -> dict:
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Public registration is disabled")
@@ -351,7 +385,6 @@ def candidate_detail(
 def candidate_preview(
     candidate_id: str,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user),
 ) -> FileResponse:
     try:
         preview_path = build_candidate_preview_image(session, candidate_id)
