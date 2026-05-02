@@ -68,7 +68,7 @@ def _warmup_snapshot() -> dict[str, object]:
 
 
 def _warmup_models() -> None:
-    from .model_adapters import SigLIP2ModelHub, TransReIDHub, VideoMAEHub
+    from .model_adapters import SigLIP2ModelHub, DINOv2ReIDHub, VideoMAEHub
 
     prepare_runtime_for_inference()
     logger.info("[warmup] Pre-loading AI models into GPU memory...")
@@ -81,11 +81,11 @@ def _warmup_models() -> None:
         logger.error("[warmup] SigLIP2 failed: %s", exc)
 
     try:
-        hub = TransReIDHub()
+        hub = DINOv2ReIDHub()
         hub._ensure_loaded()
-        logger.info("[warmup] TransReID ViT-Base ready")
+        logger.info("[warmup] DINOv2 ViT-L/14 ready")
     except Exception as exc:
-        logger.error("[warmup] TransReID failed: %s", exc)
+        logger.error("[warmup] DINOv2 failed: %s", exc)
 
     try:
         hub = VideoMAEHub()

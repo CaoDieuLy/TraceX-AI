@@ -755,7 +755,7 @@ class LocalMetadataAssembler:
 
         # Lazy import model hubs and helpers from model_adapters
         from .model_adapters import (
-            SigLIP2ModelHub, TransReIDHub, VideoMAEHub,
+            SigLIP2ModelHub, DINOv2ReIDHub, VideoMAEHub,
             _crop_pil, _selected_observations, _part_crops, _quality_weighted_pool,
             _GENDER_PROMPTS, _AGE_PROMPTS,
             _SHIRT_PROMPTS, _PANTS_PROMPTS, _HAIR_PROMPTS, _SKIN_PROMPTS,
@@ -770,7 +770,7 @@ class LocalMetadataAssembler:
         )
 
         siglip = SigLIP2ModelHub()
-        reid   = TransReIDHub()
+        reid   = DINOv2ReIDHub()
         vmae   = VideoMAEHub()
 
         # ── Build TrackletFeatureInput for every tracklet ──────────────────────
@@ -893,12 +893,14 @@ class LocalMetadataAssembler:
                 bag=_best(fields["bag"]),
             ))
 
-        # ── Phase 3: Batch TransReID ────────────────────────────────────────────
-        per_t_pil_crops: list[list]       = []
-        per_t_weights:   list[list[float]]= []
+        # ── Phase 3: Batch DINOv2 Re-ID ────────────────────────────────────────
+        # DINOv2 ViT-L/14 replaces TransReID: view-invariant CLS-token embeddings
+        # handle overhead / angled cameras that break MSMT17-trained side-view models.
+        # No part-cropping needed — the global CLS token already captures full-body
+        # appearance from any viewpoint.
+        per_t_pil_crops: list[list]        = []
+        per_t_weights:   list[list[float]] = []
         all_fulls:  list = []
-        all_uppers: list = []
-        all_lowers: list = []
         reid_slices: list[tuple[int, int]] = []
 
         for ti, selection in zip(tracklet_inputs, selections):
@@ -914,45 +916,26 @@ class LocalMetadataAssembler:
             per_t_pil_crops.append(pil_crops)
             per_t_weights.append(weights)
             s = len(all_fulls)
-            if pil_crops:
-                parts = [_part_crops(pil) for pil in pil_crops]
-                all_fulls.extend(p[0] for p in parts)
-                all_uppers.extend(p[1] for p in parts)
-                all_lowers.extend(p[2] for p in parts)
+            all_fulls.extend(pil_crops)
             reid_slices.append((s, len(all_fulls)))
 
-        # ONE TransReID call with all crops
-        _G_W, _P_W = 0.55, 0.45
-        if all_fulls:
-            total_M   = len(all_fulls)
-            reid_raw  = reid.embed_crops(all_fulls + all_uppers + all_lowers)  # [3M, 768]
-            gf_all    = reid_raw[:total_M]
-            uf_all    = reid_raw[total_M:2 * total_M]
-            lf_all    = reid_raw[2 * total_M:]
-        else:
-            gf_all = uf_all = lf_all = np.zeros((0, 768), dtype=np.float32)
+        # ONE DINOv2 call with all crops → [M, 1024]
+        gf_all = reid.embed_crops(all_fulls) if all_fulls else np.zeros((0, 1024), dtype=np.float32)
 
         all_appearance_embed: list[AppearanceEmbeddingResult] = []
         for idx, (pil_crops, weights) in enumerate(zip(per_t_pil_crops, per_t_weights)):
             s, e = reid_slices[idx]
             if not pil_crops:
-                empty = tuple(0.0 for _ in range(768))
+                empty = tuple(0.0 for _ in range(1024))
                 all_appearance_embed.append(AppearanceEmbeddingResult(
-                    embedding_model="transreid-vit-base-msmt17-kpr",
+                    embedding_model="dinov2-vitl14",
                     embedding_vector=empty, tracklet_vectors=(empty,),
                 ))
                 continue
-            gf, uf, lf = gf_all[s:e], uf_all[s:e], lf_all[s:e]
-            per_frame_vecs = []
-            for i in range(len(pil_crops)):
-                pm   = (uf[i] + lf[i]) / 2.0
-                pn   = float(np.linalg.norm(pm)) or 1.0
-                fused = _G_W * gf[i] + _P_W * (pm / pn)
-                fn   = float(np.linalg.norm(fused)) or 1.0
-                per_frame_vecs.append((fused / fn).astype(np.float32))
-            pooled = _quality_weighted_pool(per_frame_vecs, weights)
+            gf = gf_all[s:e]  # [K, 1024] already L2-normalised per frame
+            pooled = _quality_weighted_pool(list(gf), weights)
             all_appearance_embed.append(AppearanceEmbeddingResult(
-                embedding_model="transreid-vit-base-msmt17-kpr",
+                embedding_model="dinov2-vitl14",
                 embedding_vector=tuple(round(float(v), 6) for v in pooled.tolist()),
                 tracklet_vectors=tuple(
                     tuple(round(float(v), 6) for v in gf[i].tolist())
@@ -1167,7 +1150,7 @@ class LocalVideoIngestionPipeline:
     def _resolve_within_camera_identities(
         people: list[dict[str, object]],
         *,
-        reid_threshold: float = 0.82,
+        reid_threshold: float = 0.85,
         max_overlap_ratio: float = 0.15,
     ) -> list[dict[str, object]]:
         """

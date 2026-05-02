@@ -2,7 +2,7 @@
 Model adapters for tracklet feature pipeline — SOTA single production path, no fallbacks.
 
 Models (all SOTA as of April 2026):
-  TransReIDHub    — ViT-Base Re-ID backbone, 768-dim (MSMT17, CVPR 2021)
+  DINOv2ReIDHub   — ViT-L/14 self-supervised, 1024-dim (view-invariant Re-ID)
   VideoMAEHub     — Large video transformer, 1024-dim (Kinetics-400, ECCV 2022)
   SigLIP2ModelHub — ViT-L-16-512 image/text, 1024-dim (webli, Feb 2025 SOTA)
 
@@ -10,7 +10,7 @@ Adapters:
   ZeroShotAttributeAdapter          — gender + age_group (SigLIP2 zero-shot)
   ZeroShotAppearanceMetadataAdapter — 8-field appearance metadata (SigLIP2 zero-shot)
   CLIPAttributeEmbeddingAdapter     — attribute text embedding 1024-dim (SigLIP2)
-  SoliderKPRAppearanceEmbeddingAdapter — KPR part fusion Re-ID 768-dim (TransReID)
+  SoliderKPRAppearanceEmbeddingAdapter — KPR part fusion Re-ID 1024-dim (DINOv2)
   SigLIP2BehaviorAnalyzer           — VideoMAE temporal + SigLIP2 text action scoring
   ItselfSemanticEmbedder            — action semantic embedding 1024-dim (SigLIP2)
 """
@@ -178,26 +178,32 @@ def _weights_root() -> Path:
     return Path(__file__).parent.parent.parent.parent.parent / "storage" / "model-weights"
 
 
-class TransReIDHub:
-    """
-    TransReID ViT-Base/16 trained on MSMT17 — lazy singleton for person Re-ID.
 
-    Produces 768-dim L2-normalised embeddings from 256×128 person crops.
-    Significantly outperforms OSNet-AIN for cross-camera Re-ID tasks.
-    Checkpoint: 86M params, trained for 120 epochs on MSMT17 (4,101 identities).
-    Weights pre-loaded on shared filesystem — no download at inference time.
+
+# ---------------------------------------------------------------------------
+# DINOv2 Re-ID Hub — view-invariant appearance encoder (1024-dim)
+# Replaces TransReID for scenarios with non-frontal / overhead cameras.
+# DINOv2 ViT-L/14 is self-supervised on internet-scale diverse images and
+# generalises to top-down and side views without any ReID fine-tuning.
+# ---------------------------------------------------------------------------
+
+class DINOv2ReIDHub:
+    """
+    DINOv2 ViT-L/14 — lazy singleton for view-invariant person Re-ID.
+
+    Produces 1024-dim L2-normalised CLS-token embeddings from person crops.
+    Unlike TransReID (trained on MSMT17 side-view pedestrians), DINOv2 handles
+    overhead, angled, and unusual camera viewpoints found in multi-camera
+    warehouse deployments.
+
+    Model: facebook/dinov2-large (307M params, 1024-dim CLS).
+    Override with env var MCPT_DINOV2_MODEL_ID (HF hub ID or local path).
     """
 
-    _instance: Optional["TransReIDHub"] = None
+    _instance: Optional["DINOv2ReIDHub"] = None
     _lock = threading.Lock()
 
-    @property
-    def _CKPT(self) -> Path:
-        import os
-        env = os.environ.get("MCPT_TRANSREID_WEIGHTS", "").strip()
-        return Path(env) if env else _weights_root() / "transreid-reid" / "transformer_120.pth"
-
-    def __new__(cls) -> "TransReIDHub":
+    def __new__(cls) -> "DINOv2ReIDHub":
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
@@ -211,63 +217,38 @@ class TransReIDHub:
             if self._loaded:
                 return
             import torch
-            import timm
-            logger.info("Loading TransReID ViT-base from %s …", self._CKPT)
-            # Build ViT-base matching TransReID's patch_embed architecture
-            model = timm.create_model(
-                "vit_base_patch16_224",
-                pretrained=False,
-                num_classes=0,
-                img_size=(256, 128),
-            )
-            if self._CKPT.exists():
-                ckpt = torch.load(str(self._CKPT), map_location="cpu")
-                state = ckpt.get("state_dict", ckpt.get("model", ckpt))
-                # TransReID wraps backbone under 'base.' prefix
-                backbone_state = {
-                    k[len("base."):]: v
-                    for k, v in state.items()
-                    if k.startswith("base.") and "classifier" not in k
-                }
-                missing, unexpected = model.load_state_dict(backbone_state, strict=False)
-                logger.info(
-                    "TransReID loaded: missing=%d unexpected=%d from %s",
-                    len(missing), len(unexpected), self._CKPT.name,
-                )
-            else:
-                logger.warning("TransReID checkpoint not found at %s", self._CKPT)
+            from transformers import AutoImageProcessor, AutoModel
+
+            model_id = os.environ.get("MCPT_DINOV2_MODEL_ID", "facebook/dinov2-large")
+            logger.info("Loading DINOv2 Re-ID from %s …", model_id)
+            self._processor = AutoImageProcessor.from_pretrained(model_id)
+            self._model = AutoModel.from_pretrained(model_id)
             self._device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = model.to(self._device).eval()
-            self._model = model
+            self._model = self._model.to(self._device).eval()
             self._torch = torch
-            import torchvision.transforms as T
-            self._transform = T.Compose([
-                T.Resize((256, 128)),
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
             self._loaded = True
-            logger.info("TransReID ready on %s (768-dim)", self._device)
+            logger.info("DINOv2 Re-ID ready on %s (1024-dim)", self._device)
 
     def embed_crops(self, pil_crops: list[Image.Image]) -> np.ndarray:
-        """Return L2-normalised 768-dim Re-ID embeddings [N, 768]."""
+        """Return L2-normalised 1024-dim CLS embeddings [N, 1024]."""
         self._ensure_loaded()
         if not pil_crops:
-            return np.zeros((0, 768), dtype=np.float32)
-        tensors = [self._transform(img.convert("RGB")) for img in pil_crops]
-        batch_size = _env_batch_size("MCPT_REID_BATCH_SIZE", min(len(tensors), 256))
+            return np.zeros((0, 1024), dtype=np.float32)
+        batch_size = _env_batch_size("MCPT_REID_BATCH_SIZE", min(len(pil_crops), 64))
         outputs: list[np.ndarray] = []
-        for start in range(0, len(tensors), batch_size):
-            batch = self._torch.stack(tensors[start:start + batch_size]).to(self._device)
+        for start in range(0, len(pil_crops), batch_size):
+            batch = [p.convert("RGB") for p in pil_crops[start: start + batch_size]]
+            inputs = self._processor(images=batch, return_tensors="pt").to(self._device)
             with _gpu_inference_scope(
                 self._torch,
                 self._device,
                 precision_env="MCPT_REID_PRECISION",
-                default_precision="fp32",
+                default_precision="fp16",
             ):
-                feats = self._model(batch)
-            feats = feats / feats.norm(dim=-1, keepdim=True)
-            outputs.append(feats.float().cpu().numpy())
+                cls_feats = self._model(**inputs).last_hidden_state[:, 0, :]  # [B, 1024]
+            norms = cls_feats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            cls_feats = (cls_feats / norms).float().cpu().numpy()
+            outputs.append(cls_feats)
         return np.concatenate(outputs, axis=0)
 
 
@@ -712,23 +693,21 @@ class CLIPAttributeEmbeddingAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Stage 4c: Appearance embedding — SigLIP2 + KPR-style part fusion (1024-dim)
+# Stage 4c: Appearance embedding — DINOv2 ViT-L/14 (1024-dim)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SoliderKPRAppearanceEmbeddingAdapter:
     """
-    TransReID ViT-Base (MSMT17) + KPR-style part fusion appearance embedding.
+    DINOv2 ViT-L/14 appearance embedding — view-invariant person Re-ID.
 
-    Primary Re-ID backbone: TransReID 768-dim (SOTA cross-camera Re-ID).
-    Part strategy: global (full crop) + upper + lower body crops (KPR-style).
-    Fusion: 0.55 * global + 0.45 * mean(upper, lower), quality-weighted mean.
-    Output: 768-dim L2-normalised vector stored as appearance_embedding_vector.
+    Replaces TransReID+KPR for multi-camera deployments with overhead or
+    non-standard camera angles. DINOv2 CLS-token features generalise across
+    viewpoints without domain-specific ReID fine-tuning.
+    Output: 1024-dim L2-normalised vector stored as appearance_embedding_vector.
     """
 
-    embedding_model: str = "transreid-vit-base-msmt17-kpr"
-    global_weight: float = 0.55
-    part_weight: float = 0.45
+    embedding_model: str = "dinov2-vitl14"
 
     def extract(
         self,
@@ -737,7 +716,7 @@ class SoliderKPRAppearanceEmbeddingAdapter:
         static_attributes: StaticAttributeResult,
         appearance_attributes: AppearanceAttributeResult,
     ) -> AppearanceEmbeddingResult:
-        hub = TransReIDHub()
+        hub = DINOv2ReIDHub()
         selected = _selected_observations(tracklet, selection)
         quality_map = {item.frame_index: item.quality_score for item in selection.selected_frames}
 
@@ -751,50 +730,23 @@ class SoliderKPRAppearanceEmbeddingAdapter:
             weights.append(quality_map.get(frame.frame_index, 0.1))
 
         if not pil_crops:
-            empty = tuple(0.0 for _ in range(512))
+            empty = tuple(0.0 for _ in range(1024))
             return AppearanceEmbeddingResult(
                 embedding_model=self.embedding_model,
                 embedding_vector=empty,
                 tracklet_vectors=(empty,),
             )
 
-        per_frame_vecs, global_vecs = self._embed_frames(hub, pil_crops)
-        fused = _quality_weighted_pool(per_frame_vecs, weights)
-        fused_tuple = tuple(round(float(v), 6) for v in fused.tolist())
-        per_frame_tuples = [tuple(round(float(v), 6) for v in row) for row in global_vecs]
-
+        feats = hub.embed_crops(pil_crops)  # [N, 1024] already L2-normalised
+        pooled = _quality_weighted_pool(list(feats), weights)
         return AppearanceEmbeddingResult(
             embedding_model=self.embedding_model,
-            embedding_vector=fused_tuple,
-            tracklet_vectors=tuple(per_frame_tuples),
+            embedding_vector=tuple(round(float(v), 6) for v in pooled.tolist()),
+            tracklet_vectors=tuple(
+                tuple(round(float(v), 6) for v in feats[i].tolist())
+                for i in range(len(pil_crops))
+            ),
         )
-
-    def _embed_frames(
-        self,
-        hub: TransReIDHub,
-        pil_crops: list[Image.Image],
-    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        all_parts = [_part_crops(pil) for pil in pil_crops]
-        full_crops  = [p[0] for p in all_parts]
-        upper_crops = [p[1] for p in all_parts]
-        lower_crops = [p[2] for p in all_parts]
-
-        all_feats = hub.embed_crops(full_crops + upper_crops + lower_crops)  # [3N, 768]
-        n = len(full_crops)
-        global_feats = all_feats[:n]
-        upper_feats  = all_feats[n:2 * n]
-        lower_feats  = all_feats[2 * n:]
-
-        per_frame_vecs: list[np.ndarray] = []
-        for i in range(len(pil_crops)):
-            part_mean = (upper_feats[i] + lower_feats[i]) / 2.0
-            part_norm = float(np.linalg.norm(part_mean)) or 1.0
-            part_mean /= part_norm
-            fused = self.global_weight * global_feats[i] + self.part_weight * part_mean
-            fused_norm = float(np.linalg.norm(fused)) or 1.0
-            per_frame_vecs.append((fused / fused_norm).astype(np.float32))
-
-        return per_frame_vecs, [global_feats[i] for i in range(len(pil_crops))]
 
 
 # ---------------------------------------------------------------------------
