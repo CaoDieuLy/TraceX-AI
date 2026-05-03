@@ -33,7 +33,7 @@ secret_backups/
 *.tar.gz.enc.manifest.txt
 *.tar.gz
 *.tgz
-
+.sql
 # Python
 __pycache__/
 *.py[cod]
