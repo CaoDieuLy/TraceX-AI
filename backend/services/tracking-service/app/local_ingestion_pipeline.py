@@ -53,6 +53,8 @@ class FrameDetection:
     confidence: float
     laplacian_score: float
     crop_bgr: np.ndarray | None = None
+    world_x: float | None = None  # ground-plane X in world units (meters)
+    world_y: float | None = None  # ground-plane Y in world units (meters)
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,8 @@ class TrackletObservation:
     confidence: float
     laplacian_score: float
     crop_bgr: np.ndarray | None = None
+    world_x: float | None = None
+    world_y: float | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,48 @@ def _bbox_center(bbox: BoundingBox) -> tuple[float, float]:
 
 def _point_distance(lhs: tuple[float, float], rhs: tuple[float, float]) -> float:
     return math.hypot(lhs[0] - rhs[0], lhs[1] - rhs[1])
+
+
+_HOMOGRAPHY_REGISTRY: dict[str, np.ndarray] = {}
+_HOMOGRAPHY_REGISTRY_LOADED = False
+
+# backend/config/homography_registry.json relative to this file:
+# app/ -> tracking-service/ -> services/ -> backend/ -> config/
+_REGISTRY_PATH = Path(__file__).resolve().parent.parent.parent.parent / "config" / "homography_registry.json"
+
+
+def _load_homography_registry() -> None:
+    global _HOMOGRAPHY_REGISTRY, _HOMOGRAPHY_REGISTRY_LOADED
+    if _HOMOGRAPHY_REGISTRY_LOADED:
+        return
+    _HOMOGRAPHY_REGISTRY_LOADED = True
+    if not _REGISTRY_PATH.exists():
+        LOGGER.warning("Homography registry not found at %s — world-coordinate tracking disabled", _REGISTRY_PATH)
+        return
+    try:
+        raw = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
+        _HOMOGRAPHY_REGISTRY = {k: np.array(v, dtype=np.float64) for k, v in raw.items()}
+        LOGGER.info("Homography registry loaded: %d cameras", len(_HOMOGRAPHY_REGISTRY))
+    except Exception as exc:
+        LOGGER.warning("Failed to load homography registry: %s", exc)
+
+
+def _get_homography_inv(camera_id: str | None) -> "np.ndarray | None":
+    _load_homography_registry()
+    return _HOMOGRAPHY_REGISTRY.get(camera_id) if camera_id else None
+
+
+def _project_to_world(
+    H_inv: "np.ndarray",
+    bbox: BoundingBox,
+) -> "tuple[float, float] | None":
+    """Project bbox bottom-center to world ground plane via H^{-1}."""
+    u = (bbox.x1 + bbox.x2) / 2.0
+    v = float(bbox.y2)  # foot-point (contact with ground)
+    pt = H_inv @ np.array([u, v, 1.0], dtype=np.float64)
+    if abs(pt[2]) < 1e-8:
+        return None
+    return float(pt[0] / pt[2]), float(pt[1] / pt[2])
 
 
 def _serialize_tracklet_frames(
@@ -399,17 +445,19 @@ class HeadBoxTracker:
     new_track_threshold: float = 0.45
     max_match_cost: float = 0.80
     max_buffer_match_cost: float = 0.90      # relaxed: long-gap re-entry cost runs higher
-    max_head_center_distance: float = 120.0  # wider gate: 4fps = 0.25s between frames
-    max_predicted_distance: float = 180.0    # wider gate: velocity estimate less reliable at 4fps
+    max_head_center_distance: float = 120.0  # pixel gate (fallback when no world coords)
+    max_predicted_distance: float = 180.0    # pixel gate (fallback)
+    max_world_distance: float = 0.42        # GT-derived: p99 movement = 0.344m × 1.2 margin
+    max_reentry_world_distance: float = 13.0 # GT-derived: p99 re-entry distance = 13.1m × 1.0 (covers 99% of real returns)
     iou_weight: float = 0.20
     distance_weight: float = 0.55
     velocity_weight: float = 0.25
-    track_buffer: int = 20                   # 5s @ 4fps (was 3s)
-    max_buffer_frames: int = 300             # 75s @ 4fps (was 7.5s) — people behind shelves
+    track_buffer: int = 20                   # 5s @ 4fps
+    max_buffer_frames: int = 300             # 75s @ 4fps
     head_ratio: float = 0.35
     shrink_x: float = 0.08
-    min_track_frames: int = 9               # 9 frames × 0.25s = 2.25s ≥ minimum_duration_seconds
-    min_track_density: float = 0.10         # re-entry obs span includes buffer gap → density deflated
+    min_track_frames: int = 9
+    min_track_density: float = 0.10
 
     def __post_init__(self) -> None:
         self.reset()
@@ -418,9 +466,11 @@ class HeadBoxTracker:
         self.active: dict[str, list[TrackletObservation]] = {}
         self.active_last_bbox: dict[str, BoundingBox] = {}
         self.active_last_frame: dict[str, int] = {}
+        self.active_last_world: dict[str, tuple[float, float] | None] = {}
         self.buffer: dict[str, list[TrackletObservation]] = {}
         self.buffer_last_bbox: dict[str, BoundingBox] = {}
         self.buffer_entry_frame: dict[str, int] = {}
+        self.buffer_last_world: dict[str, tuple[float, float] | None] = {}
         self.next_id = 1
 
     def _head_bbox(self, bbox: BoundingBox) -> BoundingBox:
@@ -452,6 +502,7 @@ class HeadBoxTracker:
             for tid in stale:
                 self.buffer[tid] = self.active.pop(tid)
                 self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
+                self.buffer_last_world[tid] = self.active_last_world.pop(tid, None)
                 self.buffer_entry_frame[tid] = fk
                 self.active_last_frame.pop(tid, None)
 
@@ -462,6 +513,7 @@ class HeadBoxTracker:
                 if obs and self._should_keep_tracklet(obs):
                     completed.append(LocalTracklet(video_id=video_id, camera_id=camera_id, track_id=tid, observations=tuple(obs)))
                 self.buffer_last_bbox.pop(tid, None)
+                self.buffer_last_world.pop(tid, None)
                 self.buffer_entry_frame.pop(tid, None)
 
             if not dets:
@@ -474,16 +526,21 @@ class HeadBoxTracker:
                 tid: self._build_match_state(
                     observations=self.active[tid],
                     last_bbox=self.active_last_bbox[tid],
+                    last_world=self.active_last_world.get(tid),
                     target_frame_idx=fk,
                 )
                 for tid in active_unmatched
             }
+
+            def _det_world(det: FrameDetection) -> tuple[float, float] | None:
+                return (det.world_x, det.world_y) if det.world_x is not None else None
 
             # Stage 1: high-conf → active tracks
             unmatched_high: list[FrameDetection] = []
             for det in high:
                 best_tid, best_cost = self._best_match(
                     self._head_bbox(det.bbox),
+                    _det_world(det),
                     active_states,
                     active_unmatched,
                     max_cost=self.max_match_cost,
@@ -501,6 +558,7 @@ class HeadBoxTracker:
                     break
                 best_tid, best_cost = self._best_match(
                     self._head_bbox(det.bbox),
+                    _det_world(det),
                     active_states,
                     active_unmatched,
                     max_cost=self.max_match_cost,
@@ -510,12 +568,15 @@ class HeadBoxTracker:
                     active_unmatched.discard(best_tid)
                     active_states.pop(best_tid, None)
 
-            # Stage 3: high-conf unmatched → buffer tracks (re-entry)
+            # Stage 3: high-conf unmatched → buffer tracks (re-entry).
+            # World gate is disabled as hard gate: person can return from any position.
+            # World coords ARE passed and used as soft cost (proximity bonus), not gate.
             buffer_candidates = set(self.buffer.keys())
             buffer_states = {
                 tid: self._build_match_state(
                     observations=self.buffer[tid],
                     last_bbox=self.buffer_last_bbox[tid],
+                    last_world=self.buffer_last_world.get(tid),  # real world for soft cost
                     target_frame_idx=fk,
                 )
                 for tid in buffer_candidates
@@ -527,9 +588,11 @@ class HeadBoxTracker:
                     continue
                 best_tid, best_cost = self._best_match(
                     self._head_bbox(det.bbox),
+                    _det_world(det),  # real world for soft cost; stage3=True uses generous threshold
                     buffer_states,
                     buffer_candidates,
                     max_cost=self.max_buffer_match_cost,
+                    stage3=True,
                 )
                 if best_tid is not None and best_cost <= self.max_buffer_match_cost:
                     obs = self.buffer.pop(best_tid)
@@ -537,7 +600,9 @@ class HeadBoxTracker:
                     self.active[best_tid] = obs
                     self.active_last_bbox[best_tid] = det.bbox
                     self.active_last_frame[best_tid] = fk
+                    self.active_last_world[best_tid] = _det_world(det)
                     self.buffer_last_bbox.pop(best_tid, None)
+                    self.buffer_last_world.pop(best_tid, None)
                     self.buffer_entry_frame.pop(best_tid, None)
                     buffer_candidates.discard(best_tid)
                     buffer_states.pop(best_tid, None)
@@ -552,6 +617,7 @@ class HeadBoxTracker:
                     self.active[tid] = [self._make_obs(det, frame_ts)]
                     self.active_last_bbox[tid] = det.bbox
                     self.active_last_frame[tid] = fk
+                    self.active_last_world[tid] = _det_world(det)
 
         return tuple(t for t in completed if t.observations)
 
@@ -579,18 +645,21 @@ class HeadBoxTracker:
         self.active[tid].append(self._make_obs(det, frame_ts))
         self.active_last_bbox[tid] = det.bbox
         self.active_last_frame[tid] = frame_idx
+        if det.world_x is not None and det.world_y is not None:
+            self.active_last_world[tid] = (det.world_x, det.world_y)
 
     def _build_match_state(
         self,
         *,
         observations: list[TrackletObservation],
         last_bbox: BoundingBox,
+        last_world: tuple[float, float] | None,
         target_frame_idx: int,
-    ) -> tuple[BoundingBox, tuple[float, float], tuple[float, float]]:
+    ) -> tuple[BoundingBox, tuple[float, float], tuple[float, float], tuple[float, float] | None]:
         head_bbox = self._head_bbox(last_bbox)
         last_center = _bbox_center(head_bbox)
         if len(observations) < 2:
-            return head_bbox, last_center, last_center
+            return head_bbox, last_center, last_center, last_world
 
         previous_head_bbox = self._head_bbox(observations[-2].bbox)
         previous_center = _bbox_center(previous_head_bbox)
@@ -598,25 +667,25 @@ class HeadBoxTracker:
         vx = (last_center[0] - previous_center[0]) / float(frame_delta)
         vy = (last_center[1] - previous_center[1]) / float(frame_delta)
         raw_steps = max(target_frame_idx - observations[-1].frame_index, 0)
-        # Cap extrapolation: beyond track_buffer * 2 frames the velocity estimate is stale.
-        # Without this cap, buffer tracks with any velocity produce predicted positions
-        # hundreds of pixels off-screen, making Stage-3 re-entry matching impossible.
         predict_steps = min(raw_steps, self.track_buffer * 2)
         predicted_center = (
             last_center[0] + vx * predict_steps,
             last_center[1] + vy * predict_steps,
         )
-        return head_bbox, last_center, predicted_center
+        return head_bbox, last_center, predicted_center, last_world
 
     def _best_match(
         self,
         det_bbox: BoundingBox,
-        track_states: dict[str, tuple[BoundingBox, tuple[float, float], tuple[float, float]]],
+        det_world: tuple[float, float] | None,
+        track_states: dict[str, tuple],
         candidates: set[str],
         *,
         max_cost: float,
+        stage3: bool = False,
     ) -> tuple[str | None, float]:
         det_center = _bbox_center(det_bbox)
+        det_h = max(det_bbox.y2 - det_bbox.y1, 1)
         best_tid = None
         best_cost = max_cost + 1.0
         best_iou = -1.0
@@ -624,27 +693,57 @@ class HeadBoxTracker:
             state = track_states.get(tid)
             if state is None:
                 continue
-            head_bbox, last_center, predicted_center = state
-            center_distance = _point_distance(last_center, det_center)
-            predicted_distance = _point_distance(predicted_center, det_center)
-            if (
-                center_distance > self.max_head_center_distance
-                and predicted_distance > self.max_predicted_distance
-            ):
-                continue
+            head_bbox, last_center, predicted_center, last_world = state
 
-            center_cost = min(center_distance / max(self.max_head_center_distance, 1e-6), 1.0)
-            predicted_cost = min(predicted_distance / max(self.max_predicted_distance, 1e-6), 1.0)
-            iou = _bbox_iou(head_bbox, det_bbox)
-            cost = (
-                self.distance_weight * center_cost
-                + self.velocity_weight * predicted_cost
-                + self.iou_weight * (1.0 - iou)
-            )
-            if cost < best_cost or (abs(cost - best_cost) <= 1e-6 and iou > best_iou):
+            if stage3:
+                # Stage 3 buffer re-entry: world-proximity + size cost, no pixel gate.
+                # Requires world coords from homography — cameras without calibration skip.
+                if det_world is None or last_world is None:
+                    continue
+                world_dist = _point_distance(det_world, last_world)
+                if world_dist > self.max_reentry_world_distance:
+                    continue
+                buf_full_h = max((head_bbox.y2 - head_bbox.y1) / max(self.head_ratio, 1e-6), 1.0)
+                world_cost = world_dist / max(self.max_reentry_world_distance, 1e-6)
+                size_cost  = abs(det_h - buf_full_h) / max(det_h, buf_full_h)
+                cost = 0.65 * world_cost + 0.35 * size_cost
+                if cost < best_cost:
+                    best_cost = cost
+                    best_tid  = tid
+                continue
+            else:
+                # ── Stages 1-2: active-track matching ────────────────────────
+                # World gate: physically impossible to be > max_world_distance apart.
+                if det_world is not None and last_world is not None:
+                    if _point_distance(det_world, last_world) > self.max_world_distance:
+                        continue
+
+                # Image-space pixel gate (fallback when world coords unavailable).
+                center_distance    = _point_distance(last_center, det_center)
+                predicted_distance = _point_distance(predicted_center, det_center)
+                if (
+                    center_distance    > self.max_head_center_distance
+                    and predicted_distance > self.max_predicted_distance
+                ):
+                    continue
+
+                center_cost    = min(center_distance    / max(self.max_head_center_distance, 1e-6), 1.0)
+                predicted_cost = min(predicted_distance / max(self.max_predicted_distance,   1e-6), 1.0)
+                iou  = _bbox_iou(head_bbox, det_bbox)
+                cost = (
+                    self.distance_weight  * center_cost
+                    + self.velocity_weight  * predicted_cost
+                    + self.iou_weight       * (1.0 - iou)
+                )
+                if cost < best_cost or (abs(cost - best_cost) <= 1e-6 and iou > best_iou):
+                    best_cost = cost
+                    best_iou  = iou
+                    best_tid  = tid
+                continue  # already updated best_tid above; skip generic update below
+
+            if cost < best_cost:
                 best_cost = cost
-                best_iou = iou
-                best_tid = tid
+                best_tid  = tid
         return best_tid, best_cost
 
     def _should_keep_tracklet(self, observations: list[TrackletObservation]) -> bool:
@@ -664,6 +763,8 @@ class HeadBoxTracker:
             confidence=det.confidence,
             laplacian_score=det.laplacian_score,
             crop_bgr=det.crop_bgr,
+            world_x=det.world_x,
+            world_y=det.world_y,
         )
 
 
@@ -1536,6 +1637,16 @@ class LocalVideoIngestionPipeline:
             _total_sampled = self.tracker.max_buffer_frames
         self.tracker.max_buffer_frames = max(self.tracker.max_buffer_frames, _total_sampled)
 
+        # Load camera calibration for world-coordinate projection.
+        # H^{-1} maps image (u, v) → world ground-plane (X, Y) in meters.
+        # Loaded from central registry (backend/config/homography_registry.json) —
+        # no dependency on calibration files being present alongside the video.
+        _H_inv = _get_homography_inv(camera_id)
+        if _H_inv is not None:
+            LOGGER.info("World-coordinate tracking enabled for %s", Path(source_path).name)
+        else:
+            LOGGER.warning("No calibration found for %s — falling back to pixel-space tracking", Path(source_path).name)
+
         self.tracker.reset()
         people: list[dict[str, object]] = []
         finalized_tracklets_buffer: list[LocalTracklet] = []
@@ -1557,6 +1668,27 @@ class LocalVideoIngestionPipeline:
         ):
             sampled_frame_count += len(sampled_batch)
             detections_by_frame = self.detector.detect(sampled_batch)
+
+            # Project detections to world coordinates via H^{-1}
+            if _H_inv is not None:
+                projected: dict[int, tuple[FrameDetection, ...]] = {}
+                for fi, frame_dets in detections_by_frame.items():
+                    new_dets = []
+                    for det in frame_dets:
+                        w = _project_to_world(_H_inv, det.bbox)
+                        new_dets.append(FrameDetection(
+                            frame_index=det.frame_index,
+                            timestamp_second=det.timestamp_second,
+                            bbox=det.bbox,
+                            confidence=det.confidence,
+                            laplacian_score=det.laplacian_score,
+                            crop_bgr=det.crop_bgr,
+                            world_x=w[0] if w else None,
+                            world_y=w[1] if w else None,
+                        ))
+                    projected[fi] = tuple(new_dets)
+                detections_by_frame = projected
+
             finalized_tracklets = self.tracker.track_incremental(
                 video_id=video_id,
                 camera_id=camera_id,
