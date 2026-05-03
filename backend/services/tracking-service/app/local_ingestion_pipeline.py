@@ -271,7 +271,7 @@ class VideoFrameSampler:
 class RFDETRPersonDetector:
     """RF-DETR 2x-large person detector — strict production detector, class-level singleton."""
 
-    confidence_threshold: float = 0.25
+    confidence_threshold: float = 0.32
     max_detections_per_frame: int = 300
 
     _instance: "RFDETRPersonDetector | None" = None
@@ -544,29 +544,14 @@ class HeadBoxTracker:
                 else:
                     new_dets.append(det)
 
-            # New tracks for truly unmatched high-conf dets.
-            # Spatial NMS: skip if an active track already covers the same region
-            # (prevents duplicate tracks when a detection slips through Stage 1-2).
-            active_centers = [
-                _bbox_center(self._head_bbox(self.active_last_bbox[tid]))
-                for tid in self.active
-            ]
+            # New tracks for truly unmatched high-conf dets
             for det in new_dets:
-                if det.confidence < self.new_track_threshold:
-                    continue
-                det_center = _bbox_center(self._head_bbox(det.bbox))
-                too_close = any(
-                    _point_distance(det_center, ac) < self.max_head_center_distance * 0.6
-                    for ac in active_centers
-                )
-                if too_close:
-                    continue
-                tid = str(self.next_id)
-                self.next_id += 1
-                self.active[tid] = [self._make_obs(det, frame_ts)]
-                self.active_last_bbox[tid] = det.bbox
-                self.active_last_frame[tid] = fk
-                active_centers.append(det_center)
+                if det.confidence >= self.new_track_threshold:
+                    tid = str(self.next_id)
+                    self.next_id += 1
+                    self.active[tid] = [self._make_obs(det, frame_ts)]
+                    self.active_last_bbox[tid] = det.bbox
+                    self.active_last_frame[tid] = fk
 
         return tuple(t for t in completed if t.observations)
 
