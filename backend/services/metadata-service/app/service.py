@@ -309,6 +309,8 @@ def candidate_to_payload(candidate: PersonCandidate, queue_video: QueueVideoAsse
         "storage_path": storage_path,
         "video_title": queue_video.title if queue_video else None,
         "source_filename": queue_video.source_filename if queue_video else None,
+        "recorded_start": raw_metadata.get("recorded_start"),
+        "clip_drive_urls": raw_metadata.get("clip_drive_urls") or [],
         "preview_image_url": f"/api/v1/candidates/{candidate.candidate_id}/preview",
         "raw_metadata": raw_metadata,
     }
@@ -417,6 +419,14 @@ def _candidate_raw_metadata_subset(raw_metadata: object) -> dict[str, Any]:
     tracklet_frames = _trim_tracklet_frames(payload.get("tracklet_frames"))
     if tracklet_frames:
         reduced["tracklet_frames"] = tracklet_frames
+
+    recorded_start = payload.get("recorded_start")
+    if recorded_start:
+        reduced["recorded_start"] = str(recorded_start)
+
+    clip_drive_urls = payload.get("clip_drive_urls")
+    if isinstance(clip_drive_urls, list) and clip_drive_urls:
+        reduced["clip_drive_urls"] = clip_drive_urls
 
     return reduced
 

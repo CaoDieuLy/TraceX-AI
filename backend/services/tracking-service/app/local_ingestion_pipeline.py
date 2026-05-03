@@ -244,6 +244,33 @@ def _quality_or_zero(person: dict[str, object], field_name: str) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def _coerce_string_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(value or "").strip() for value in values if str(value or "").strip()]
+
+
+def _candidate_search_document(person: dict[str, object]) -> str:
+    parts: list[str] = []
+    for key in ("search_text", "attribute_summary", "appearance_summary"):
+        text = str(person.get(key) or "").strip()
+        if text:
+            parts.append(text)
+
+    attributes = _coerce_string_list(person.get("semantic_attributes"))
+    if attributes:
+        parts.append("attributes: " + ", ".join(attributes))
+
+    timeline = person.get("timeline")
+    if isinstance(timeline, list):
+        actions = [str(item.get("action_summary") or "").strip() for item in timeline if isinstance(item, dict)]
+        actions = [item for item in actions if item]
+        if actions:
+            parts.append("timeline: " + " ".join(actions))
+
+    return " ".join(parts).strip()
+
+
 @dataclass
 class VideoFrameSampler:
     """Decode video and sample frames at the fixed ingest FPS."""
@@ -1091,7 +1118,8 @@ class LocalMetadataAssembler:
                 scores    = text_vocab_feats @ vid_feat          # [K]
                 best_idx  = int(np.argmax(scores))
                 best_lbl  = vocab_labels[best_idx]
-                confidence = round(float(np.clip(scores[best_idx], 0.0, 1.0)), 6)
+                _exp = np.exp(scores - scores.max())
+                confidence = round(float(_exp[best_idx] / _exp.sum()), 6)
                 behaviors.append(BehaviorAnalysisResult(
                     clip_id=clip.clip_id,
                     action_summary=best_lbl,
@@ -1174,6 +1202,7 @@ class LocalMetadataAssembler:
                     "duration_seconds": round(quality.duration_seconds, 6),
                 },
             })
+            meta["search_text"] = _candidate_search_document(meta)
             people.append(meta)
 
         return people
@@ -1206,6 +1235,43 @@ class LocalVideoIngestionPipeline:
 
     def __post_init__(self) -> None:
         self.sampler = VideoFrameSampler(sample_fps=self.sample_fps)
+
+    @staticmethod
+    def _annotate_clip_drive_urls(
+        drive_video_file_id: str,
+        people: list[dict[str, object]],
+    ) -> None:
+        """
+        Annotate each candidate with Drive segment descriptors for evidence clip streaming.
+
+        At trace time, tracking-service uses these to stream only the needed bytes from
+        Drive via ffmpeg HTTP range request — no full video download required.
+
+        Input  : drive_video_file_id — Google Drive file ID of the ingested video
+        Output : sets clip_drive_urls list on each person dict (up to 3 segments)
+        """
+        if not drive_video_file_id or not people:
+            return
+        # drive.usercontent.google.com + confirm=t bypasses virus-scan HTML form for public files,
+        # supports HTTP range requests → ffmpeg streams only the needed bytes at trace time.
+        download_url = f"https://drive.usercontent.google.com/download?id={drive_video_file_id}&export=download&authuser=0&confirm=t"
+        count = 0
+        for person in people:
+            segments = person.get("matched_segments") or []
+            if not segments:
+                continue
+            person["clip_drive_urls"] = [
+                {
+                    "drive_video_file_id": drive_video_file_id,
+                    "download_url": download_url,
+                    "start_second": float(seg.get("start_second") or 0.0),
+                    "end_second":   float(seg.get("end_second")   or 0.0),
+                    "action_summary": str(seg.get("action_summary") or ""),
+                }
+                for seg in segments[:3]
+            ]
+            count += 1
+        LOGGER.info("clip_drive_urls annotated for %d/%d candidates", count, len(people))
 
     @staticmethod
     def _person_merge_weight(person: dict[str, object]) -> float:
@@ -1520,6 +1586,7 @@ class LocalVideoIngestionPipeline:
                     base[field_name] = merged_vector
             if merged_action_payload:
                 base["action_semantic_embedding"] = merged_action_payload
+            base["search_text"] = _candidate_search_document(base)
             merged_people.append(base)
 
         merged_people.sort(
@@ -1615,6 +1682,7 @@ class LocalVideoIngestionPipeline:
         camera_id: str | None,
         recorded_start: datetime | None,
         metadata: dict[str, object],
+        drive_video_file_id: str = "",
     ) -> LocalIngestionOutput:
         LOGGER.info(
             "Local ingestion started source=%s sample_fps=%s",
@@ -1731,6 +1799,19 @@ class LocalVideoIngestionPipeline:
             "Local ingestion feature phase completed tracklets=%s accepted_people=%s",
             tracklet_count,
             len(people),
+        )
+
+        # Stamp recorded_start onto each candidate so time-window search filter works.
+        if recorded_start is not None and people:
+            _rs_iso = recorded_start.isoformat().replace("+00:00", "Z")
+            for _person in people:
+                _person.setdefault("recorded_start", _rs_iso)
+
+        # Annotate clip_drive_urls so tracking-service can stream evidence clips directly
+        # from Drive without downloading the full video at trace time.
+        self._annotate_clip_drive_urls(
+            drive_video_file_id=drive_video_file_id,
+            people=people,
         )
 
         processed_at = datetime.now(timezone.utc).replace(microsecond=0)

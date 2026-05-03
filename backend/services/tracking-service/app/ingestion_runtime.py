@@ -23,6 +23,40 @@ def _dict_or_empty(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _parse_recorded_start_from_filename(filename: str) -> "datetime | None":
+    """
+    Parse UTC datetime from MTMC-style filename.
+
+    Input  : 'cam_01_2026-04-28_11-00.mp4'
+    Output : datetime(2026, 4, 28, 11, 0, tzinfo=utc) or None
+    """
+    import re
+    from datetime import timezone
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})", Path(filename).stem)
+    if not m:
+        return None
+    try:
+        return datetime(
+            int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            int(m.group(4)), int(m.group(5)), 0,
+            tzinfo=timezone.utc,
+        )
+    except ValueError:
+        return None
+
+
+def _extract_drive_file_id(url: str) -> str:
+    """
+    Extract Google Drive file ID from view or download URL.
+
+    Input  : 'https://drive.google.com/file/d/{ID}/view' or '?id={ID}'
+    Output : file ID string, or '' if not found
+    """
+    import re
+    m = re.search(r"/d/([a-zA-Z0-9_-]{25,})", url) or re.search(r"[?&]id=([a-zA-Z0-9_-]{25,})", url)
+    return m.group(1) if m else ""
+
+
 INGESTION_VIDEO_SUFFIXES = {".mp4"}
 
 
@@ -305,6 +339,20 @@ class VideoIngestionRuntime:
             host_cpu_count=int(execution_plan.get("hardware", {}).get("host_cpu_count") or detected_hardware.get("host_cpu_count") or 1),
         )
 
+        # Parse recorded_start from filename if caller didn't provide it.
+        # Filename format: cam_01_2026-04-28_11-00.mp4 → 2026-04-28T11:00:00Z
+        if recorded_start is None and source_filename:
+            recorded_start = _parse_recorded_start_from_filename(source_filename)
+            if recorded_start:
+                LOGGER.info("recorded_start parsed from filename: %s → %s", source_filename, recorded_start.isoformat())
+
+        # Extract Drive file ID for clip_drive_urls annotation in the pipeline.
+        # Priority: explicit metadata field → derived from source_url
+        drive_video_file_id: str = (
+            str(metadata.get("drive_video_file_id") or "").strip()
+            or _extract_drive_file_id(str(source_url or ""))
+        )
+
         resolved_source_path = self._resolve_source(
             source_url=source_url,
             source_filename=source_filename,
@@ -340,6 +388,7 @@ class VideoIngestionRuntime:
                 camera_id=camera_id,
                 recorded_start=recorded_start,
                 metadata=metadata,
+                drive_video_file_id=drive_video_file_id,
             )
         finally:
             # Always clean up FIFO pipe or temp download to prevent disk full

@@ -401,7 +401,14 @@ def candidate_search(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    items = rank_candidates(session=session, query_text=payload.query_text, limit=payload.limit)
+    items = rank_candidates(
+        session=session,
+        query_text=payload.query_text,
+        limit=payload.limit,
+        camera_ids=payload.camera_ids,
+        time_from=payload.time_from,
+        time_to=payload.time_to,
+    )
     return {"query_text": payload.query_text, "count": len(items), "items": items}
 
 

@@ -1408,6 +1408,168 @@ def _open_video_writer(
     return None, writer
 
 
+def _probe_ffmpeg_caps(ffmpeg_bin: str) -> dict[str, bool]:
+    """
+    Probe available ffmpeg capabilities once.
+
+    Returns: {hevc_cuvid: bool, h264_nvenc: bool}
+    hevc_cuvid  — GPU decode H.265 input (keeps frames in GPU memory)
+    h264_nvenc  — GPU encode H.264 output (zero-copy when input also on GPU)
+    """
+    import subprocess as _sp
+
+    def _ok(*args) -> bool:
+        return _sp.run(list(args), capture_output=True, timeout=10).returncode == 0
+
+    return {
+        "hevc_cuvid": _ok(
+            ffmpeg_bin, "-f", "lavfi", "-i", "nullsrc", "-t", "0.01",
+            "-c:v", "hevc_cuvid", "-f", "null", "-",
+        ),
+        "h264_nvenc": _ok(
+            ffmpeg_bin, "-f", "lavfi", "-i", "nullsrc", "-t", "0.01",
+            "-c:v", "h264_nvenc", "-f", "null", "-",
+        ),
+    }
+
+
+def _build_trace_from_clip_urls(
+    *,
+    selected_candidates: list[dict],
+    selected_candidate_id: str,
+    query_text: str | None,
+    max_segments_per_candidate: int,
+    artifact_id: str,
+) -> dict:
+    """
+    Fast trace video: stream-cut H.265 segments directly from Drive via HTTP range requests.
+
+    Source videos are H.265 MP4, ~10 min long, stored on Google Drive (public).
+    Drive supports HTTP byte-range requests → ffmpeg fetches moov + only the needed
+    segment bytes. No full video download.
+
+    GPU pipeline on A100 (zero-copy):
+      hevc_cuvid (H.265 decode, GPU) → h264_nvenc (H.264 encode, GPU)
+    CPU fallback:
+      software H.265 decode → libx264 encode
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    ffmpeg_bin = _shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg not found")
+
+    output_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    caps = _probe_ffmpeg_caps(ffmpeg_bin)
+    gpu_decode = caps["hevc_cuvid"]
+    gpu_encode = caps["h264_nvenc"]
+
+    # Input decode args (before -i): GPU decode keeps frames in VRAM for zero-copy encode
+    decode_args = (
+        ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-c:v", "hevc_cuvid"]
+        if gpu_decode else
+        []  # software H.265 decode (libavcodec hevc)
+    )
+    # Output encode args (after -i)
+    encode_args = (
+        ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23"]
+        if gpu_encode else
+        ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+    )
+    logger.info(
+        "Trace encoder: decode=%s encode=%s",
+        "hevc_cuvid" if gpu_decode else "software",
+        "h264_nvenc" if gpu_encode else "libx264",
+    )
+
+    tmp_dir = output_path.parent / f"_tmp_{artifact_id}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    part_files: list[Path] = []
+    clips_manifest: list[dict] = []
+
+    try:
+        for candidate in selected_candidates:
+            clip_urls = candidate.get("clip_drive_urls") or []
+            for i, clip_info in enumerate(clip_urls[:max_segments_per_candidate]):
+                url      = str(clip_info.get("download_url") or "").strip()
+                start    = float(clip_info.get("start_second") or 0.0)
+                end      = float(clip_info.get("end_second") or 0.0)
+                duration = max(round(end - start, 3), 0.5)
+                if not url:
+                    continue
+
+                part_path = tmp_dir / f"part_{len(part_files):04d}.mp4"
+                try:
+                    # -ss before -i → fast seek (only downloads moov + segment bytes)
+                    # H.265 GOP is typically 2-5s; ffmpeg decodes from prior keyframe
+                    _subprocess.run(
+                        [
+                            ffmpeg_bin, "-y",
+                            *decode_args,
+                            "-ss", str(start), "-t", str(duration),
+                            "-i", url,
+                            *encode_args, "-an",
+                            str(part_path),
+                        ],
+                        check=True, capture_output=True, timeout=300,
+                    )
+                    part_files.append(part_path)
+                    clips_manifest.append({
+                        "candidate_id": candidate.get("candidate_id"),
+                        "camera_id": candidate.get("camera_id"),
+                        "track_id": candidate.get("track_id"),
+                        "start_second": start,
+                        "end_second": end,
+                        "action_summary": clip_info.get("action_summary", ""),
+                    })
+                except Exception as exc:
+                    logger.warning("Stream-cut failed for %s seg %d: %s",
+                                   candidate.get("candidate_id"), i, exc)
+
+        if not part_files:
+            raise RuntimeError("No segments could be stream-cut from Drive URLs")
+
+        # Stitch all parts into final video
+        concat_file = tmp_dir / "concat.txt"
+        concat_file.write_text(
+            "\n".join(f"file '{p.resolve()}'" for p in part_files),
+            encoding="utf-8",
+        )
+        _subprocess.run(
+            [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
+             "-i", str(concat_file), "-c", "copy", str(output_path)],
+            check=True, capture_output=True, timeout=120,
+        )
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise RuntimeError("Trace video output is empty after stream-cut")
+
+    manifest = {
+        "artifact_id": artifact_id,
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "query_text": query_text,
+        "selected_candidate_id": selected_candidate_id,
+        "candidate_ids": [c.get("candidate_id") for c in selected_candidates],
+        "build_mode": "stream_cut",
+        "clip_count": len(part_files),
+        "clips": clips_manifest,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "artifact_id": artifact_id,
+        "video_url": f"/api/v1/tracking-artifacts/{artifact_id}",
+        "manifest_url": f"/api/v1/tracking-artifacts/{artifact_id}/manifest",
+        "manifest": manifest,
+        "selected_candidate_id": selected_candidate_id,
+    }
+
+
 def build_tracking_video_remote(
     *,
     selected_candidate_id: str,
@@ -1443,6 +1605,23 @@ def build_tracking_video_remote(
             raise FileNotFoundError("No selected candidates remained after candidate_ids filtering")
 
     artifact_id = uuid4().hex
+
+    # Fast path: stream-cut from Drive clip URLs — no full video download.
+    # Uses ffmpeg HTTP range requests: only segment bytes transferred, A100 NVENC encodes output.
+    candidates_with_clips = [c for c in selected_candidates if c.get("clip_drive_urls")]
+    if candidates_with_clips:
+        try:
+            return _build_trace_from_clip_urls(
+                selected_candidates=candidates_with_clips,
+                selected_candidate_id=selected_candidate_id,
+                query_text=query_text,
+                max_segments_per_candidate=max_segments_per_candidate,
+                artifact_id=artifact_id,
+            )
+        except Exception as exc:
+            logger.warning("Stream-cut fast path failed (%s), falling back to full-video download", exc)
+            artifact_id = uuid4().hex  # new artifact_id for fallback
+
     output_path, manifest_path = resolve_tracking_artifact_paths(artifact_id)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
