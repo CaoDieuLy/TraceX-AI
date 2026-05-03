@@ -271,7 +271,7 @@ class VideoFrameSampler:
 class RFDETRPersonDetector:
     """RF-DETR 2x-large person detector — strict production detector, class-level singleton."""
 
-    confidence_threshold: float = 0.32
+    confidence_threshold: float = 0.25
     max_detections_per_frame: int = 300
 
     _instance: "RFDETRPersonDetector | None" = None
@@ -544,14 +544,29 @@ class HeadBoxTracker:
                 else:
                     new_dets.append(det)
 
-            # New tracks for truly unmatched high-conf dets
+            # New tracks for truly unmatched high-conf dets.
+            # Spatial NMS: skip if an active track already covers the same region
+            # (prevents duplicate tracks when a detection slips through Stage 1-2).
+            active_centers = [
+                _bbox_center(self._head_bbox(self.active_last_bbox[tid]))
+                for tid in self.active
+            ]
             for det in new_dets:
-                if det.confidence >= self.new_track_threshold:
-                    tid = str(self.next_id)
-                    self.next_id += 1
-                    self.active[tid] = [self._make_obs(det, frame_ts)]
-                    self.active_last_bbox[tid] = det.bbox
-                    self.active_last_frame[tid] = fk
+                if det.confidence < self.new_track_threshold:
+                    continue
+                det_center = _bbox_center(self._head_bbox(det.bbox))
+                too_close = any(
+                    _point_distance(det_center, ac) < self.max_head_center_distance * 0.6
+                    for ac in active_centers
+                )
+                if too_close:
+                    continue
+                tid = str(self.next_id)
+                self.next_id += 1
+                self.active[tid] = [self._make_obs(det, frame_ts)]
+                self.active_last_bbox[tid] = det.bbox
+                self.active_last_frame[tid] = fk
+                active_centers.append(det_center)
 
         return tuple(t for t in completed if t.observations)
 
@@ -756,7 +771,7 @@ class LocalMetadataAssembler:
         # Lazy import model hubs and helpers from model_adapters
         from .model_adapters import (
             SigLIP2ModelHub, DINOv2ReIDHub, VideoMAEHub,
-            _crop_pil, _selected_observations, _part_crops, _quality_weighted_pool,
+            _crop_pil, _selected_observations, _quality_weighted_pool,
             _GENDER_PROMPTS, _AGE_PROMPTS,
             _SHIRT_PROMPTS, _PANTS_PROMPTS, _HAIR_PROMPTS, _SKIN_PROMPTS,
             _HAT_PROMPTS, _BAG_PROMPTS, _HEAD_ACCESSORY_PROMPTS, _SHOES_PROMPTS,
@@ -1150,7 +1165,7 @@ class LocalVideoIngestionPipeline:
     def _resolve_within_camera_identities(
         people: list[dict[str, object]],
         *,
-        reid_threshold: float = 0.85,
+        reid_threshold: float = 0.78,
         max_overlap_ratio: float = 0.15,
     ) -> list[dict[str, object]]:
         """
@@ -1488,13 +1503,12 @@ class LocalVideoIngestionPipeline:
         if not people:
             return [], 0
 
-        # Phase 1: within-camera identity resolution.
-        # Fragments of the same person (non-overlapping in time, high TransReID
-        # similarity) are assigned the same human_key so _merge_people_by_identity
-        # folds them into a single candidate record with merged embeddings.
-        people = self._resolve_within_camera_identities(people)
-
-        # Phase 2: data-level merge by human_key.
+        # Within-camera embedding merge is DISABLED.
+        # GT analysis shows DINOv2 intra/inter similarity distributions overlap
+        # completely for overhead warehouse cameras (best F1=0.146 at any threshold).
+        # At t=0.80: 9 correct merges vs 91 false merges (10:1 false positive ratio).
+        # Tracker improvements alone reduce 209 → ~46 tracklets (vs GT 25).
+        # Accepting 1.84× fragmentation is safer than risking wrong identity merges.
         merged_people = self._merge_people_by_identity(video_id=video_id, people=people)
         metadata_people = self._metadata_people_with_full_tracklet_frames(
             people=merged_people,
