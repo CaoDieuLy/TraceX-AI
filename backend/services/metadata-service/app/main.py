@@ -5,7 +5,7 @@ import logging
 from sqlalchemy import text
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -130,6 +130,29 @@ def frontend_search(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Adapter endpoint matching frontend API contract → metadata-service search."""
+    items = search_candidates(
+        session=session,
+        query=payload.query or None,
+        limit=payload.top_k + payload.offset,
+        camera_ids=payload.camera_ids or None,
+    )
+    items = items[payload.offset: payload.offset + payload.top_k]
+    results = [
+        {
+            "id": item["candidate_id"],
+            "thumbnail_url": item.get("preview_image_url", ""),
+            "description": item.get("search_text") or item.get("camera_id") or item["candidate_id"],
+        }
+        for item in items
+    ]
+    return {"results": results}
+
+
+@app.post("/internal/search")
+def internal_search(
+    payload: FrontendSearchRequest,
+    session: Session = Depends(get_session),
+) -> dict:
     items = search_candidates(
         session=session,
         query=payload.query or None,
@@ -385,14 +408,41 @@ def candidate_detail(
 def candidate_preview(
     candidate_id: str,
     session: Session = Depends(get_session),
-) -> FileResponse:
+) -> Response:
+    import base64
+    import httpx as _httpx
+
+    candidate = get_candidate(session, candidate_id)
+    tracking_url = settings.tracking_service_url.rstrip("/")
+
+    if candidate and tracking_url:
+        meta = candidate.get("raw_metadata") or {}
+        clips = meta.get("clip_drive_urls") or []
+        bbox = meta.get("bbox") or []
+        if clips and bbox:
+            clip = clips[0]
+            clip_url = clip.get("download_url") or clip.get("url") or ""
+            start_second = float(clip.get("start_second") or 0)
+            try:
+                r = _httpx.post(
+                    f"{tracking_url}/internal/candidates/preview",
+                    json={"clip_url": clip_url, "start_second": start_second, "bbox": bbox},
+                    timeout=30,
+                    headers={"Authorization": f"Bearer {settings.lightning_api_token}"},
+                )
+                if r.status_code == 200:
+                    img_bytes = base64.b64decode(r.json()["image_b64"])
+                    return Response(content=img_bytes, media_type="image/jpeg")
+            except Exception:
+                pass
+
     try:
         preview_path = build_candidate_preview_image(session, candidate_id)
+        return FileResponse(preview_path, media_type="image/jpeg", filename=preview_path.name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return FileResponse(preview_path, media_type="image/jpeg", filename=preview_path.name)
 
 
 @app.post("/api/v1/candidates/search", response_model=CandidateSearchResponse)

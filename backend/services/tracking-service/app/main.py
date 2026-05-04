@@ -352,6 +352,50 @@ def candidate_track(payload: CandidateTrackRequest) -> dict:
     )
 
 
+@app.post("/internal/candidates/preview")
+def internal_candidate_preview(payload: dict) -> JSONResponse:
+    """Generate preview image for a candidate using cached video on this machine."""
+    import base64, tempfile, subprocess, os
+    import numpy as np
+    import cv2
+
+    clip_url: str = payload.get("clip_url", "")
+    start_second: float = float(payload.get("start_second", 0))
+    bbox: list = payload.get("bbox", [])  # [x1, y1, x2, y2]
+
+    if not clip_url:
+        raise HTTPException(status_code=400, detail="clip_url required")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_path = os.path.join(tmp, "frame.jpg")
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-ss", str(max(0, start_second)),
+                "-i", clip_url,
+                "-frames:v", "1",
+                "-q:v", "2",
+                frame_path,
+            ], capture_output=True, timeout=30)
+
+            if not os.path.exists(frame_path):
+                raise FileNotFoundError("ffmpeg could not extract frame")
+
+            img = cv2.imread(frame_path)
+            if img is None:
+                raise ValueError("Could not read frame")
+
+            if len(bbox) == 4:
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+            _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            b64 = base64.b64encode(buf.tobytes()).decode()
+            return JSONResponse({"image_b64": b64})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/v1/tracking-artifacts/{artifact_id}")
 def tracking_artifact_video(artifact_id: str) -> FileResponse:
     video_path, _manifest_path = resolve_tracking_artifact_paths(artifact_id)

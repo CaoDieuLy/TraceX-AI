@@ -1,0 +1,24 @@
+
+> mcpt-frontend@1.0.0 dev
+> next dev -H 0.0.0.0 -p 3000
+
+  ▲ Next.js 14.2.35
+  - Local:        http://localhost:3000
+  - Network:      http://0.0.0.0:3000
+  - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 2.1s
+ ○ Compiling / ...
+ ✓ Compiled / in 4.5s (467 modules)
+ GET / 307 in 4818ms
+ ○ Compiling /login ...
+ ✓ Compiled /login in 627ms (484 modules)
+ GET /login 200 in 810ms
+ GET / 307 in 73ms
+ GET /login 200 in 60ms
+ ○ Compiling /_error ...
+ ✓ Compiled /_error in 1984ms (704 modules)
+ GET /login 200 in 112ms
+ ○ Compiling /home ...
+ ✓ Compiled /home in 1296ms (807 modules)
