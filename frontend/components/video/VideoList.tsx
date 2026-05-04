@@ -8,7 +8,15 @@ type VideoListProps = {
 
 export function VideoList({ clips }: VideoListProps) {
   const isVideoSource = (url: string | undefined) =>
-    Boolean(url && (url.includes("/file") || /\.(mp4|webm|ogg|mov|m3u8)(\?.*)?$/i.test(url)));
+    Boolean(
+      url &&
+        (url.includes("/file") ||
+          url.includes("usercontent.google.com") ||
+          url.includes("drive.google.com") ||
+          url.includes("video-stream") ||
+          url.includes("litng.ai") ||
+          /\.(mp4|webm|ogg|mov|m3u8)(\?.*)?$/i.test(url)),
+    );
 
   return (
     <ul className="flex flex-col gap-4">

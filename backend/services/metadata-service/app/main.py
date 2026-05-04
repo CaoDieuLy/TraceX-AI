@@ -431,6 +431,9 @@ def candidate_preview(
                     headers={"Authorization": f"Bearer {settings.lightning_api_token}"},
                 )
                 if r.status_code == 200:
+                    ct = r.headers.get("content-type", "")
+                    if "image" in ct:
+                        return Response(content=r.content, media_type="image/jpeg")
                     img_bytes = base64.b64decode(r.json()["image_b64"])
                     return Response(content=img_bytes, media_type="image/jpeg")
             except Exception:

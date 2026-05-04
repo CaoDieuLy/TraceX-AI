@@ -280,9 +280,24 @@ async def videos_by_id(video_id: str, request: Request, _auth: None = Depends(re
     people = metadata_payload.get("people") if isinstance(metadata_payload, dict) else []
     people_items = [item for item in people if isinstance(item, dict)]
 
-    video_url = str(queue_video.get("available_link_video") or "").strip()
-    if not video_url:
-        video_url = f"/api/v1/queue/videos/{resolved_video_id}/file"
+    _raw_video_url = str(queue_video.get("available_link_video") or "").strip()
+    _tracking_base = str(settings.tracking_service_url or "").rstrip("/")
+    if _raw_video_url and _tracking_base:
+        import urllib.parse as _up
+        fallback_video_url = f"{_tracking_base}/internal/video-stream?url={_up.quote(_raw_video_url, safe='')}"
+    elif _raw_video_url:
+        fallback_video_url = _raw_video_url
+    else:
+        fallback_video_url = f"/api/v1/queue/videos/{resolved_video_id}/file"
+
+    def _clip_url(payload: dict[str, Any]) -> str:
+        meta = payload.get("raw_metadata") or {}
+        clips = meta.get("clip_drive_urls") or []
+        if clips and isinstance(clips, list):
+            url = clips[0].get("download_url") or clips[0].get("url") or ""
+            if url:
+                return url
+        return fallback_video_url
 
     title_prefix = str(queue_video.get("title") or f"Video {resolved_video_id}").strip()
     segments: list[VideoSegmentItem] = []
@@ -291,7 +306,7 @@ async def videos_by_id(video_id: str, request: Request, _auth: None = Depends(re
         segments.append(
             VideoSegmentItem(
                 id=str(candidate_payload.get("candidate_id") or requested_id or resolved_video_id),
-                video_url=video_url,
+                video_url=_clip_url(candidate_payload),
                 title=f"{title_prefix} · Candidate",
                 description=_build_segment_description(candidate_payload, fallback=f"Candidate from {title_prefix}"),
             )
@@ -302,7 +317,7 @@ async def videos_by_id(video_id: str, request: Request, _auth: None = Depends(re
             segments.append(
                 VideoSegmentItem(
                     id=str(person.get("candidate_id") or person.get("track_id") or f"{resolved_video_id}-seg-{index}"),
-                    video_url=video_url,
+                    video_url=_clip_url(person),
                     title=f"{title_prefix} · Segment {index}",
                     description=_build_segment_description(person, fallback=f"Segment {index} from {title_prefix}"),
                 )
@@ -312,7 +327,7 @@ async def videos_by_id(video_id: str, request: Request, _auth: None = Depends(re
             segments.append(
                 VideoSegmentItem(
                     id=f"{resolved_video_id}-seg-{index}",
-                    video_url=video_url,
+                    video_url=fallback_video_url,
                     title=f"{title_prefix} · Segment {index}",
                     description=f"Segment {index} from {title_prefix}",
                 )
