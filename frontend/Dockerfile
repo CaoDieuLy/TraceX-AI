@@ -5,19 +5,19 @@ WORKDIR /app
 
 # Install dependencies
 COPY package.json package-lock.json* ./
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts 2>&1
 
 # Copy source
 COPY . .
 
-# Build with debug
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV NODE_ENV=production
-
-RUN npm run build 2>&1; echo "EXIT_CODE=$?" >> /tmp/build_result.txt
-
-# Check build result
-RUN if [ -d .next ]; then echo "Build SUCCESS: .next exists"; ls -la .next/; else echo "Build FAILED: .next not found"; cat /tmp/build_result.txt; exit 1; fi
+# Build with full debug
+SHELL ["/bin/bash", "-c"]
+RUN set -x && \
+    echo "=== Node version ===" && node --version && \
+    echo "=== NPM version ===" && npm --version && \
+    echo "=== Env vars ===" && env | grep -i next && \
+    echo "=== Starting build ===" && \
+    npm run build 2>&1
 
 # Production image
 FROM node:20
