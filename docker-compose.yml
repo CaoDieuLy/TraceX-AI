@@ -121,10 +121,10 @@ services:
       networks:
         - coolify
 
-  volumes:
-    postgres_data:
-    mcpt_storage:
+volumes:
+  postgres_data:
+  mcpt_storage:
 
-  networks:
-    coolify:
-      external: true
+networks:
+  coolify:
+    external: true
