@@ -42,7 +42,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
       - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt2026Secure}
-      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - 'DATABASE_URL='
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me}
       - JWT_ALGORITHM=HS256
       - TRACKING_SERVICE_URL=${TRACKING_SERVICE_URL:-https://8000-01kqhxrsmzj0gjh7fe5fqga4jm.cloudspaces.litng.ai}

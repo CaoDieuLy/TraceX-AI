@@ -72,3 +72,7 @@ Multi-Camera-Person-Tracking-and-Re-Identification/exchange_full_results.json
 frontend/next-env.d.ts
 
 .cursor
+
+# Core dumps
+core.*
+core
