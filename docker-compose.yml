@@ -1,4 +1,4 @@
-# Docker Compose for TraceX-AI VPS Deployment (Coolify)
+# Docker Compose for tracex-ai VPS Deployment (Coolify)
 # Database + Metadata API + Frontend
 
 services:
