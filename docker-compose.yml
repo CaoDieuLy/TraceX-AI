@@ -30,7 +30,7 @@ services:
 
   metadata-service:
     build:
-      context: ..
+      context: .
       dockerfile: backend/services/metadata-service/Dockerfile
     expose:
       - '8000'
@@ -98,7 +98,7 @@ services:
 
   frontend:
     build:
-      context: ../frontend
+      context: ./frontend
       dockerfile: Dockerfile
     expose:
       - '3000'

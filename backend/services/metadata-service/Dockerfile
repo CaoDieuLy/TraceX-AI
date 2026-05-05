@@ -21,6 +21,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY backend/services/metadata-service/app ./app
+COPY shared_secret_runtime.py ./
+
+# Copy backend config (homography_registry.json, etc.)
+COPY backend/config ./backend/config
 
 # Expose port
 EXPOSE 8000
