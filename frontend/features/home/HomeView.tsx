@@ -96,7 +96,7 @@ function HomeViewInner() {
               key={row.id}
               className="rounded-2xl border border-slate-200/80 bg-white/80 px-4 py-3 shadow-[0_8px_24px_rgba(15,23,42,0.05)] transition-[border-color,box-shadow] duration-200 hover:border-sky-200 hover:shadow-[0_14px_28px_rgba(14,116,144,0.12)]"
             >
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{row.at}</span>
+              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{row.timestamp}</span>
               <p className="mt-1 text-sm font-semibold text-slate-900 md:text-base">{row.query}</p>
             </li>
           ))}
