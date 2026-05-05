@@ -80,7 +80,7 @@ def _build_default_database_url() -> str:
         return direct_url
 
     db_user = os.getenv("POSTGRES_USER", "mcpt_user")
-    db_password = quote_plus(os.getenv("POSTGRES_PASSWORD", ""))
+    db_password = quote_plus(os.getenv("POSTGRES_PASSWORD", "Mcpt2026Secure"))
     db_host = os.getenv("POSTGRES_HOST", "postgres")  # Docker service name
     db_port = os.getenv("POSTGRES_PORT", "5432")
     db_name = os.getenv("POSTGRES_DATABASE", os.getenv("POSTGRES_DB", "mcpt"))
