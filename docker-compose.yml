@@ -9,18 +9,10 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
       - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt2026Secure}
-    ports:
-      - '${POSTGRES_PORT:-5432}:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test:
-        - CMD-SHELL
-        - pg_isready
-        - -U
-        - $${POSTGRES_USER}
-        - -d
-        - $${POSTGRES_DB}
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -33,7 +25,7 @@ services:
       context: .
       dockerfile: backend/services/metadata-service/Dockerfile
     expose:
-      - '8000'
+      - "8002"
     restart: unless-stopped
     environment:
       - NODE_ENV=production
@@ -44,7 +36,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt@2026Secure}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me}
       - JWT_ALGORITHM=HS256
-      - TRACKING_SERVICE_URL=${TRACKING_SERVICE_URL:-https://8000-01kqhxrsmzj0gjh7fe5fqga4jm.cloudspaces.litng.ai}
+      - TRACKING_SERVICE_URL=${TRACKING_SERVICE_URL:-}
       - LIGHTNING_API_TOKEN=${LIGHTNING_API_TOKEN:-}
       - LIGHTNING_API_AUTH_HEADER=${LIGHTNING_API_AUTH_HEADER:-Authorization}
       - LIGHTNING_API_AUTH_PREFIX=${LIGHTNING_API_AUTH_PREFIX:-Bearer }
@@ -70,8 +62,8 @@ services:
       test:
         - CMD
         - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"
       interval: 30s
       timeout: 10s
       retries: 5
@@ -79,16 +71,22 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=coolify
-      - traefik.http.routers.TraceX-api-https.rule=Host(`api.tracex-ai.smartnovi.tech`)
+      # Middleware: redirect HTTP -> HTTPS
+      - traefik.http.middlewares.tracex-redirect-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.tracex-redirect-https.redirectscheme.permanent=true
+      # Middleware: strip /api prefix
+      - traefik.http.middlewares.tracex-api-strip.stripprefix.prefixes=/api
+      # HTTPS: /api/* -> backend (port 8002)
+      - traefik.http.routers.TraceX-api-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
       - traefik.http.routers.TraceX-api-https.entrypoints=https
       - traefik.http.routers.TraceX-api-https.tls=true
       - traefik.http.routers.TraceX-api-https.tls.certresolver=letsencrypt
-      - traefik.http.services.TraceX-api.loadbalancer.server.port=8000
-      - traefik.http.routers.TraceX-api-http.rule=Host(`api.tracex-ai.smartnovi.tech`)
+      - traefik.http.routers.TraceX-api-https.middlewares=tracex-api-strip@docker
+      - traefik.http.services.TraceX-api.loadbalancer.server.port=8002
+      # HTTP: redirect to HTTPS
+      - traefik.http.routers.TraceX-api-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
       - traefik.http.routers.TraceX-api-http.entrypoints=http
-      - traefik.http.routers.TraceX-api-http.middlewares=redirect-https@docker
-      - traefik.http.middlewares.redirect-https.redirectscheme.scheme=https
-      - traefik.http.middlewares.redirect-https.redirectscheme.permanent=true
+      - traefik.http.routers.TraceX-api-http.middlewares=tracex-redirect-https@docker
     networks:
       - coolify
     depends_on:
@@ -100,19 +98,19 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     expose:
-      - '3000'
+      - "3000"
     restart: unless-stopped
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-https://api.tracex-ai.smartnovi.tech}
+      - NEXT_PUBLIC_API_BASE_URL=https://tracex-ai.smartnovi.tech/api
     healthcheck:
       test:
         - CMD
         - wget
-        - '--quiet'
-        - '--tries=1'
-        - '--spider'
-        - 'http://localhost:3000'
+        - "--quiet"
+        - "-O"
+        - "/dev/null"
+        - "http://localhost:3000"
       interval: 30s
       timeout: 10s
       retries: 3
@@ -120,16 +118,16 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=coolify
+      # HTTPS: all other traffic -> frontend (port 3000)
       - traefik.http.routers.TraceX-frontend-https.rule=Host(`tracex-ai.smartnovi.tech`)
       - traefik.http.routers.TraceX-frontend-https.entrypoints=https
       - traefik.http.routers.TraceX-frontend-https.tls=true
       - traefik.http.routers.TraceX-frontend-https.tls.certresolver=letsencrypt
       - traefik.http.services.TraceX-frontend.loadbalancer.server.port=3000
+      # HTTP: redirect to HTTPS (reuse middleware from metadata-service)
       - traefik.http.routers.TraceX-frontend-http.rule=Host(`tracex-ai.smartnovi.tech`)
       - traefik.http.routers.TraceX-frontend-http.entrypoints=http
-      - traefik.http.routers.TraceX-frontend-http.middlewares=redirect-https@docker
-      - traefik.http.middlewares.redirect-https.redirectscheme.scheme=https
-      - traefik.http.middlewares.redirect-https.redirectscheme.permanent=true
+      - traefik.http.routers.TraceX-frontend-http.middlewares=tracex-redirect-https@docker
     networks:
       - coolify
 

@@ -26,11 +26,11 @@ COPY shared_secret_runtime.py ./
 COPY backend/config ./backend/config
 
 # Expose port
-EXPOSE 8000
+EXPOSE 8002
 
 # Health check
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=10 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"
 
 # Run uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

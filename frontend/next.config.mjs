@@ -1,9 +1,4 @@
 /** @type {import('next').NextConfig} */
-const internalApiGatewayUrl =
-  process.env.INTERNAL_API_GATEWAY_URL ??
-  process.env.NEXT_PUBLIC_API_GATEWAY_URL ??
-  "http://metadata-service:8000";
-
 const trackingServiceUrl = process.env.TRACKING_SERVICE_URL ?? "";
 const lightningApiToken = process.env.LIGHTNING_API_TOKEN ?? "";
 
@@ -13,36 +8,23 @@ const nextConfig = {
     const rules = [
       {
         source: "/search",
-        destination: `${internalApiGatewayUrl}/search`,
+        destination: `http://metadata-service:8002/search`,
       },
       {
         source: "/videos/:path*",
-        destination: `${internalApiGatewayUrl}/videos/:path*`,
-      },
-      {
-        source: "/api/v1/:path*",
-        destination: `${internalApiGatewayUrl}/api/v1/:path*`,
-      },
-      // API user (tranh GET /users bi middleware redirect sang trang HTML /admin/users)
-      {
-        source: "/api/users",
-        destination: `${internalApiGatewayUrl}/users`,
-      },
-      {
-        source: "/api/users/:path*",
-        destination: `${internalApiGatewayUrl}/users/:path*`,
+        destination: `http://metadata-service:8002/videos/:path*`,
       },
       {
         source: "/auth/:path*",
-        destination: `${internalApiGatewayUrl}/auth/:path*`,
+        destination: `http://metadata-service:8002/auth/:path*`,
       },
       {
         source: "/users",
-        destination: `${internalApiGatewayUrl}/users`,
+        destination: `http://metadata-service:8002/users`,
       },
       {
         source: "/users/:path*",
-        destination: `${internalApiGatewayUrl}/users/:path*`,
+        destination: `http://metadata-service:8002/users/:path*`,
       },
     ];
 
