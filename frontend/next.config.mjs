@@ -9,10 +9,6 @@ const lightningApiToken = process.env.LIGHTNING_API_TOKEN ?? "";
 
 const nextConfig = {
   output: "standalone",
-  swcMinify: false, // Disable SWC to avoid binary issues
-  experimental: {
-    // Force webpack instead of SWC
-  },
   async rewrites() {
     const rules = [
       {

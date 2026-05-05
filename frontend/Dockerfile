@@ -1,5 +1,5 @@
 # Frontend Dockerfile for Docker/Coolify deployment
-FROM node:20-slim
+FROM node:20
 
 WORKDIR /app
 
@@ -10,14 +10,17 @@ RUN npm ci --ignore-scripts
 # Copy source
 COPY . .
 
-# Build
+# Build with debug
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
 
-RUN npm run build
+RUN npm run build 2>&1; echo "EXIT_CODE=$?" >> /tmp/build_result.txt
+
+# Check build result
+RUN if [ -d .next ]; then echo "Build SUCCESS: .next exists"; ls -la .next/; else echo "Build FAILED: .next not found"; cat /tmp/build_result.txt; exit 1; fi
 
 # Production image
-FROM node:20-slim
+FROM node:20
 
 WORKDIR /app
 
