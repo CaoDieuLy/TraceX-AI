@@ -1,13 +1,14 @@
 # Frontend Dockerfile for Docker/Coolify deployment
 # Next.js 14 with Node.js 20
 
-FROM node:20-alpine AS base
+FROM node:20-slim AS base
 
-# Install build dependencies for native modules
-RUN apk add --no-cache \
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     make \
-    g++
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -35,8 +36,8 @@ WORKDIR /app
 ENV NODE_ENV production
 ENV NEXT_TELEMETRY_DISABLED 1
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN groupadd --system --gid 1001 nodejs && \
+    useradd --system --uid 1001 --gid nodejs nextjs
 
 # Copy built files
 COPY --from=builder /app/public ./public
