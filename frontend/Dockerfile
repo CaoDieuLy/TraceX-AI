@@ -27,7 +27,10 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED 1
 ENV NODE_ENV production
 
-RUN npm run build
+# Debug: check node/npm versions
+RUN node --version && npm --version
+
+RUN npm run build 2>&1 | tee /tmp/build.log
 
 # Production image, copy all the files and run next
 FROM base AS runner
