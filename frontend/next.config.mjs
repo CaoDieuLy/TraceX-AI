@@ -4,10 +4,13 @@ const internalApiGatewayUrl =
   process.env.NEXT_PUBLIC_API_GATEWAY_URL ??
   "http://backend:8000";
 
+const trackingServiceUrl = process.env.TRACKING_SERVICE_URL ?? "";
+const lightningApiToken = process.env.LIGHTNING_API_TOKEN ?? "";
+
 const nextConfig = {
   output: "standalone",
   async rewrites() {
-    return [
+    const rules = [
       {
         source: "/search",
         destination: `${internalApiGatewayUrl}/search`,
@@ -42,6 +45,22 @@ const nextConfig = {
         destination: `${internalApiGatewayUrl}/users/:path*`,
       },
     ];
+
+    // Proxy storage endpoints to LightningAI tracking service
+    if (trackingServiceUrl) {
+      rules.push(
+        {
+          source: "/api/storage/move",
+          destination: `${trackingServiceUrl}/api/v1/storage/move`,
+        },
+        {
+          source: "/api/storage/status",
+          destination: `${trackingServiceUrl}/api/v1/storage/status`,
+        }
+      );
+    }
+
+    return rules;
   },
   images: {
     remotePatterns: [

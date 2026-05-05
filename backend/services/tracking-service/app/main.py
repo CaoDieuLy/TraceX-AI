@@ -15,11 +15,24 @@ from pydantic import BaseModel
 from .config import settings
 from .runtime import LocalVideoIngestionPipeline, VideoFrameSampler, RFDETRPersonDetector, HeadBoxTracker
 from .drive_storage_ingest import download_drive_video, download_from_url
+from .storage_move import router as storage_router
+from .model_warmup import warmup_models
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Tracking Service", version="1.0.0")
+
+# Include routers
+app.include_router(storage_router)
+
+# Warmup models on startup (runs in background)
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Tracking Service starting...")
+    # Warmup models in background (non-blocking)
+    import asyncio
+    asyncio.create_task(warmup_models())
 
 pipeline = LocalVideoIngestionPipeline(sample_fps=settings.sample_fps)
 sampler = VideoFrameSampler(sample_fps=settings.sample_fps)

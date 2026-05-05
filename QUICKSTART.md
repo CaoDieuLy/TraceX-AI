@@ -90,7 +90,7 @@ ssh root@<VPS_HOST> "cd /opt/mcpt/A20-App-119 && git pull && bash infra/vps/depl
 ## Bước 3 — Start LightningAI API Builder
 
 1. Vào LightningAI Studio → **API Builder** → `tracking-service`
-2. Machine: **1 × L4**
+2. Machine: **1 × A100**
 3. On start command:
    ```
    bash A20-App-119/scripts/start_tracking_service_api_builder.sh

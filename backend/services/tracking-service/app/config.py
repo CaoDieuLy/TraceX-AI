@@ -7,13 +7,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 def _detect_storage_root() -> Path:
     candidates = [
         Path(os.getenv("A20_STORAGE_ROOT", "")),
-        Path("/storage"),
+        Path(os.getenv("STORAGE_ROOT", "")),
+        Path("/teamspace/studios/storage"),
         Path("/workspace/storage"),
+        Path("/storage"),
     ]
     for candidate in candidates:
-        if candidate.exists():
+        if candidate.exists() and candidate.is_dir():
             return candidate
-    return Path("/storage")
+    return Path("/teamspace/studios/storage")
 
 
 def _default_workers() -> int:
@@ -35,8 +37,8 @@ class Settings(BaseSettings):
     workers: int = _default_workers()
 
     rf_detr_weights: str = os.getenv("MCPT_RF_DETR_WEIGHTS", "")
-    detector_batch_size: int = int(os.getenv("MCPT_DETECTOR_BATCH_SIZE", "8"))
-    stream_batch_size: int = int(os.getenv("MCPT_STREAM_BATCH_SIZE", "150"))
+    detector_batch_size: int = int(os.getenv("MCPT_DETECTOR_BATCH_SIZE", "16"))  # A100: 16 vs L4: 8
+    stream_batch_size: int = int(os.getenv("MCPT_STREAM_BATCH_SIZE", "300"))  # A100: 300 vs L4: 150
 
     sample_fps: int = 4
     max_frames_per_video: int = 300

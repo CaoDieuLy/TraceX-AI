@@ -89,9 +89,9 @@ bash scripts/sync_secrets.sh --vps
 | `VPS_PASSWORD` | Provider VPS | Khi đổi mật khẩu |
 | `POSTGRES_PASSWORD` | Tự đặt | Setup lần đầu |
 | `JWT_SECRET_KEY` | Tự generate random | Setup lần đầu |
-| `LIGHTNING_API_BASE_URL` | LightningAI UI → API Builder → Settings → URL | **Mỗi khi restart L4** |
+| `LIGHTNING_API_BASE_URL` | LightningAI UI → API Builder → Settings → URL | **Mỗi khi restart A100** |
 | `LIGHTNING_API_TOKEN` | Tự đặt | Khi muốn đổi |
-| `TRACKING_SERVICE_URL` | Giống `LIGHTNING_API_BASE_URL` | **Mỗi khi restart L4** |
+| `TRACKING_SERVICE_URL` | Giống `LIGHTNING_API_BASE_URL` | **Mỗi khi restart A100** |
 | `GOOGLE_DRIVE_ROOT_FOLDER_ID` | Google Drive URL của folder root | Setup lần đầu |
 | `GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID` | Google Drive URL của folder `Storage/` | Setup lần đầu |
 | `NEXT_PUBLIC_API_GATEWAY_URL` | IP VPS | Khi đổi VPS |
@@ -114,7 +114,7 @@ bash scripts/sync_secrets.sh --vps
 | **Camera topology pruning** | BFS trên đồ thị camera để loại 90% camera không liên quan |
 | **Human-in-the-loop** | Người vận hành xác nhận → gallery update → re-trace tự động |
 | **Google Drive ingestion** | Video lưu trên Drive, queue worker tự động polling và gửi lên GPU |
-| **LightningAI GPU inference** | Toàn bộ model inference chạy trên L4 GPU cloud |
+| **LightningAI GPU inference** | Toàn bộ model inference chạy trên A100 GPU cloud |
 | **Dockerized VPS deployment** | Stack đầy đủ chạy trên VPS qua Docker Compose |
 | **PostgreSQL metadata storage** | Tracklet, embedding, timeline, attribute metadata lưu có cấu trúc |
 
@@ -161,7 +161,7 @@ bash scripts/sync_secrets.sh --vps
                        │ HTTP POST (Bearer token)
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  LIGHTNINGAI — API Builder (NVIDIA L4, 24GB VRAM)                │
+│  LIGHTNINGAI — API Builder (NVIDIA A100, 80GB VRAM)               │
 │                                                                  │
 │  Tracking Service (FastAPI port 8000)                            │
 │  ├── RF-DETR 2XLarge        ← person detection                  │
@@ -486,7 +486,7 @@ A20-App-119/
 │   ├── services/
 │   │   ├── api-gateway/
 │   │   ├── metadata-service/
-│   │   └── tracking-service/          ← Chạy trên LightningAI L4
+│   │   └── tracking-service/          ← Chạy trên LightningAI A100
 │   │       └── app/
 │   │           ├── main.py
 │   │           ├── local_ingestion_pipeline.py  ← RF-DETR + HeadBoxTracker + merge
@@ -520,7 +520,7 @@ A20-App-119/
 |------------|---------|
 | Máy cá nhân | Python 3.11+, git |
 | VPS | Ubuntu 22.04+, Docker 24+, Docker Compose v2, RAM ≥ 12GB |
-| LightningAI | Account, API Builder enabled, GPU L4 |
+| LightningAI | Account, API Builder enabled, GPU A100 |
 | Google Drive | Google Cloud project với Drive API enabled, OAuth2 credentials |
 
 ### Bước 1 — Clone repo
@@ -540,7 +540,7 @@ nano secrets/master.env
 ### Bước 3 — Start LightningAI API Builder
 
 1. Vào LightningAI Studio → API Builder → `tracking-service`
-2. Machine: **1 × L4**
+2. Machine: **1 × A100**
 3. On start command: `bash A20-App-119/scripts/start_tracking_service_api_builder.sh`
 4. Click **Start** | Bật **Auto start**
 
@@ -754,10 +754,10 @@ reid_threshold: float = 0.85  # tăng lên 0.90–0.95 nếu cần
 
 | Chỉ số | Giá trị |
 |--------|---------|
-| Throughput tracking | ~5–7 phút / video 10 phút trên L4 (DINOv2 lớn hơn TransReID) |
+| Throughput tracking | ~3–5 phút / video 10 phút trên A100 (DINOv2 lớn hơn TransReID) |
 | Parallel jobs | 3 video song song (`QUEUE_PARALLEL_JOBS=3`) |
 | Detector batch | 8–40 frames/pass tùy GPU |
-| 50 cameras × 10min | ~8–10 giờ xử lý (1 L4) |
+| 50 cameras × 10min | ~5–7 giờ xử lý (1 A100) |
 | Search latency | 5–30s (cold start ~60–120s) |
 | DINOv2 batch | 64 crops/pass @ fp16 |
 | Expected tracklets/camera (GT=25) | ~25–50 sau fragment merge |
@@ -765,7 +765,7 @@ reid_threshold: float = 0.85  # tăng lên 0.90–0.95 nếu cần
 **Bottleneck:**
 - **DINOv2 inference:** Lớn hơn TransReID (~307M vs 86M params). Tăng `MCPT_REID_BATCH_SIZE` trên A100/H100.
 - **Fragment merge:** O(n²) per camera — với n=500 tracklets/camera không đáng kể (<1s).
-- **Cold start L4:** Auto start mất 60–120s sau idle — bật Auto start để minimize.
+- **Cold start A100:** Auto start mất 60–120s sau idle — bật Auto start để minimize.
 
 ---
 
@@ -779,7 +779,7 @@ reid_threshold: float = 0.85  # tăng lên 0.90–0.95 nếu cần
 | **Video ingestion theo lô** | Không hỗ trợ real-time streaming |
 | **Chưa có CI/CD** | Deploy thủ công qua SSH |
 | **Privacy** | Chưa có anonymization (blur face) cho video export |
-| **Single L4 GPU** | Scale horizontal chưa hỗ trợ |
+| **Single A100 GPU** | Scale horizontal chưa hỗ trợ |
 | **Không có automated tests** | `TODO: thêm pytest cho pipeline` |
 
 ---

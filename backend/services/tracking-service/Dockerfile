@@ -1,4 +1,5 @@
 FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+# NOTE: Running on NVIDIA A100 80GB — batch sizes can be increased compared to L4
 
 WORKDIR /app
 
