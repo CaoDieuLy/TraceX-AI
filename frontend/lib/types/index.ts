@@ -1,3 +1,3 @@
-import type { VideoClip, VideoItem } from "@/lib/types";
+import type { VideoClip, VideoItem } from "./video";
 
 export type { VideoItem, VideoClip };
