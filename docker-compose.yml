@@ -120,7 +120,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=coolify
-      - traefik.http.routers.TraceX-frontend-https.rule=Host(`TraceX-AI.smartnovi.tech`)
+      - traefik.http.routers.TraceX-frontend-https.rule=Host(`tracex-ai.smartnovi.tech`)
       - traefik.http.routers.TraceX-frontend-https.entrypoints=https
       - traefik.http.routers.TraceX-frontend-https.tls=true
       - traefik.http.routers.TraceX-frontend-https.tls.certresolver=letsencrypt
