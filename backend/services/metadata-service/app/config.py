@@ -76,7 +76,7 @@ def _build_default_database_url() -> str:
     Uses environment variables with Docker container naming convention.
     """
     direct_url = os.getenv("DATABASE_URL", "").strip()
-    if direct_url:
+    if direct_url and direct_url != "":
         return direct_url
 
     db_user = os.getenv("POSTGRES_USER", "mcpt_user")
