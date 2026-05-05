@@ -1,7 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 
-import type { VideoItem } from "@/lib/types/video";
+import type { VideoItem } from "@/lib/types";
 
 type VideoCardProps = {
   video: VideoItem;

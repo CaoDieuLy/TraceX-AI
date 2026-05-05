@@ -1,60 +1,48 @@
-from __future__ import annotations
-
+import logging
 import os
-from functools import lru_cache
+from pathlib import Path
+
+import numpy as np
+
+from .types import BoundingBox
+
+logger = logging.getLogger(__name__)
+
+_HOMOGRAPHY_REGISTRY: dict[str, np.ndarray] = {}
+_HOMOGRAPHY_REGISTRY_LOADED = False
+
+_REGISTRY_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "homography_registry.json"
 
 
-@lru_cache(maxsize=8)
-def configure_torch_runtime(
-    *,
-    allow_tf32: bool,
-    cudnn_benchmark: bool,
-    host_cpu_count: int,
-) -> dict:
+def _load_homography_registry() -> None:
+    global _HOMOGRAPHY_REGISTRY, _HOMOGRAPHY_REGISTRY_LOADED
+    if _HOMOGRAPHY_REGISTRY_LOADED:
+        return
+    _HOMOGRAPHY_REGISTRY_LOADED = True
+    if not _REGISTRY_PATH.exists():
+        logger.warning("Homography registry not found at %s", _REGISTRY_PATH)
+        return
     try:
-        import torch
-    except Exception:
-        return {
-            "torch_available": False,
-            "cuda_available": False,
-        }
+        import json
+        raw = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
+        _HOMOGRAPHY_REGISTRY = {k: np.array(v, dtype=np.float64) for k, v in raw.items()}
+        logger.info("Homography registry loaded: %d cameras", len(_HOMOGRAPHY_REGISTRY))
+    except Exception as exc:
+        logger.warning("Failed to load homography registry: %s", exc)
 
-    cpu_threads = max(1, min(int(host_cpu_count), 64))
-    os.environ.setdefault("OMP_NUM_THREADS", str(cpu_threads))
-    os.environ.setdefault("MKL_NUM_THREADS", str(cpu_threads))
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(cpu_threads))
-    os.environ.setdefault("NUMEXPR_NUM_THREADS", str(cpu_threads))
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
-    try:
-        torch.set_num_threads(cpu_threads)
-        torch.set_num_interop_threads(max(1, min(cpu_threads // 2, 32)))
-    except Exception:
-        pass
 
-    cuda_available = bool(torch.cuda.is_available())
-    device_count = int(torch.cuda.device_count()) if cuda_available else 0
+def get_homography_inv(camera_id: str | None) -> np.ndarray | None:
+    _load_homography_registry()
+    return _HOMOGRAPHY_REGISTRY.get(camera_id) if camera_id else None
 
-    if cuda_available:
-        try:
-            torch.backends.cuda.matmul.allow_tf32 = bool(allow_tf32)
-        except Exception:
-            pass
-        try:
-            torch.backends.cudnn.allow_tf32 = bool(allow_tf32)
-            torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
-        except Exception:
-            pass
-        try:
-            torch.set_float32_matmul_precision("high")
-        except Exception:
-            pass
 
-    return {
-        "torch_available": True,
-        "torch_version": getattr(torch, "__version__", None),
-        "cuda_available": cuda_available,
-        "cuda_device_count": device_count,
-        "configured_cpu_threads": cpu_threads,
-        "allow_tf32": bool(allow_tf32),
-        "cudnn_benchmark": bool(cudnn_benchmark),
-    }
+def project_to_world(
+    H_inv: np.ndarray,
+    bbox: BoundingBox,
+) -> tuple[float, float] | None:
+    u = (bbox.x1 + bbox.x2) / 2.0
+    v = float(bbox.y2)
+    pt = H_inv @ np.array([u, v, 1.0], dtype=np.float64)
+    if abs(pt[2]) < 1e-8:
+        return None
+    return float(pt[0] / pt[2]), float(pt[1] / pt[2])

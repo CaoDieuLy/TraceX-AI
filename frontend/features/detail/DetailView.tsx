@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { VideoList } from "@/components/video/VideoList";
 import { getVideoDetail } from "@/lib/api";
-import type { VideoClip } from "@/lib/types/video";
+import type { VideoClip } from "@/lib/types";
 
 type DetailViewProps = {
   videoId: string;

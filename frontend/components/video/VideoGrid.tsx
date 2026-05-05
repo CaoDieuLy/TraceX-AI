@@ -1,4 +1,4 @@
-import type { VideoItem } from "@/lib/types/video";
+import type { VideoItem } from "@/lib/types";
 
 import { VideoCard } from "./VideoCard";
 

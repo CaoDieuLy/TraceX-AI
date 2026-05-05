@@ -10,9 +10,9 @@ import {
   type ReactNode,
 } from "react";
 
-import { GRID_BATCH_SIZE } from "@/lib/constants";
-import type { VideoItem } from "@/lib/types/video";
-import { mapLocationIdsToCameraIds } from "@/lib/cameraFilters";
+import { GRID_BATCH_SIZE } from "@/lib/config";
+import type { VideoItem } from "@/lib/types";
+import { mapLocationIdsToCameraIds } from "@/lib/config";
 import { searchVideos } from "@/lib/api";
 
 type SearchFiltersState = {

@@ -1,6 +1,6 @@
 "use client";
 
-import { TOP_K_OPTIONS } from "@/lib/constants";
+import { TOP_K_OPTIONS } from "@/lib/config";
 import { useSearch } from "@/features/search/SearchContext";
 
 export function TopKSelect() {

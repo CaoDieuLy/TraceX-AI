@@ -9,22 +9,19 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .auth import create_access_token
-from .config import settings
-from .database import Base, SessionLocal, engine, get_session
-from .dependencies import get_current_user, require_admin
-from .models import User
-from .queue_runtime import QueueSyncService
-from .schemas import (
-    AuthTokenResponse,
+from .core.auth import create_access_token
+from .core.dependencies import get_current_user, require_admin
+from .core.models import User
+from .core.schemas import (
     AdminUserCreateRequest,
     AdminUserPatchRequest,
+    AuthTokenResponse,
     CandidateListResponse,
+    CandidateResponse,
     CandidateSearchRequest,
     CandidateSearchResponse,
     CandidateTrackRequest,
     CandidateTrackResponse,
-    CandidateResponse,
     OverviewResponse,
     QueueProcessResponse,
     QueueVideoListResponse,
@@ -38,42 +35,49 @@ from .schemas import (
     VideoQueryUpdateRequest,
     VideoResponse,
 )
-from .trace_service import (
-    trace_from_candidate_id,
-    apply_feedback,
-    build_seed,
-    FeedbackPayload,
-)
-from .service import (
+from .database import Base, SessionLocal, engine, get_session
+from .services.user_service import (
     authenticate_user,
-    build_candidate_preview_image,
-    build_tracking_video,
     create_user,
-    create_video_asset,
-    create_video_query,
-    get_candidate,
-    get_overview,
-    get_video_by_public_id,
-    get_video_query,
-    list_users,
-    list_queue_videos,
-    list_video_queries,
-    list_videos,
-    load_queue_video_metadata,
-    load_queue_video_file_path,
-    rank_candidates,
-    resolve_tracking_artifact_paths,
-    save_uploaded_video_bytes,
-    search_candidates,
-    sync_local_queue_state,
-    update_user_access,
-    get_user_by_id,
     ensure_bootstrap_admin,
+    get_user_by_id,
+    list_users,
     normalize_role,
     role_rank,
+    update_user_access,
+)
+from .services.video_service import (
+    create_video_asset,
+    create_video_query,
+    get_video_by_public_id,
+    get_video_query,
+    list_video_queries,
+    list_videos,
+    query_to_payload,
+    save_uploaded_video_bytes,
     update_video_query,
     video_to_payload,
-    query_to_payload,
+)
+from .services.candidate_service import (
+    build_candidate_preview_image,
+    build_tracking_video,
+    get_candidate,
+    rank_candidates,
+    search_candidates,
+    resolve_tracking_artifact_paths,
+)
+from .services.trace_service import (
+    FeedbackPayload,
+    apply_feedback,
+    build_seed,
+    trace_from_candidate_id,
+)
+from .services.queue_service import (
+    QueueSyncService,
+    list_queue_videos,
+    load_queue_video_metadata,
+    load_queue_video_file_path,
+    sync_local_queue_state,
 )
 
 app = FastAPI(title="MCPT Metadata Service", version="2.0.0")
@@ -82,10 +86,10 @@ LOGGER = logging.getLogger(__name__)
 
 @app.on_event("startup")
 def on_startup() -> None:
+    from .config import settings
     Base.metadata.create_all(bind=engine)
     session = SessionLocal()
     try:
-        # Keep auth/schema compatibility changes even if queue sync fails later.
         session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'USER'"))
         session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"))
         session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ NULL"))
@@ -129,7 +133,6 @@ def frontend_search(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Adapter endpoint matching frontend API contract → metadata-service search."""
     items = search_candidates(
         session=session,
         query=payload.query or None,
@@ -286,6 +289,7 @@ def admin_patch_user(
 
 @app.get("/api/v1/overview", response_model=OverviewResponse)
 def overview(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)) -> dict:
+    from .services.candidate_service import get_overview
     return get_overview(session)
 
 
@@ -410,9 +414,10 @@ def candidate_preview(
     session: Session = Depends(get_session),
 ) -> Response:
     import base64
-    import httpx as _httpx
+    import httpx
 
     candidate = get_candidate(session, candidate_id)
+    from .config import settings
     tracking_url = settings.tracking_service_url.rstrip("/")
 
     if candidate and tracking_url:
@@ -424,7 +429,7 @@ def candidate_preview(
             clip_url = clip.get("download_url") or clip.get("url") or ""
             start_second = float(clip.get("start_second") or 0)
             try:
-                r = _httpx.post(
+                r = httpx.post(
                     f"{tracking_url}/internal/candidates/preview",
                     json={"clip_url": clip_url, "start_second": start_second, "bbox": bbox},
                     timeout=30,
@@ -483,10 +488,6 @@ def candidate_track(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-# ---------------------------------------------------------------------------
-# Trace endpoints
-# ---------------------------------------------------------------------------
-
 class TraceRequest(BaseModel):
     candidate_id: str
     window_hours: float = Field(default=12.0, ge=1.0, le=72.0)
@@ -506,10 +507,6 @@ def trace_run(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """
-    Stage 1-5: Full trace pipeline from a seed candidate.
-    Returns Final Trajectory with Evidence Clips.
-    """
     try:
         result = trace_from_candidate_id(
             session,
@@ -551,10 +548,6 @@ def trace_feedback(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """
-    Stage 6: Human-in-the-loop feedback.
-    User confirms/rejects segments → gallery update + refined trace re-run.
-    """
     try:
         seed = build_seed(session, payload.candidate_id, window_hours=payload.window_hours)
         fb = FeedbackPayload(
@@ -629,8 +622,6 @@ def queue_video_file(
 def process_storage(
     session: Session = Depends(get_session),
 ) -> dict:
-    # Internal endpoint — only reachable via the gateway on 127.0.0.1:8001.
-    # Gateway-level auth (require_admin on the public API) protects external access.
     try:
         return QueueSyncService().process_storage_queue(session)
     except Exception as exc:

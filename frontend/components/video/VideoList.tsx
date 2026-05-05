@@ -1,6 +1,6 @@
 import Image from "next/image";
 
-import type { VideoClip } from "@/lib/types/video";
+import type { VideoClip } from "@/lib/types";
 
 type VideoListProps = {
   clips: VideoClip[];

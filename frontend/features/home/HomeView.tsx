@@ -4,9 +4,9 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useRef } from "react";
 
 import { VideoGrid } from "@/components/video/VideoGrid";
-import { GRID_BATCH_SIZE } from "@/lib/constants";
-import { HOME_GUIDE_LINES, HOME_GUIDE_TITLE } from "@/lib/content/homeGuide";
-import { MOCK_SEARCH_HISTORY } from "@/lib/mock/history";
+import { GRID_BATCH_SIZE } from "@/lib/config";
+import { HOME_GUIDE_LINES, HOME_GUIDE_TITLE } from "@/lib/content";
+import { MOCK_SEARCH_HISTORY } from "@/lib/mock";
 import { useSearch } from "@/features/search/SearchContext";
 import { useToast } from "@/components/ui/ToastProvider";
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { LOCATION_OPTIONS, summarizeSelectedLocations } from "@/lib/cameraFilters";
+import { LOCATION_OPTIONS, summarizeSelectedLocations } from "@/lib/config";
 import { useSearch } from "@/features/search/SearchContext";
 
 type SearchBarProps = {

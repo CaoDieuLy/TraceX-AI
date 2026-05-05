@@ -1,41 +1,51 @@
 # infra/
 
-Docker Compose stack cho VPS deployment.
+Infrastructure configuration for Docker deployment.
 
-## Chạy stack
+## Structure
 
-```bash
-# Sinh env files từ secrets/master.env trước
-bash scripts/sync_secrets.sh
-
-# Start tất cả services
-docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env up -d --build
-
-# Xem status
-docker compose -f infra/docker-compose.yml --env-file infra/env/backend.env ps
+```
+infra/
+├── docker-compose.yml     # Main stack definition
+└── postgres/
+    └── init/
+        └── 01-init.sql    # Database initialization
 ```
 
 ## Services
 
-| Service | Port | Mô tả |
-|---------|------|-------|
-| `mcpt-frontend` | 3000 | Next.js web app |
-| `mcpt-backend` | 8000 | API Gateway + Metadata Service + Queue Worker |
-| `mcpt-ai-service` | 8001 | AI Search Service (internal) |
-| `mcpt-postgres` | 5432 | PostgreSQL database |
+| Service | Container | Port | Description |
+|---------|-----------|------|-------------|
+| postgres | mcpt-postgres | 5432 | PostgreSQL database |
+| metadata-service | mcpt-metadata-service | 8001 | Metadata & API service |
+| ai-service | mcpt-ai-service | 8002 | AI inference (GPU) |
+| frontend | mcpt-frontend | 3000 | Next.js web app |
 
-## Env files
-
-> Không edit trực tiếp — auto-generated bởi `scripts/sync_secrets.sh` từ `secrets/master.env`.
-
-| File | Dùng bởi |
-|------|---------|
-| `env/backend.env` | `docker compose --env-file` |
-| `env/ai.env` | ai_service container |
-| `env/frontend.env` | frontend container |
-
-## Deploy lên VPS
+## Quick Start
 
 ```bash
-bash infra/vps/deploy.sh .
+# Start all services
+docker compose -f infra/docker-compose.yml up -d --build
+
+# View status
+docker compose -f infra/docker-compose.yml ps
+
+# View logs
+docker compose -f infra/docker-compose.yml logs -f
+
+# Stop all services
+docker compose -f infra/docker-compose.yml down
 ```
+
+## Environment Variables
+
+Create a `.env` file or set these variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| POSTGRES_DATABASE | mcpt | Database name |
+| POSTGRES_USER | mcpt_user | Database user |
+| POSTGRES_PASSWORD | mcpt | Database password |
+| JWT_SECRET_KEY | change-me | JWT signing key |
+| METADATA_DOMAIN | metadata.local | Metadata service domain |
+| APP_DOMAIN | tracex-ai.smartnovi.tech | Frontend domain |

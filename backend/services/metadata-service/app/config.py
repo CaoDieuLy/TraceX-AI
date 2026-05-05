@@ -71,14 +71,20 @@ except ImportError:
 
 
 def _build_default_database_url() -> str:
+    """
+    Build PostgreSQL connection URL for Docker/Coolify deployment.
+    Uses environment variables with Docker container naming convention.
+    """
     direct_url = os.getenv("DATABASE_URL", "").strip()
     if direct_url:
         return direct_url
+
     db_user = os.getenv("POSTGRES_USER", "mcpt_user")
     db_password = quote_plus(os.getenv("POSTGRES_PASSWORD", ""))
-    db_host = os.getenv("POSTGRES_HOST", "postgres")
+    db_host = os.getenv("POSTGRES_HOST", "postgres")  # Docker service name
     db_port = os.getenv("POSTGRES_PORT", "5432")
     db_name = os.getenv("POSTGRES_DATABASE", os.getenv("POSTGRES_DB", "mcpt"))
+
     return f"postgresql+psycopg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 
@@ -86,12 +92,15 @@ class Settings(BaseSettings):
     app_name: str = "mcpt-metadata-service"
     api_prefix: str = "/api/v1"
     database_url: str = _build_default_database_url()
-    tracking_service_url: str = "http://tracking-service:8000"
+    # --- Tracking Service (LightningAI A100) ---
+    tracking_service_url: str = os.getenv(
+        "TRACKING_SERVICE_URL",
+        "https://8000-01kqhxrsmzj0gjh7fe5fqga4jm.cloudspaces.litng.ai"
+    )
     public_api_base_url: str = os.getenv("NEXT_PUBLIC_API_GATEWAY_URL", "").strip()
     lightning_api_token: str = ""
     lightning_api_auth_header: str = "Authorization"
     lightning_api_auth_prefix: str = "Bearer "
-    # Keep upstream waits short so interactive search does not hang.
     tracking_request_timeout_seconds: int = 30
     tracking_health_timeout_seconds: int = 5
     tracking_startup_max_wait_seconds: int = 8
@@ -103,18 +112,18 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
     bootstrap_admin_password: str = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "").strip()
     bootstrap_admin_full_name: str = os.getenv("BOOTSTRAP_ADMIN_FULL_NAME", "Administrator").strip()
-    video_storage_root: str = str(PROJECT_ROOT / "storage" / "videos")
-    tracking_output_root: str = str(PROJECT_ROOT / "storage" / "tracking-output")
+    video_storage_root: str = "/workspace/storage/videos"  # VPS storage
+    tracking_output_root: str = "/workspace/storage/tracking-output"  # VPS storage
     default_storage_backend: str = "local_volume"
-    queue_local_root: str = str(PROJECT_ROOT / "storage" / "queue")
+    queue_local_root: str = "/workspace/storage/queue"  # VPS storage
     queue_video_folder_name: str = "Videos"
     queue_max_size: int = 32
     queue_poll_interval_seconds: int = 30
     queue_parallel_jobs: int = 3
     queue_download_workers: int = 4
-    local_queue_cache_enabled: bool = False
-    startup_local_queue_sync_enabled: bool = False
-    storage_ingest_enabled: bool = True
+    local_queue_cache_enabled: bool = False  # Disable local queue cache
+    startup_local_queue_sync_enabled: bool = False  # Disable local queue sync
+    storage_ingest_enabled: bool = False  # Disable local storage ingest - use LightningAI
     storage_ingest_root: str = str(PROJECT_ROOT / "storage")
     storage_ingest_source_backend: str = "filesystem"
     storage_ingest_batch_size: int = 150
@@ -123,8 +132,8 @@ class Settings(BaseSettings):
     google_drive_enabled: bool = False
     google_drive_oauth_credentials_file: str = str(default_oauth_credentials_file)
     google_drive_oauth_token_file: str = str(default_oauth_token_file)
-    google_drive_root_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
-    google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
+    google_drive_root_folder_id: str = ""
+    google_drive_vinuni_folder_id: str = ""
     google_drive_vinuni_folder_name: str = "VinUni"
     google_drive_source_storage_folder_id: str = ""
     google_drive_source_storage_folder_name: str = "Storage"

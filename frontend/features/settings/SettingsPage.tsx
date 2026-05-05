@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { clearSession, loadAccessToken, loadSessionUser, type AuthUser } from "@/lib/auth";
 import { getApiBaseUrl } from "@/lib/api";
-import { mapBackendErrorMessage, parseJsonOrThrow, readApiErrorMessage } from "@/lib/apiError";
+import { mapBackendErrorMessage, parseJsonOrThrow, readApiErrorMessage } from "@/lib/api/errors";
 import { useToast } from "@/components/ui/ToastProvider";
 
 type MeResponse = {

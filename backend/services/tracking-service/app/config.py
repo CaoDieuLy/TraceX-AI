@@ -1,149 +1,49 @@
-from pathlib import Path
-from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
-import sys
+from pathlib import Path
 
-_here = Path(__file__).parent
-REPO_ROOT = _here.parent.parent.parent.parent.resolve()
-A20_ROOT = REPO_ROOT
-if str(A20_ROOT) not in sys.path:
-    sys.path.insert(0, str(A20_ROOT))
-
-loaded_envs: list[Path] = []
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _resolve_oauth_secret_path(raw_value: str, default_relative_path: str) -> Path:
-    candidate = Path(raw_value or default_relative_path).expanduser()
-    if candidate.is_absolute():
-        return candidate
-    return Path(os.getenv("MCPT_SECRETS_ROOT", "/workspace/a20-root/secrets")) / candidate
+def _detect_storage_root() -> Path:
+    candidates = [
+        Path(os.getenv("A20_STORAGE_ROOT", "")),
+        Path("/storage"),
+        Path("/workspace/storage"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return Path("/storage")
 
 
-resolved_oauth_credentials_path = _resolve_oauth_secret_path(
-    os.getenv("MCPT_OAUTH2_CREDENTIALS_FILE", ""),
-    "oauth/oauth2_credentials.json",
-)
-resolved_oauth_token_path = _resolve_oauth_secret_path(
-    os.getenv("MCPT_OAUTH2_TOKEN_FILE", ""),
-    "oauth/oauth2_token.pickle",
-)
-
-try:
-    from shared_secret_runtime import (  # noqa: E402
-        load_runtime_env,
-        resolve_oauth2_credentials_path,
-        resolve_oauth2_token_path,
-        shared_env_file,
-    )
-
-    loaded_envs = load_runtime_env(include_tracking_service_env=True, override=False)
-    resolved_oauth_credentials_path = resolve_oauth2_credentials_path()
-    resolved_oauth_token_path = resolve_oauth2_token_path()
-    for env_file in loaded_envs:
-        print(f"[config] Loaded env from {env_file}")
-    if not loaded_envs:
-        print(f"[config] WARNING: no env file found; expected shared env at {shared_env_file()}")
-except ImportError:
-    pass
-
-def _resolve_project_root() -> Path:
-    raw_value = os.getenv("PROJECT_ROOT", "").strip()
-    if raw_value:
-        candidate = Path(raw_value).expanduser()
-        resolved = candidate.resolve() if candidate.is_absolute() else (REPO_ROOT / candidate).resolve()
-        if resolved.exists():
-            return resolved
-    return REPO_ROOT
-
-
-PROJECT_ROOT = _resolve_project_root()
+def _default_workers() -> int:
+    configured = os.getenv("MCPT_METADATA_WORKERS", "").strip()
+    if configured.isdigit():
+        return max(1, int(configured))
+    return max(1, min((os.cpu_count() or 1), 8))
 
 
 class Settings(BaseSettings):
-    app_name: str = "mcpt-tracking-service"
+    app_name: str = "tracking-service"
+    host: str = "0.0.0.0"
+    port: int = 8000
 
-    # Paths - auto-detect from PROJECT_ROOT
-    ingestion_work_root: str = str(PROJECT_ROOT / "storage" / "tracking-ingestion")
-    video_conversion_output_dir: str = str(PROJECT_ROOT / "storage" / "video-conversion")
-    video_download_output_dir: str = str(PROJECT_ROOT / "storage" / "tracking-outputs")
-    tracking_artifact_root: str = str(PROJECT_ROOT / "storage" / "tracking-artifacts")
+    storage_root: Path = _detect_storage_root()
+    model_cache_dir: Path = Path("/storage/model_cache")
+    video_cache_dir: Path = Path("/storage/video_cache")
 
-    # Camera calibration for 3D world projection
-    camera_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "camera_calibration.json")
-    world_projection_calibration_path: str = str(PROJECT_ROOT / "backend" / "config" / "world_projection_calibration.json")
+    workers: int = _default_workers()
 
-    # PostgreSQL
-    postgres_host: str = "localhost"
-    postgres_port: int = 5432
-    postgres_database: str = "mcpt_video_tracking_full"
-    postgres_user: str = "mcpt_user"
-    postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
+    rf_detr_weights: str = os.getenv("MCPT_RF_DETR_WEIGHTS", "")
+    detector_batch_size: int = int(os.getenv("MCPT_DETECTOR_BATCH_SIZE", "8"))
+    stream_batch_size: int = int(os.getenv("MCPT_STREAM_BATCH_SIZE", "150"))
 
-    google_drive_enabled: bool = False
-    google_drive_oauth_credentials_file: Path = resolved_oauth_credentials_path
-    google_drive_oauth_token_file: Path = resolved_oauth_token_path
-    google_drive_make_public: bool = True
-    google_drive_root_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
-    google_drive_vinuni_folder_id: str = "1gxKBTQ9BlqUmeashklclv429FDjr6Xbp"
-    google_drive_vinuni_folder_name: str = "VinUni"
-    google_drive_queue_folder_name: str = "Storage"
-    google_drive_metadata_folder_name: str = "Metadata"
+    sample_fps: int = 4
+    max_frames_per_video: int = 300
 
-    tracking_runtime_mode: str = "production_ready"
-    tracking_hyperparameter_overrides_json: str = ""  # disabled in strict mode
-    uvicorn_workers: int = 1
-
-    ffmpeg_crf: int = 28
-    ffmpeg_preset: str = "medium"
-    ffmpeg_audio_codec: str = "aac"
-    ffmpeg_overwrite_output: bool = False
-    ingestion_default_sample_fps: int = 4
-    ingestion_reuse_downloaded_mp4: bool = True
-
-    lightning_api_base_url: str = ""
-    lightning_api_endpoint: str = "/api/v1/ai/worker"
-    lightning_api_token: str = ""
-    lightning_api_auth_header: str = "Authorization"
-    lightning_api_auth_prefix: str = "Bearer "
-    lightning_timeout_seconds: int = 180
-    download_remote_outputs: bool = False
-    cleanup_remote_query_inputs: bool = True
-    startup_warmup_enabled: bool = True
-
-    enable_trackeval: bool = True
-    enable_geometry_gating: bool = True
-    enable_corrective_cascade: bool = True
-
-    # Compute .env path relative to this config file
-    model_config = SettingsConfigDict(
-        extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()
-
-
-def _normalize_runtime_path(raw_value: str, fallback_relative_path: str) -> str:
-    raw_text = str(raw_value or "").strip()
-    candidate = Path(raw_text).expanduser()
-    if not str(candidate):
-        return str((PROJECT_ROOT / fallback_relative_path).resolve())
-    if candidate.is_absolute():
-        if candidate.exists():
-            return str(candidate.resolve())
-        if os.name != "nt":
-            return str(candidate)
-        resolved = candidate.resolve()
-        return str((PROJECT_ROOT / fallback_relative_path).resolve()) if raw_text.startswith(("/workspace", "\\workspace")) else str(resolved)
-    return str((PROJECT_ROOT / candidate).resolve())
-
-
-settings.ingestion_work_root = _normalize_runtime_path(settings.ingestion_work_root, "storage/tracking-ingestion")
-settings.video_conversion_output_dir = _normalize_runtime_path(settings.video_conversion_output_dir, "storage/video-conversion")
-settings.video_download_output_dir = _normalize_runtime_path(settings.video_download_output_dir, "storage/tracking-outputs")
-settings.tracking_artifact_root = _normalize_runtime_path(settings.tracking_artifact_root, "storage/tracking-artifacts")
-settings.camera_calibration_path = _normalize_runtime_path(settings.camera_calibration_path, "backend/config/camera_calibration.json")
-settings.world_projection_calibration_path = _normalize_runtime_path(
-    settings.world_projection_calibration_path,
-    "backend/config/world_projection_calibration.json",
-)
+settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
+settings.video_cache_dir.mkdir(parents=True, exist_ok=True)
