@@ -5,19 +5,16 @@ WORKDIR /app
 
 # Install dependencies
 COPY package.json package-lock.json* ./
-RUN npm ci --ignore-scripts 2>&1
+RUN npm ci --ignore-scripts
 
 # Copy source
 COPY . .
 
-# Build with full debug
-SHELL ["/bin/bash", "-c"]
-RUN set -x && \
-    echo "=== Node version ===" && node --version && \
-    echo "=== NPM version ===" && npm --version && \
-    echo "=== Env vars ===" && env | grep -i next && \
-    echo "=== Starting build ===" && \
-    npm run build 2>&1
+# Build
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+
+RUN npm run build
 
 # Production image
 FROM node:20
