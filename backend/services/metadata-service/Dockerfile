@@ -1,22 +1,18 @@
 # Metadata Service Dockerfile for Docker/Coolify deployment
 
-FROM python:3.11-alpine
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies (Alpine packages)
-RUN apk add --no-cache \
+# Install system dependencies with retry
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
-    libpq \
-    gcc \
-    musl-dev \
-    python3-dev \
-    postgresql-client
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY backend/services/metadata-service/requirements.txt ./requirements.txt
