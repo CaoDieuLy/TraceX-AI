@@ -27,9 +27,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 --gid nodejs nextjs && \
-    apk add --no-cache curl
+RUN apk add --no-cache curl && \
+    addgroup -g 1001 nodejs && \
+    adduser -u 1001 -G nodejs -D -H nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
