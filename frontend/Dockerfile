@@ -26,11 +26,10 @@ COPY . .
 
 ENV NEXT_TELEMETRY_DISABLED 1
 ENV NODE_ENV production
+ENV NODE_OPTIONS "--max-old-space-size=4096"
 
-# Debug: check node/npm versions
-RUN node --version && npm --version
-
-RUN npm run build 2>&1 | tee /tmp/build.log
+# Build with verbose output
+RUN npm run build --verbose || (cat /root/.npm/_logs/*.log 2>/dev/null; exit 1)
 
 # Production image, copy all the files and run next
 FROM base AS runner
