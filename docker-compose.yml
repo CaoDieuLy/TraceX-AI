@@ -1,5 +1,6 @@
 # Docker Compose for tracex-ai VPS Deployment (Coolify)
 # Database + Metadata API + Frontend
+# Based on working Coolify Traefik config pattern
 
 services:
   postgres:
@@ -8,7 +9,7 @@ services:
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
       - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt2026Secure}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt@2026Secure}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,6 +25,7 @@ services:
     build:
       context: .
       dockerfile: backend/services/metadata-service/Dockerfile
+    container_name: mcpt-metadata-service
     expose:
       - "8002"
     restart: unless-stopped
@@ -34,7 +36,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
       - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt@2026Secure}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
       - JWT_ALGORITHM=HS256
       - TRACKING_SERVICE_URL=${TRACKING_SERVICE_URL:-}
       - LIGHTNING_API_TOKEN=${LIGHTNING_API_TOKEN:-}
@@ -71,12 +73,12 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=coolify
-      # Middleware: redirect HTTP -> HTTPS
+      # HTTP -> HTTPS redirect
       - traefik.http.middlewares.tracex-redirect-https.redirectscheme.scheme=https
       - traefik.http.middlewares.tracex-redirect-https.redirectscheme.permanent=true
-      # Middleware: strip /api prefix
+      # Strip /api prefix when forwarding to backend
       - traefik.http.middlewares.tracex-api-strip.stripprefix.prefixes=/api
-      # HTTPS: /api/* -> backend (port 8002)
+      # HTTPS: /api/* -> metadata-service (port 8002)
       - traefik.http.routers.TraceX-api-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
       - traefik.http.routers.TraceX-api-https.entrypoints=https
       - traefik.http.routers.TraceX-api-https.tls=true
@@ -97,12 +99,15 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    container_name: mcpt-frontend
     expose:
       - "3000"
     restart: unless-stopped
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_API_BASE_URL=https://tracex-ai.smartnovi.tech/api
+      # Use relative path for Next.js rewrites
+      - NEXT_PUBLIC_API_BASE_URL=
+      - COOLIFY_DEPLOYMENT=true
     healthcheck:
       test:
         - CMD
@@ -118,16 +123,18 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=coolify
-      # HTTPS: all other traffic -> frontend (port 3000)
+      # HTTPS: everything except /api/* -> frontend (port 3000)
       - traefik.http.routers.TraceX-frontend-https.rule=Host(`tracex-ai.smartnovi.tech`)
       - traefik.http.routers.TraceX-frontend-https.entrypoints=https
       - traefik.http.routers.TraceX-frontend-https.tls=true
       - traefik.http.routers.TraceX-frontend-https.tls.certresolver=letsencrypt
       - traefik.http.services.TraceX-frontend.loadbalancer.server.port=3000
-      # HTTP: redirect to HTTPS (reuse middleware from metadata-service)
+      # HTTP: redirect to HTTPS
       - traefik.http.routers.TraceX-frontend-http.rule=Host(`tracex-ai.smartnovi.tech`)
       - traefik.http.routers.TraceX-frontend-http.entrypoints=http
       - traefik.http.routers.TraceX-frontend-http.middlewares=tracex-redirect-https@docker
+      - traefik.http.middlewares.tracex-redirect-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.tracex-redirect-https.redirectscheme.permanent=true
     networks:
       - coolify
 
