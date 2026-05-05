@@ -2,7 +2,7 @@
 const internalApiGatewayUrl =
   process.env.INTERNAL_API_GATEWAY_URL ??
   process.env.NEXT_PUBLIC_API_GATEWAY_URL ??
-  "http://backend:8000";
+  "http://metadata-service:8000";
 
 const trackingServiceUrl = process.env.TRACKING_SERVICE_URL ?? "";
 const lightningApiToken = process.env.LIGHTNING_API_TOKEN ?? "";

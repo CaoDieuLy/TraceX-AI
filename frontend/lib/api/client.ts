@@ -57,7 +57,7 @@ export function getApiBaseUrl(): string {
   if (envBase.startsWith("http://") || envBase.startsWith("https://")) {
     return envBase.replace(/\/$/, "");
   }
-  return "http://backend:8000";
+  return "http://metadata-service:8000";
 }
 
 function resolveMediaUrl(url: string, apiBaseUrl: string): string {
