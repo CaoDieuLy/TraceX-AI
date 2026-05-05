@@ -13,6 +13,10 @@ engine = create_engine(_database_url, future=True, pool_pre_ping=True, pool_size
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
+class Base(DeclarativeBase):
+    pass
+
+
 def get_session() -> Generator[Session, None, None]:
     session = SessionLocal()
     try:
