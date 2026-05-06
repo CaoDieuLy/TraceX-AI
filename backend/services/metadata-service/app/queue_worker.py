@@ -1,8 +1,8 @@
 """
-Queue Worker - Process videos from queue via LightningAI tracking-service.
+Queue Worker - Process videos from queue via LightningAI trace-service.
 
 This worker runs continuously, polling the queue for new videos,
-and sends them to the tracking-service for AI processing.
+and sends them to the trace-service for AI processing.
 """
 
 from __future__ import annotations
@@ -31,14 +31,14 @@ class QueueItem:
     local_video_path: Optional[str]
 
 
-def _get_tracking_service_url() -> str:
+def _get_trace_service_url() -> str:
     return os.getenv(
-        "TRACKING_SERVICE_URL",
+        "TRACE_SERVICE_URL",
         "https://8000-01kqhxrsmzj0gjh7fe5fqga4jm.cloudspaces.litng.ai"
     )
 
 
-def _get_tracking_headers() -> dict:
+def _get_trace_headers() -> dict:
     token = os.getenv("LIGHTNING_API_TOKEN", "").strip()
     if not token:
         return {"Content-Type": "application/json"}
@@ -48,23 +48,23 @@ def _get_tracking_headers() -> dict:
     }
 
 
-def _wait_for_tracking_service(max_wait: int = 120) -> bool:
-    url = _get_tracking_service_url().rstrip("/") + "/health"
+def _wait_for_trace_service(max_wait: int = 120) -> bool:
+    url = _get_trace_service_url().rstrip("/") + "/health"
     deadline = time.time() + max_wait
     poll_interval = 5
 
     while time.time() < deadline:
         try:
             with httpx.Client(timeout=10) as client:
-                response = client.get(url, headers=_get_tracking_headers())
+                response = client.get(url, headers=_get_trace_headers())
             if response.is_success:
-                logger.info("Tracking service is ready")
+                logger.info("Trace service is ready")
                 return True
         except httpx.HTTPError as e:
-            logger.info("Waiting for tracking service: %s", e)
+            logger.info("Waiting for trace service: %s", e)
         time.sleep(poll_interval)
 
-    logger.warning("Tracking service not ready after %ds, proceeding anyway", max_wait)
+    logger.warning("Trace service not ready after %ds, proceeding anyway", max_wait)
     return True
 
 
@@ -74,10 +74,10 @@ def process_queue_item(
     timeout: int = 600,
 ) -> dict:
     """
-    Send a queue item to tracking-service for processing.
-    Returns the tracking service response.
+    Send a queue item to trace-service for processing.
+    Returns the trace service response.
     """
-    tracking_url = _get_tracking_service_url().rstrip("/") + "/api/v1/video/process"
+    trace_url = _get_trace_service_url().rstrip("/") + "/api/v1/video/process"
 
     payload = {
         "video_id": item.video_id,
@@ -96,9 +96,9 @@ def process_queue_item(
 
     with httpx.Client(timeout=float(timeout)) as client:
         response = client.post(
-            tracking_url,
+            trace_url,
             json=payload,
-            headers=_get_tracking_headers(),
+            headers=_get_trace_headers(),
         )
 
     response.raise_for_status()
@@ -113,11 +113,11 @@ def run_worker(
 ):
     """
     Main worker loop. Polls the queue for unprocessed videos
-    and sends them to tracking-service.
+    and sends them to trace-service.
     """
     from ..core.models import QueueVideoAsset, PersonCandidate
 
-    _wait_for_tracking_service()
+    _wait_for_trace_service()
 
     while True:
         session = session_factory()
@@ -167,7 +167,7 @@ def run_worker(
 
                 except httpx.HTTPStatusError as e:
                     logger.error(
-                        "Tracking service error for %s: %s %s",
+                        "Trace service error for %s: %s %s",
                         video.video_id,
                         e.response.status_code,
                         e.response.text[:500],

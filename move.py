@@ -1,22 +1,36 @@
 """
-move.py — Google Drive equivalent of move.py.
+move.py — Google Drive video mover + pipeline trigger.
 
 Reads .mp4 files from Drive Temp/ folder, parses filename pattern
 cam_xx_yyyy-mm-dd_hh-mm.mp4, creates cam_xx/date/ folders under
 Storage/, and moves (addParents/removeParents) each file.
 
+After successful move, triggers metadata-service to queue videos for processing.
+
 Usage:
     python move.py [--dry-run]
+    python move.py --trigger-metadata [--dry-run]
 """
 from __future__ import annotations
 
 import argparse
+import json
+import logging
+import os
 import pickle
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 CAMERA_VIDEO_PATTERN = re.compile(
     r"^(?P<camera_id>cam_\d{2,})_"
@@ -32,6 +46,9 @@ STORAGE_FOLDER_ID = "1G6L1d8l2YupSI0HIgB9NkBel04RqX48G"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
 TOKEN_PATH = Path(__file__).parent / "secrets" / "oauth" / "oauth2_token.pickle"
+
+# Metadata service configuration
+METADATA_SERVICE_URL = os.getenv("METADATA_SERVICE_URL", "http://localhost:8002")
 
 
 def build_drive():
@@ -77,38 +94,103 @@ def move_file(drive, file_id: str, from_parent: str, to_parent: str) -> None:
     ).execute()
 
 
+def trigger_metadata_service(moved_videos: list[dict[str, Any]]) -> bool:
+    """
+    Trigger metadata-service to queue moved videos for processing.
+    
+    Args:
+        moved_videos: List of dicts with video info (camera_id, date, name, file_id)
+    
+    Returns:
+        True if trigger was successful, False otherwise
+    """
+    if not moved_videos:
+        logger.info("No videos to trigger metadata-service for")
+        return True
+    
+    import httpx
+    
+    url = f"{METADATA_SERVICE_URL.rstrip('/')}/api/v1/queue/videos/trigger"
+    payload = {
+        "source": "google_drive_move",
+        "videos": moved_videos,
+    }
+    
+    try:
+        logger.info(f"Triggering metadata-service at {url} with {len(moved_videos)} videos")
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(url, json=payload)
+        
+        if response.is_success:
+            logger.info(f"Metadata-service trigger successful: {response.json()}")
+            return True
+        else:
+            logger.warning(f"Metadata-service trigger failed: {response.status_code} - {response.text}")
+            return False
+    except httpx.TransportError as e:
+        logger.warning(f"Could not reach metadata-service: {e}")
+        logger.info("Videos will be picked up on next queue sync")
+        return False
+    except Exception as e:
+        logger.error(f"Error triggering metadata-service: {e}")
+        return False
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="Move videos from Google Drive Temp/ to Storage/, optionally trigger metadata-service"
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Preview moves without executing")
+    parser.add_argument(
+        "--trigger-metadata", 
+        action="store_true", 
+        default=True,
+        help="Trigger metadata-service after move (default: True)"
+    )
+    parser.add_argument(
+        "--no-trigger",
+        action="store_true",
+        help="Skip triggering metadata-service"
+    )
     args = parser.parse_args()
 
     drive = build_drive()
     files = list_mp4s(drive, TEMP_FOLDER_ID)
-    print(f"Found {len(files)} .mp4 files in Temp/")
+    logger.info(f"Found {len(files)} .mp4 files in Temp/")
 
-    moved = 0
-    skipped = 0
+    moved_videos: list[dict[str, Any]] = []
+    
     for f in files:
         name = f["name"]
         m = CAMERA_VIDEO_PATTERN.fullmatch(name)
         if not m:
-            print(f"  SKIP (bad name): {name}")
-            skipped += 1
+            logger.info(f"  SKIP (bad name): {name}")
             continue
 
         camera_id = m.group("camera_id")
         recorded_date = m.group("recorded_date")
         target_path = f"{camera_id}/{recorded_date}/{name}"
 
-        print(f"  {'[dry-run] ' if args.dry_run else ''}move → Storage/{target_path}")
+        logger.info(f"  {'[dry-run] ' if args.dry_run else ''}move → Storage/{target_path}")
 
         if not args.dry_run:
             cam_folder_id = find_or_create_folder(drive, STORAGE_FOLDER_ID, camera_id)
             date_folder_id = find_or_create_folder(drive, cam_folder_id, recorded_date)
             move_file(drive, f["id"], TEMP_FOLDER_ID, date_folder_id)
-        moved += 1
-
-    print(f"\nResult: {moved} moved, {skipped} skipped. dry_run={args.dry_run}")
+            
+            # Track moved video for metadata-service trigger
+            moved_videos.append({
+                "camera_id": camera_id,
+                "recorded_date": recorded_date,
+                "filename": name,
+                "drive_file_id": f["id"],
+            })
+    
+    # Trigger metadata-service if requested and files were moved
+    if not args.dry_run and moved_videos and not args.no_trigger:
+        trigger_metadata_service(moved_videos)
+    
+    logger.info(f"Result: {len(moved_videos)} moved, {len(files) - len(moved_videos)} skipped. dry_run={args.dry_run}")
 
 
 if __name__ == "__main__":

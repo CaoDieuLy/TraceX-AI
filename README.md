@@ -91,12 +91,12 @@ bash scripts/sync_secrets.sh --vps
 | `JWT_SECRET_KEY` | Tự generate random | Setup lần đầu |
 | `LIGHTNING_API_BASE_URL` | LightningAI UI → API Builder → Settings → URL | **Mỗi khi restart A100** |
 | `LIGHTNING_API_TOKEN` | Tự đặt | Khi muốn đổi |
-| `TRACKING_SERVICE_URL` | Giống `LIGHTNING_API_BASE_URL` | **Mỗi khi restart A100** |
+| `TRACE_SERVICE_URL` | Giống `LIGHTNING_API_BASE_URL` | **Mỗi khi restart A100** |
 | `GOOGLE_DRIVE_ROOT_FOLDER_ID` | Google Drive URL của folder root | Setup lần đầu |
 | `GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID` | Google Drive URL của folder `Storage/` | Setup lần đầu |
 | `NEXT_PUBLIC_API_GATEWAY_URL` | IP VPS | Khi đổi VPS |
 
-> **Quan trọng:** Sau mỗi lần restart LightningAI API Builder, `LIGHTNING_API_BASE_URL` và `TRACKING_SERVICE_URL` **bắt buộc phải cập nhật**.
+> **Quan trọng:** Sau mỗi lần restart LightningAI API Builder, `LIGHTNING_API_BASE_URL` và `TRACE_SERVICE_URL` **bắt buộc phải cập nhật**.
 
 ---
 
@@ -125,45 +125,28 @@ bash scripts/sync_secrets.sh --vps
 ### Sơ đồ tổng thể
 
 ```
-┌──────────────────────────────────────────────┐
-│  MÁY CÁ NHÂN (bất kỳ OS, không cần GPU)     │
-│                                              │
-│  python move.py            ← move video      │
-│  Browser → http://<VPS_IP> ← dùng UI        │
-└──────────────────┬───────────────────────────┘
-                   │ Google Drive API (OAuth2)
-                   ▼
-┌──────────────────────────────────────────────┐
-│  GOOGLE DRIVE                                │
-│    Temp/    ← upload video mới vào đây       │
-│    Storage/ ← move.py tổ chức theo cấu trúc │
-│      cam01/2026-04-28/                        │
-│        cam01_2026-04-28_10-00.mp4            │
-└──────────────────┬───────────────────────────┘
-                   │ Queue worker poll (mỗi 30s)
-                   ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  VPS — Docker Compose                                            │
 │                                                                  │
-│  ┌─────────────┐   ┌──────────────────┐   ┌──────────────────┐  │
-│  │ api-gateway │   │ metadata-service │   │   ai-service     │  │
-│  │ FastAPI     │   │ FastAPI          │   │   FastAPI        │  │
-│  │ port 8000   │   │ port 8001        │   │   port 8002      │  │
-│  └──────┬──────┘   └────────┬─────────┘   └────────┬─────────┘  │
-│         └──────────────────┬┘                       │            │
-│                    ┌───────┘───────────────────────┘            │
-│                    │  PostgreSQL :5432                           │
-│                    └───────────────────────────────────────────  │
-│  ┌──────────────────────────────────────────────────────────────┐ │
-│  │  Frontend (Next.js) port 3000                               │ │
-│  └──────────────────────────────────────────────────────────────┘ │
-└──────────────────────┬───────────────────────────────────────────┘
+│  ┌─────────────┐   ┌──────────────────┐   ┌──────────────────┐│
+│  │metadata-svc │   │  query-service   │   │  trace-service   ││
+│  │ FastAPI     │   │   FastAPI        │   │   FastAPI        ││
+│  │ port 8001   │   │   port 8002      │   │   port 8003      ││
+│  └──────┬──────┘   └────────┬─────────┘   └────────┬─────────┘│
+│         └───────────────────┬┴──────────────────────┘          │
+│                    ┌────────┴───────────────────────┐            │
+│                    │  PostgreSQL :5432              │            │
+│                    └────────────────────────────────┘          │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  Frontend (Next.js) port 3000                           │ │
+│  └──────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
                        │ HTTP POST (Bearer token)
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  LIGHTNINGAI — API Builder (NVIDIA A100, 80GB VRAM)               │
 │                                                                  │
-│  Tracking Service (FastAPI port 8000)                            │
+│  Trace Service (FastAPI port 8000)                               │
 │  ├── RF-DETR 2XLarge        ← person detection                  │
 │  ├── HeadBoxTracker          ← per-video tracking + fragment merge│
 │  ├── DINOv2 ViT-L/14        ← view-invariant Re-ID (1024-dim)   │
@@ -178,12 +161,12 @@ bash scripts/sync_secrets.sh --vps
 Upload video vào Drive Temp/
   → move.py tổ chức vào Drive Storage/
     → Queue worker (VPS) phát hiện video mới
-      → Gửi POST request tới LightningAI Tracking Service
+      → Gửi POST request tới LightningAI Trace Service
         → Download video từ Drive, chạy AI pipeline
           → Trả JSON (tracklets, embedding, metadata)
             → VPS lưu vào PostgreSQL
               → Frontend hiển thị trong queue
-                → Người dùng search → trace → xác nhận
+                → Người dùng search (query-service) → trace (trace-service) → xác nhận
 ```
 
 ---
@@ -483,22 +466,23 @@ storage/
 ```
 A20-App-119/
 ├── backend/
-│   ├── services/
-│   │   ├── api-gateway/
-│   │   ├── metadata-service/
-│   │   └── tracking-service/          ← Chạy trên LightningAI A100
-│   │       └── app/
-│   │           ├── main.py
-│   │           ├── local_ingestion_pipeline.py  ← RF-DETR + HeadBoxTracker + merge
-│   │           ├── model_adapters.py            ← DINOv2ReIDHub, VideoMAEHub, SigLIP2ModelHub
-│   │           ├── tracklet_feature_pipeline.py
-│   │           ├── tracklet_memory_bank.py      ← Cross-camera Re-ID
-│   │           ├── service.py
-│   │           └── config.py
+│   └── services/
+│       ├── metadata-service/
+│       │   └── app/
+│       ├── query-service/
+│       │   └── app/
+│       └── trace-service/          ← Chạy trên LightningAI A100
+│           └── app/
+│               ├── main.py
+│               ├── local_ingestion_pipeline.py  ← RF-DETR + HeadBoxTracker + merge
+│               ├── model_adapters.py            ← DINOv2ReIDHub, VideoMAEHub, SigLIP2ModelHub
+│               ├── tracklet_feature_pipeline.py
+│               ├── tracklet_memory_bank.py      ← Cross-camera Re-ID
+│               ├── service.py
+│               └── config.py
 │   └── config/
 │       ├── camera_topology.json
 │       └── camera_calibration.json
-├── ai_service/
 ├── frontend/
 ├── infra/
 │   ├── docker-compose.yml
@@ -534,21 +518,21 @@ git clone <REPO_URL> && cd A20-App-119
 ```bash
 cp secrets/master.env.example secrets/master.env
 nano secrets/master.env
-# Điền: LIGHTNING_API_BASE_URL, TRACKING_SERVICE_URL, DB credentials
+# Điền: LIGHTNING_API_BASE_URL, TRACE_SERVICE_URL, DB credentials
 ```
 
 ### Bước 3 — Start LightningAI API Builder
 
-1. Vào LightningAI Studio → API Builder → `tracking-service`
+1. Vào LightningAI Studio → API Builder → `trace-service`
 2. Machine: **1 × A100**
-3. On start command: `bash A20-App-119/scripts/start_tracking_service_api_builder.sh`
+3. On start command: `bash A20-App-119/scripts/start_trace_service_api_builder.sh`
 4. Click **Start** | Bật **Auto start**
 
 Verify:
 ```bash
 curl -H "Authorization: Bearer <LIGHTNING_API_TOKEN>" \
   https://8000-<HASH>.cloudspaces.litng.ai/health
-# Expected: {"status":"ok","service":"tracking-service"}
+# Expected: {"status":"ok","service":"trace-service"}
 ```
 
 ### Bước 4 — Deploy VPS Stack
@@ -590,13 +574,13 @@ Truy cập frontend: `http://<VPS_IP>:3000`
 | `POSTGRES_PASSWORD` | `<secret>` | ✅ |
 | `POSTGRES_DATABASE` | `video_tracking` | ✅ |
 | `JWT_SECRET_KEY` | `<random>` | ✅ |
-| `TRACKING_SERVICE_URL` | `https://8000-<HASH>.cloudspaces.litng.ai` | ✅ |
+| `TRACE_SERVICE_URL` | `https://8000-<HASH>.cloudspaces.litng.ai` | ✅ |
 | `LIGHTNING_API_TOKEN` | `<token>` | ✅ |
 | `QUEUE_PARALLEL_JOBS` | `3` | — |
 | `STORAGE_INGEST_SAMPLE_FPS` | `4` | — |
 | `GOOGLE_DRIVE_SOURCE_STORAGE_FOLDER_ID` | `1G6L...` | ✅ |
 
-### Tracking Service env vars (LightningAI)
+### Trace Service env vars (LightningAI)
 
 | Biến | Mặc định | Mô tả |
 |------|----------|-------|
@@ -671,7 +655,7 @@ Truy cập frontend: `http://<VPS_IP>:3000`
 
 ### GET `/health` *(LightningAI)*
 ```json
-{"status": "ok", "service": "tracking-service"}
+{"status": "ok", "service": "trace-service"}
 ```
 
 ---
@@ -733,7 +717,7 @@ docker restart mcpt-postgres
 
 ### Within-camera merge quá aggressive (ít người quá)
 
-Tăng `reid_threshold` trong `_resolve_within_camera_identities` ([local_ingestion_pipeline.py](backend/services/tracking-service/app/local_ingestion_pipeline.py)):
+Tăng `reid_threshold` trong `_resolve_within_camera_identities` ([local_ingestion_pipeline.py](backend/services/trace-service/app/local_ingestion_pipeline.py)):
 ```python
 reid_threshold: float = 0.85  # tăng lên 0.90–0.95 nếu cần
 ```
