@@ -156,3 +156,30 @@ export async function getVideoDetail(videoId: string): Promise<{ id: string; seg
     })),
   };
 }
+
+type ListVideosResponse = {
+  count: number;
+  items: Array<{
+    video_id: string;
+    title: string;
+    description: string | null;
+    storage_path: string;
+    storage_backend: string;
+    source_filename: string | null;
+    content_type: string | null;
+    created_at: string;
+  }>;
+};
+
+export async function listVideos(params: { page?: number; pageSize?: number }): Promise<{ videos: VideoClip[] }> {
+  const payload = await apiFetch<ListVideosResponse>("/videos");
+  return {
+    videos: payload.items.map((item) => ({
+      id: item.video_id,
+      title: item.title,
+      description: item.description ?? "",
+      thumbnailUrl: "https://picsum.photos/seed/mcpt-video/400/225",
+      previewUrl: resolveMediaUrl(item.storage_path, getApiBaseUrl()),
+    })),
+  };
+}
