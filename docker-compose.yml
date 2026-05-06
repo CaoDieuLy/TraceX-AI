@@ -1,3 +1,7 @@
+# Docker Compose for TraceX-AI VPS Deployment (Coolify)
+# Database + Metadata API + Frontend
+# Usage: docker-compose -f docker-compose.yml up -d
+
 services:
     postgres:
       image: postgres:16-alpine
@@ -57,11 +61,7 @@ services:
       volumes:
         - mcpt_storage:/workspace/storage
       healthcheck:
-        test:
-          - CMD
-          - python
-          - "-c"
-          - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"
+        test: ["CMD", "curl", "-s", "http://127.0.0.1:8002/health"]
         interval: 30s
         timeout: 10s
         retries: 5
