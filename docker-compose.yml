@@ -92,14 +92,14 @@ services:
         context: ./frontend
         dockerfile: Dockerfile
         args:
-          - NEXT_PUBLIC_API_BASE_URL=https://tracex-ai.smartnovi.tech/api/v1
+          - NEXT_PUBLIC_API_BASE_URL=/api/v1
       container_name: mcpt-frontend
       expose:
         - "3000"
       restart: unless-stopped
       environment:
         - NODE_ENV=production
-        - NEXT_PUBLIC_API_BASE_URL=https://tracex-ai.smartnovi.tech/api/v1
+        - NEXT_PUBLIC_API_BASE_URL=/api/v1
         - COOLIFY_DEPLOYMENT=true
       healthcheck:                                    # THAY ĐỔI 1
         test: ["CMD", "curl", "-s", "http://localhost:3000"]
