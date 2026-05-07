@@ -139,7 +139,6 @@ def patch_query(
             query,
             status=payload.status,
             ai_job_id=payload.ai_job_id,
-            ai_response=payload.ai_response,
         )
         return query_to_payload(updated)
     finally:
