@@ -33,7 +33,7 @@ async def create_video(
     description: str | None = Form(default=None),
     storage_url: str | None = Form(default=None),
     file: UploadFile | None = File(default=None),
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     from ...database import get_session
@@ -72,7 +72,7 @@ async def create_video(
 
 @router.get("", response_model=VideoListResponse)
 def videos(
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     from ...database import get_session
@@ -88,7 +88,7 @@ def videos(
 @router.get("/{video_id}", response_model=VideoResponse)
 def video_detail(
     video_id: str,
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     from ...database import get_session
@@ -106,7 +106,7 @@ def video_detail(
 @router.post("/queries", response_model=VideoQueryResponse, status_code=status.HTTP_201_CREATED)
 def create_query(
     payload: VideoQueryCreateRequest,
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     from ...database import get_session
@@ -124,7 +124,7 @@ def create_query(
 
 @router.get("/queries", response_model=VideoQueryListResponse)
 def queries(
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     from ...database import get_session
@@ -141,7 +141,7 @@ def queries(
 def patch_query(
     query_id: str,
     payload: VideoQueryUpdateRequest,
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     from ...database import get_session

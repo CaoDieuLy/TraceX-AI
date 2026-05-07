@@ -24,12 +24,12 @@ router = APIRouter(prefix="/users", tags=["users"])
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def admin_create_user(
     payload: AdminUserCreateRequest,
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     _admin: User = Depends(require_admin),
 ) -> User:
     from ...database import get_session
     from functools import partial
-    from ..core.dependencies import get_current_user as gcu
+    from ...core.dependencies import get_current_user as gcu
 
     session_gen = get_session()
     session = next(session_gen)
@@ -55,7 +55,7 @@ def admin_create_user(
 
 @router.get("", response_model=UserListResponse)
 def admin_list_users(
-    session: Session = Depends(get_current_user.__self__.__class__),
+    session: Session = Depends(get_session),
     _admin: User = Depends(require_admin),
 ) -> dict:
     from ...database import get_session
@@ -72,9 +72,10 @@ def admin_list_users(
 def admin_patch_user(
     user_id: int,
     payload: AdminUserPatchRequest,
+    session: Session = Depends(get_session),
     _admin: User = Depends(require_admin),
 ) -> User:
-    from ..database import SessionLocal
+    from ...database import SessionLocal
     session = SessionLocal()
     try:
         target = get_user_by_id(session, user_id)
