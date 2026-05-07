@@ -94,3 +94,15 @@ def debug_routes():
         if hasattr(route, "path") and hasattr(route, "methods"):
             routes.append({"path": route.path, "methods": list(route.methods)})
     return {"routes": routes, "total": len(routes)}
+
+
+@app.get("/debug/config")
+def debug_config():
+    """Show current runtime config for debugging."""
+    from .config import settings
+    return {
+        "bootstrap_admin_email": settings.bootstrap_admin_email or "(not set)",
+        "bootstrap_admin_password_set": bool(settings.bootstrap_admin_password),
+        "postgres_host": settings.postgres_host or "(not set)",
+        "postgres_db": settings.postgres_db or "(not set)",
+    }
