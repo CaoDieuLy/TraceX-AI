@@ -567,7 +567,7 @@ class QueueSyncService:
         return type("F", (), {"id": str(r["id"]), "name": str(r["name"])})()
 
     def _process_storage_item(self, session: Session, item: StorageVideoItem) -> dict:
-        from shared.models import PersonCandidate, QueueVideoAsset, User
+        from shared.models import QueueVideoAsset
 
         video_id = str(item.recorded_at.strftime("%Y%m%d_%H%M%S")) + "_" + item.camera_id
         queue_position = self._get_next_queue_position(session) + 1
@@ -643,7 +643,7 @@ def list_queue_videos(session: Session) -> list[dict]:
 
 
 def load_queue_video_metadata(session: Session, video_id: str) -> dict[str, Any]:
-    from shared.models import QueueVideoAsset, PersonCandidate
+    from shared.models import QueueVideoAsset, Tracklet
     row = session.scalar(select(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
     if row is None:
         raise FileNotFoundError(f"Queue video not found: {video_id}")
@@ -652,15 +652,39 @@ def load_queue_video_metadata(session: Session, video_id: str) -> dict[str, Any]
         return json.loads(metadata_path.read_text(encoding="utf-8"))
     people = (
         session.scalars(
-            select(PersonCandidate)
-            .where(PersonCandidate.video_id == video_id)
-            .order_by(PersonCandidate.frame_idx.asc(), PersonCandidate.id.asc())
+            select(Tracklet)
+            .where(Tracklet.video_id == video_id)
+            .order_by(Tracklet.start_time.asc(), Tracklet.id.asc())
         ).all()
     )
     return {
         "video": row.raw_video_metadata or {},
-        "people": [candidate.raw_metadata or {} for candidate in people],
+        "people": [_tracklet_to_candidate_payload(t) for t in people],
         "source": "database_fallback",
+    }
+
+
+def _tracklet_to_candidate_payload(tracklet) -> dict:
+    """Convert Tracklet row to legacy candidate payload shape for frontend compatibility."""
+    return {
+        "candidate_id": tracklet.tracklet_id,
+        "camera_id": tracklet.camera_id,
+        "video_id": tracklet.video_id,
+        "track_id": tracklet.track_id,
+        "gender": tracklet.gender,
+        "top_color": tracklet.top_color,
+        "bottom_color": tracklet.bottom_color,
+        "appearance_summary": tracklet.appearance_summary,
+        "bev_x": tracklet.bev_x,
+        "bev_y": tracklet.bev_y,
+        "quality_score": tracklet.quality_score,
+        "occlusion_score": tracklet.occlusion_score,
+        "start_time": tracklet.start_time,
+        "end_time": tracklet.end_time,
+        "representative_bbox": tracklet.representative_bbox,
+        "contributing_cameras": tracklet.contributing_cameras,
+        "contributing_video_ids": tracklet.contributing_video_ids,
+        "batch_id": tracklet.batch_id,
     }
 
 
@@ -676,10 +700,10 @@ def load_queue_video_file_path(session: Session, video_id: str) -> Path:
 
 
 def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> dict[str, int]:
-    from shared.models import PersonCandidate, QueueVideoAsset, User
+    from shared.models import Tracklet, QueueVideoAsset, User
     from sqlalchemy import func
 
-    existing_candidates = int(session.scalar(select(func.count()).select_from(PersonCandidate)) or 0)
+    existing_candidates = int(session.scalar(select(func.count()).select_from(Tracklet)) or 0)
     existing_queue_videos = int(session.scalar(select(func.count()).select_from(QueueVideoAsset)) or 0)
     if only_if_empty and (existing_candidates > 0 or existing_queue_videos > 0):
         return {
@@ -809,63 +833,87 @@ def _upsert_queue_video_asset(
 
 
 def _upsert_person_candidates(session: Session, people: list[dict], metadata_path: str | None = None) -> dict[str, int]:
-    from shared.models import PersonCandidate
+    """Upsert person candidates into Tracklet table (legacy path for local queue sync).
+
+    Maps old PersonCandidate fields to new Tracklet schema:
+      - candidate_id     -> tracklet_id
+      - camera_id        -> camera_id
+      - video_id        -> video_id
+      - raw_metadata     -> TrackletEmbedding row (if has embedding_vector)
+    """
+    from shared.models import Tracklet, TrackletEmbedding
     imported_count = 0
     updated_count = 0
-    normalized_people: list[dict[str, Any]] = []
 
     for person in people:
         if not isinstance(person, dict):
             continue
-        candidate_id = str(person.get("candidate_id") or "").strip()
-        if not candidate_id:
+        tracklet_id = str(person.get("candidate_id") or "").strip()
+        if not tracklet_id:
             continue
-        normalized_people.append({
-            "candidate_id": candidate_id,
-            "camera_id": person.get("camera_id"),
-            "video_id": person.get("video_id"),
-            "track_id": str(person.get("track_id")) if person.get("track_id") is not None else None,
-            "human_key": person.get("human_key"),
-            "frame_idx": int(person.get("frame_idx") or 0),
-            "search_text": _candidate_search_document(person),
-            "metadata_path": metadata_path,
-            "raw_metadata": _candidate_raw_metadata_subset(person),
-        })
 
-    if not normalized_people:
-        return {"imported_count": 0, "updated_count": 0}
+        camera_id = str(person.get("camera_id") or "")
+        video_id = str(person.get("video_id") or "")
+        gender = str(person.get("gender") or "unknown")
+        top_color = str(person.get("top_color") or "unknown")
+        bottom_color = str(person.get("bottom_color") or "unknown")
+        appearance_summary = str(person.get("appearance_summary") or "")
+        raw = person.get("raw_metadata") or {}
 
-    existing_rows = session.scalars(
-        select(PersonCandidate).where(
-            PersonCandidate.candidate_id.in_([item["candidate_id"] for item in normalized_people])
-        )
-    ).all()
-    existing_by_candidate_id = {row.candidate_id: row for row in existing_rows}
-    insert_rows: list[dict[str, Any]] = []
-
-    for values in normalized_people:
-        existing = existing_by_candidate_id.get(str(values["candidate_id"]))
+        existing = session.scalar(select(Tracklet).where(Tracklet.tracklet_id == tracklet_id))
         if existing:
-            for key, value in values.items():
-                setattr(existing, key, value)
+            existing.camera_id = camera_id
+            existing.gender = gender
+            existing.top_color = top_color
+            existing.bottom_color = bottom_color
+            existing.appearance_summary = appearance_summary
             updated_count += 1
         else:
-            insert_rows.append(values)
+            row = Tracklet(
+                tracklet_id=tracklet_id,
+                video_id=video_id or "unknown",
+                camera_id=camera_id,
+                track_id=str(person.get("track_id") or "0"),
+                start_time=0.0,
+                end_time=0.0,
+                quality_score=float(raw.get("quality_score") or 0.0),
+                occlusion_score=float(raw.get("occlusion_score") or 0.0),
+                gender=gender,
+                age_range="unknown",
+                top_color=top_color,
+                bottom_color=bottom_color,
+                shoes_color="unknown",
+                appearance_summary=appearance_summary,
+                bev_x=float(raw.get("bev_x") or 0.0),
+                bev_y=float(raw.get("bev_y") or 0.0),
+                representative_bbox=raw.get("representative_bbox") or [],
+                contributing_cameras=raw.get("contributing_cameras") or [],
+                contributing_video_ids=raw.get("contributing_video_ids") or [],
+                batch_id=metadata_path,
+            )
+            session.add(row)
             imported_count += 1
 
-    session.flush()
-    for start in range(0, len(insert_rows), 50):
-        chunk = insert_rows[start:start + 50]
-        if chunk:
-            session.bulk_insert_mappings(PersonCandidate, chunk)
-            session.flush()
+        # Also upsert embedding if present
+        embedding_vec = raw.get("embedding_vector") or raw.get("appearance_embedding_vector") or []
+        if embedding_vec and len(embedding_vec) > 0:
+            emb_existing = session.scalar(select(TrackletEmbedding).where(TrackletEmbedding.tracklet_id == tracklet_id))
+            if emb_existing:
+                emb_existing.embedding_vector = embedding_vec
+            else:
+                session.add(TrackletEmbedding(
+                    tracklet_id=tracklet_id,
+                    embedding_vector=embedding_vec,
+                    model_version="eva02_l14",
+                ))
 
+    session.flush()
     return {"imported_count": imported_count, "updated_count": updated_count}
 
 
 def delete_queue_video_asset(session: Session, video_id: str) -> None:
-        from shared.models import PersonCandidate, QueueVideoAsset
+    from shared.models import QueueVideoAsset, Tracklet
 
-        session.execute(delete(PersonCandidate).where(PersonCandidate.video_id == video_id))
-        session.execute(delete(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
-        session.flush()
+    session.execute(delete(Tracklet).where(Tracklet.video_id == video_id))
+    session.execute(delete(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
+    session.flush()

@@ -34,7 +34,6 @@ from typing import Optional
 
 from sqlalchemy import (
     JSON,
-    JSONB,
     DateTime,
     Float,
     ForeignKey,
@@ -45,7 +44,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 

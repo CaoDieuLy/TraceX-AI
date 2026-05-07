@@ -207,66 +207,130 @@ def _save_candidates_from_batch(
     batch: TimestampBatch,
     result: dict,
 ) -> int:
-    """Save unified cross-camera tracklets from batch response to database."""
-    from shared.models import PersonCandidate
+    """Save unified cross-camera tracklets from batch response to database.
+
+    Writes to:
+      - QueryHistory  : one record per batch (query_id links all candidates)
+      - Tracklet      : one row per unified person (all cameras combined)
+      - TrackletEmbedding : EVA-02 1024-dim vector per tracklet
+      - TrackletAction    : VideoMAE action classification per tracklet
+    """
+    from shared.models import QueryHistory, Tracklet, TrackletEmbedding, TrackletAction
 
     imported = 0
     tracklets = result.get("tracklets", [])
+    batch_id = result.get("batch_id", "")
+
+    if not tracklets:
+        return 0
+
+    # Create one QueryHistory row to anchor all candidates from this batch
+    query_record = QueryHistory(
+        user_id=1,  # system user
+        query_text=f"batch:{batch_id}",
+        status="completed",
+        result_count=len(tracklets),
+    )
+    session.add(query_record)
+    session.flush()  # get query_record.query_id
 
     for tracklet in tracklets:
         tracklet_id = str(tracklet.get("tracklet_id") or "").strip()
         if not tracklet_id:
             continue
 
-        # Build raw_metadata from the full tracklet response
-        raw_metadata = {k: v for k, v in tracklet.items()}
-        for key_to_remove in ("tracklet_id", "video_id", "camera_id", "track_id"):
-            raw_metadata.pop(key_to_remove, None)
-
-        # Build search text
-        search_parts = []
-        if tracklet.get("appearance_summary"):
-            search_parts.append(tracklet["appearance_summary"])
-        if tracklet.get("gender"):
-            search_parts.append(tracklet["gender"])
-        if tracklet.get("action"):
-            search_parts.append(tracklet["action"])
-        search_text = " ".join(search_parts)
-
-        # Save one candidate per contributing camera (cross-camera ID)
-        # contributing_cameras may have multiple cameras for the same person
+        primary_cam = str(tracklet.get("camera_id") or "")
+        primary_vid = str(tracklet.get("video_id") or "")
         contributing_cams = tracklet.get("contributing_cameras", [])
         contributing_vids = tracklet.get("contributing_video_ids", [])
+        summary = str(tracklet.get("appearance_summary") or "")
+        gender = str(tracklet.get("gender") or "unknown")
+        top_color = str(tracklet.get("top_color") or "unknown")
+        bottom_color = str(tracklet.get("bottom_color") or "unknown")
+        shoes_color = str(tracklet.get("shoes_color") or "unknown")
+        bev_x = float(tracklet.get("bev_x") or 0.0)
+        bev_y = float(tracklet.get("bev_y") or 0.0)
+        quality_score = float(tracklet.get("quality_score") or 0.0)
+        occlusion_score = float(tracklet.get("occlusion_score") or 0.0)
+        start_time = float(tracklet.get("start_time") or 0.0)
+        end_time = float(tracklet.get("end_time") or 0.0)
+        rep_bbox = tracklet.get("representative_bbox", [])
 
-        # Primary: save under the representative camera
-        primary_cam = tracklet.get("camera_id", "")
-        primary_vid = tracklet.get("video_id", "")
-
+        # Upsert Tracklet
         existing = session.scalar(
-            select(PersonCandidate).where(PersonCandidate.candidate_id == tracklet_id)
+            select(Tracklet).where(Tracklet.tracklet_id == tracklet_id)
         )
-
         if existing:
-            existing.raw_metadata = raw_metadata
-            existing.search_text = search_text
+            existing.camera_id = primary_cam
+            existing.quality_score = quality_score
+            existing.gender = gender
+            existing.top_color = top_color
+            existing.bottom_color = bottom_color
+            existing.shoes_color = shoes_color
+            existing.bev_x = bev_x
+            existing.bev_y = bev_y
+            existing.appearance_summary = summary
+            existing.contributing_cameras = contributing_cams
+            existing.contributing_video_ids = contributing_vids
+            existing.batch_id = batch_id
         else:
-            candidate = PersonCandidate(
-                candidate_id=tracklet_id,
+            row = Tracklet(
+                tracklet_id=tracklet_id,
+                video_id=primary_vid or "unknown",
                 camera_id=primary_cam,
-                video_id=primary_vid,
-                track_id=str(tracklet.get("track_id") or "0"),
-                frame_idx=0,
-                search_text=search_text,
-                raw_metadata={
-                    **raw_metadata,
-                    "batch_id": batch.timestamp_key,
-                    "contributing_cameras": contributing_cams,
-                    "contributing_video_ids": contributing_vids,
-                    "n_cameras": len(contributing_cams),
-                },
+                track_id=str(tracklet.get("track_id") or 0),
+                start_time=start_time,
+                end_time=end_time,
+                quality_score=quality_score,
+                occlusion_score=occlusion_score,
+                gender=gender,
+                age_range="unknown",
+                top_color=top_color,
+                bottom_color=bottom_color,
+                shoes_color=shoes_color,
+                appearance_summary=summary,
+                bev_x=bev_x,
+                bev_y=bev_y,
+                representative_bbox=rep_bbox,
+                contributing_cameras=contributing_cams,
+                contributing_video_ids=contributing_vids,
+                batch_id=batch_id,
             )
-            session.add(candidate)
+            session.add(row)
             imported += 1
+
+        # Upsert TrackletEmbedding (EVA-02 1024-dim)
+        embedding_vec = tracklet.get("embedding_vector") or []
+        if embedding_vec and len(embedding_vec) > 0:
+            emb_existing = session.scalar(
+                select(TrackletEmbedding).where(TrackletEmbedding.tracklet_id == tracklet_id)
+            )
+            if emb_existing:
+                emb_existing.embedding_vector = embedding_vec
+            else:
+                emb_row = TrackletEmbedding(
+                    tracklet_id=tracklet_id,
+                    embedding_vector=embedding_vec,
+                    model_version="eva02_l14",
+                )
+                session.add(emb_row)
+
+        # Upsert TrackletAction (VideoMAE action)
+        action_label = str(tracklet.get("action") or "unknown")
+        if action_label and action_label != "unknown":
+            act_existing = session.scalar(
+                select(TrackletAction).where(TrackletAction.tracklet_id == tracklet_id)
+            )
+            if act_existing:
+                act_existing.action_label = action_label
+            else:
+                act_row = TrackletAction(
+                    tracklet_id=tracklet_id,
+                    action_label=action_label,
+                    kinetics_label=None,
+                    confidence=1.0,
+                )
+                session.add(act_row)
 
     session.flush()
     return imported
