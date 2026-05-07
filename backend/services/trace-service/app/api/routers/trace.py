@@ -265,9 +265,12 @@ def submit_feedback(
     verified_object_id = request.verified_object_id
 
     if request.is_correct and not verified_object_id:
-        # Create verified object
+        # Create verified object — linked to candidate via evidence
         verified_obj = VerifiedObject(
-            object_name=evidence.object_name or "Unknown",
+            candidate_id=evidence.query_candidate_id,
+            verified_by_user_id=None,  # set from auth if available
+            is_correct=request.is_correct,
+            notes=getattr(request, "feedback_text", None),
             verified_at=datetime.now(timezone.utc),
         )
         session.add(verified_obj)
@@ -300,7 +303,7 @@ def submit_feedback(
 
 @router.get("/candidate-detail", response_model=CandidateDetailResponse)
 def get_candidate_detail(
-    request: QueryCandidateDetailRequest,
+    request: TraceCandidateDetailRequest,
     session: SessionDep,
 ) -> CandidateDetailResponse:
     """Get detailed information about a candidate for preview."""

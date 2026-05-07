@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.orm import Session
 
 from ...core.dependencies import get_current_user
-from ...core.models import User
+from shared.models import User
 from ...core.schemas import (
     VideoListResponse,
     VideoQueryCreateRequest,

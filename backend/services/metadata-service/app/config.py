@@ -92,10 +92,20 @@ class Settings(BaseSettings):
     app_name: str = "mcpt-metadata-service"
     api_prefix: str = "/api/v1"
     database_url: str = _build_default_database_url()
-    # --- Tracking Service (LightningAI A100) ---
+    # --- Trace Service (LightningAI GPU) — called by queue worker for detection/tracking ---
+    trace_service_url: str = os.getenv(
+        "TRACE_SERVICE_URL",
+        "http://trace-service:8004"
+    )
+    # --- Query Service (LightningAI GPU) — called for search/ranking ---
+    query_service_url: str = os.getenv(
+        "QUERY_SERVICE_URL",
+        "http://query-service:8003"
+    )
+    # Backward compat: TRACKING_SERVICE_URL used as alias for trace_service_url
     tracking_service_url: str = os.getenv(
         "TRACKING_SERVICE_URL",
-        "https://8000-01kqhxrsmzj0gjh7fe5fqga4jm.cloudspaces.litng.ai"
+        "http://trace-service:8004"
     )
     public_api_base_url: str = os.getenv("NEXT_PUBLIC_API_GATEWAY_URL", "").strip()
     lightning_api_token: str = ""

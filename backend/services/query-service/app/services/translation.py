@@ -1,4 +1,13 @@
-"""Vietnamese translation service using Helsinki-NLP models."""
+"""Multilingual translation using SeamlessM4T v2-large.
+
+Replaces Helsinki-NLP opus-mt models with Facebook SeamlessM4T v2,
+which handles Vietnamese ↔ English with better contextual accuracy
+(especially surveillance/appearance description domain).
+
+VRAM budget: ~5GB fp16 on query-service GPU partition.
+"""
+
+from __future__ import annotations
 
 import logging
 import os
@@ -7,170 +16,164 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-import torch
-
 logger = logging.getLogger(__name__)
 
-# Vietnamese character pattern
-VIETNAMESE_PATTERN = re.compile(r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]", re.IGNORECASE)
+# Vietnamese diacritics pattern
+_VI_PATTERN = re.compile(
+    r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]",
+    re.IGNORECASE,
+)
 
-# Singleton translation pipelines
-_vi_to_en_pipeline = None
-_en_to_vi_pipeline = None
+# Common Vietnamese function words for detection heuristic
+_VI_STOPWORDS = frozenset({
+    "của", "và", "là", "có", "được", "trong", "cho", "với", "không",
+    "người", "này", "khi", "đã", "một", "những", "ra", "hay", "về",
+    "theo", "từ", "bởi", "vào", "ở", "để", "như", "trên", "các",
+    "ai", "họ", "bạn", "tôi", "chúng", "nào", "làm", "gì", "sao",
+    "bao", "nhiêu", "mấy", "muốn", "cần", "phải", "mặc", "áo", "quần",
+    "đang", "đi", "bước", "mang", "đeo", "cầm", "xách",
+})
+
+# Singleton SeamlessM4T components
+_seamless_model = None
+_seamless_processor = None
+_seamless_device = None
 
 
 def _get_model_cache_dir() -> Path:
-    """Get model cache directory."""
-    cache_dir = Path(os.getenv("TRANSLATION_MODEL_PATH", "/workspace/models/translation"))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    cache = Path(os.getenv("TRANSLATION_MODEL_PATH", "/workspace/models/translation"))
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
 
 
-@lru_cache(maxsize=1)
-def get_vi_to_en_pipeline():
-    """Get or create VI→EN translation pipeline."""
-    global _vi_to_en_pipeline
-    if _vi_to_en_pipeline is None:
-        try:
-            from transformers import pipeline
-            model_name = os.getenv("TRANSLATION_VI_EN_MODEL", "Helsinki-NLP/opus-mt-vi-en")
-            cache_dir = str(_get_model_cache_dir())
-            
-            logger.info(f"Loading translation model: {model_name}")
-            _vi_to_en_pipeline = pipeline(
-                "translation",
-                model=model_name,
-                tokenizer=model_name,
-                cache_dir=cache_dir,
-                device=-1,  # CPU
+def _load_seamless() -> tuple:
+    """Lazy-load SeamlessM4T v2-large. Returns (model, processor, device) or (None, None, None)."""
+    global _seamless_model, _seamless_processor, _seamless_device
+    if _seamless_model is not None:
+        return _seamless_model, _seamless_processor, _seamless_device
+
+    try:
+        import torch
+        from transformers import AutoProcessor, SeamlessM4Tv2Model
+
+        model_id = os.getenv("SEAMLESS_M4T_MODEL", "facebook/seamless-m4t-v2-large")
+        cache_dir = str(_get_model_cache_dir())
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dtype = torch.float16 if device.type == "cuda" else torch.float32
+
+        logger.info("Loading SeamlessM4T v2: %s  device=%s", model_id, device)
+        processor = AutoProcessor.from_pretrained(model_id, cache_dir=cache_dir)
+        model = SeamlessM4Tv2Model.from_pretrained(
+            model_id,
+            cache_dir=cache_dir,
+            torch_dtype=dtype,
+        ).to(device)
+        model.eval()
+
+        _seamless_model = model
+        _seamless_processor = processor
+        _seamless_device = device
+        logger.info("SeamlessM4T v2 loaded OK")
+
+    except Exception as exc:
+        logger.warning("SeamlessM4T v2 load failed: %s — translation will pass through", exc)
+        _seamless_model = None
+        _seamless_processor = None
+        _seamless_device = None
+
+    return _seamless_model, _seamless_processor, _seamless_device
+
+
+def warmup() -> None:
+    """Pre-load SeamlessM4T v2 into GPU memory at service startup."""
+    logger.info("Warming up SeamlessM4T v2...")
+    model, processor, device = _load_seamless()
+    if model is None:
+        logger.warning("SeamlessM4T v2 warmup skipped (model unavailable)")
+        return
+
+    # Dummy inference
+    try:
+        import torch
+        text = "người mặc áo đỏ"
+        inputs = processor(text=text, src_lang="vie", return_tensors="pt")
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        with torch.no_grad():
+            output_tokens = model.generate(
+                **inputs,
+                tgt_lang="eng",
+                generate_speech=False,
             )
-            logger.info("VI→EN translation pipeline loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load VI→EN model: {e}. Translation will return original text.")
-            _vi_to_en_pipeline = None
-    return _vi_to_en_pipeline
+        result = processor.decode(output_tokens[0].tolist()[0], skip_special_tokens=True)
+        logger.info("SeamlessM4T v2 warmup OK: '%s' → '%s'", text, result)
+    except Exception as exc:
+        logger.warning("SeamlessM4T v2 warmup inference failed: %s", exc)
 
 
-@lru_cache(maxsize=1)
-def get_en_to_vi_pipeline():
-    """Get or create EN→VI translation pipeline."""
-    global _en_to_vi_pipeline
-    if _en_to_vi_pipeline is None:
-        try:
-            from transformers import pipeline
-            model_name = os.getenv("TRANSLATION_EN_VI_MODEL", "Helsinki-NLP/opus-mt-en-vi")
-            cache_dir = str(_get_model_cache_dir())
-            
-            logger.info(f"Loading translation model: {model_name}")
-            _en_to_vi_pipeline = pipeline(
-                "translation",
-                model=model_name,
-                tokenizer=model_name,
-                cache_dir=cache_dir,
-                device=-1,  # CPU
-            )
-            logger.info("EN→VI translation pipeline loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load EN→VI model: {e}. Translation will return original text.")
-            _en_to_vi_pipeline = None
-    return _en_to_vi_pipeline
+# Alias expected by callers in candidates.py
+warmup_models = warmup
 
 
 def detect_vietnamese(text: Optional[str]) -> bool:
-    """
-    Detect if text contains Vietnamese characters.
-    
-    Args:
-        text: Input text
-        
-    Returns:
-        True if Vietnamese characters detected, False otherwise
-    """
+    """Return True if text appears to be Vietnamese."""
     if not text:
         return False
-    
-    text_lower = text.lower()
-    # Count Vietnamese characters
-    vi_chars = VIETNAMESE_PATTERN.findall(text_lower)
-    
-    # Also check for common Vietnamese words
-    common_vi_words = {
-        "của", "và", "là", "có", "được", "trong", "cho", "với", "không", 
-        "người", "này", "khi", "đã", "một", "những", "ra", "hay", "về",
-        "theo", "từ", "bởi", "vào", "ở", "để", "như", "trên", "các",
-        "ai", "ấy", "họ", "bạn", "tôi", "chúng", "nào", "ở đâu", "làm",
-        "gì", "sao", "bao", "nhiêu", "mấy", "muốn", "cần", "phải"
-    }
-    
-    words = set(text_lower.split())
-    common_word_matches = len(words.intersection(common_vi_words))
-    
-    # Heuristic: if enough Vietnamese indicators
+    vi_chars = _VI_PATTERN.findall(text.lower())
+    words = set(text.lower().split())
+    stopword_hits = len(words & _VI_STOPWORDS)
+
     if len(vi_chars) >= 2:
         return True
-    if common_word_matches >= 2:
+    if stopword_hits >= 2:
         return True
-    if len(vi_chars) >= 1 and common_word_matches >= 1:
+    if len(vi_chars) >= 1 and stopword_hits >= 1:
         return True
-    
     return False
 
 
 def translate_to_english(text: Optional[str]) -> str:
-    """
-    Translate Vietnamese text to English.
-    
-    Args:
-        text: Vietnamese text
-        
-    Returns:
-        English translation or original text if translation fails
-    """
+    """Translate Vietnamese text → English using SeamlessM4T v2."""
     if not text:
+        return text or ""
+    model, processor, device = _load_seamless()
+    if model is None:
+        logger.debug("SeamlessM4T unavailable — returning original text")
         return text
-    
-    pipeline = get_vi_to_en_pipeline()
-    if pipeline is None:
-        logger.warning("VI→EN translation unavailable, returning original text")
-        return text
-    
     try:
-        result = pipeline(text, max_length=512)
-        return result[0]["translation_text"]
-    except Exception as e:
-        logger.warning(f"Translation failed: {e}")
+        import torch
+        inputs = processor(text=text, src_lang="vie", return_tensors="pt")
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        with torch.no_grad():
+            output_tokens = model.generate(
+                **inputs,
+                tgt_lang="eng",
+                generate_speech=False,
+            )
+        return processor.decode(output_tokens[0].tolist()[0], skip_special_tokens=True)
+    except Exception as exc:
+        logger.warning("translate_to_english failed: %s", exc)
         return text
 
 
 def translate_to_vietnamese(text: Optional[str]) -> str:
-    """
-    Translate English text to Vietnamese.
-    
-    Args:
-        text: English text
-        
-    Returns:
-        Vietnamese translation or original text if translation fails
-    """
+    """Translate English text → Vietnamese using SeamlessM4T v2."""
     if not text:
+        return text or ""
+    model, processor, device = _load_seamless()
+    if model is None:
         return text
-    
-    pipeline = get_en_to_vi_pipeline()
-    if pipeline is None:
-        logger.warning("EN→VI translation unavailable, returning original text")
-        return text
-    
     try:
-        result = pipeline(text, max_length=512)
-        return result[0]["translation_text"]
-    except Exception as e:
-        logger.warning(f"Translation failed: {e}")
+        import torch
+        inputs = processor(text=text, src_lang="eng", return_tensors="pt")
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        with torch.no_grad():
+            output_tokens = model.generate(
+                **inputs,
+                tgt_lang="vie",
+                generate_speech=False,
+            )
+        return processor.decode(output_tokens[0].tolist()[0], skip_special_tokens=True)
+    except Exception as exc:
+        logger.warning("translate_to_vietnamese failed: %s", exc)
         return text
-
-
-def warmup_models():
-    """Pre-load translation models on service startup."""
-    logger.info("Warming up translation models...")
-    get_vi_to_en_pipeline()
-    get_en_to_vi_pipeline()
-    logger.info("Translation models warmed up")

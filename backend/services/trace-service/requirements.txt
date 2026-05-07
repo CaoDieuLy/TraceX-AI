@@ -1,22 +1,28 @@
-# Trace Service Dependencies
-# ============================
-# FastAPI and web framework
-fastapi>=0.110.0,<1.0.0
-uvicorn[standard]>=0.27.0,<1.0.0
+# Trace Service Requirements — Neural Video Reconstruction
+# Real-ESRGAN + ProPainter + RIFE + NVENC (A100 80GB)
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
+sqlalchemy>=2.0.25
+psycopg2-binary>=2.9.9
+pydantic>=2.6.0
+pydantic-settings>=2.1.0
+httpx>=0.27.0
+scipy>=1.12.0
 
-# Database
-sqlalchemy>=2.0.25,<3.0.0
-psycopg2-binary>=2.9.9,<3.0.0
+# Neural video processing
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+pillow>=10.3.0
 
-# Configuration
-pydantic>=2.6.0,<3.0.0
-pydantic-settings>=2.1.0,<3.0.0
+# Real-ESRGAN dependencies
+basicsr>=1.4.0
+realesrgan>=0.3.0
+torch>=2.3.0
+torchvision>=0.18.0
 
-# HTTP client (for inter-service communication)
-httpx>=0.27.0,<1.0.0
-
-# Development dependencies
-pytest>=8.0.0,<9.0.0
-pytest-asyncio>=0.23.0,<1.0.0
-httpx>=0.27.0  # For testing
+# Google Drive client
+google-api-python-client>=2.100.0
+google-auth>=2.25.0
+google-auth-oauthlib>=1.2.0

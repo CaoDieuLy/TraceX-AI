@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..config import A20_ROOT, PROJECT_ROOT, settings
 
 if TYPE_CHECKING:
-    from ..core.models import User
+    from shared.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -567,7 +567,7 @@ class QueueSyncService:
         return type("F", (), {"id": str(r["id"]), "name": str(r["name"])})()
 
     def _process_storage_item(self, session: Session, item: StorageVideoItem) -> dict:
-        from ..core.models import PersonCandidate, QueueVideoAsset
+        from shared.models import PersonCandidate, QueueVideoAsset, User
 
         video_id = str(item.recorded_at.strftime("%Y%m%d_%H%M%S")) + "_" + item.camera_id
         queue_position = self._get_next_queue_position(session) + 1
@@ -596,7 +596,7 @@ class QueueSyncService:
         return {"evicted_video_ids": []}
 
     def _get_next_queue_position(self, session: Session) -> int:
-        from ..core.models import QueueVideoAsset
+        from shared.models import QueueVideoAsset
         result = session.query(QueueVideoAsset).order_by(QueueVideoAsset.queue_position.desc()).first()
         return result.queue_position if result else 0
 
@@ -637,13 +637,13 @@ def queue_video_to_payload(video) -> dict:
 
 
 def list_queue_videos(session: Session) -> list[dict]:
-    from ..core.models import QueueVideoAsset
+    from shared.models import QueueVideoAsset
     statement = select(QueueVideoAsset).order_by(QueueVideoAsset.queue_position.asc(), QueueVideoAsset.id.asc())
     return [queue_video_to_payload(video) for video in session.scalars(statement).all()]
 
 
 def load_queue_video_metadata(session: Session, video_id: str) -> dict[str, Any]:
-    from ..core.models import QueueVideoAsset, PersonCandidate
+    from shared.models import QueueVideoAsset, PersonCandidate
     row = session.scalar(select(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
     if row is None:
         raise FileNotFoundError(f"Queue video not found: {video_id}")
@@ -665,7 +665,7 @@ def load_queue_video_metadata(session: Session, video_id: str) -> dict[str, Any]
 
 
 def load_queue_video_file_path(session: Session, video_id: str) -> Path:
-    from ..core.models import QueueVideoAsset
+    from shared.models import QueueVideoAsset
     row = session.scalar(select(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
     if row is None:
         raise FileNotFoundError(f"Queue video not found: {video_id}")
@@ -676,7 +676,7 @@ def load_queue_video_file_path(session: Session, video_id: str) -> Path:
 
 
 def sync_local_queue_state(session: Session, *, only_if_empty: bool = False) -> dict[str, int]:
-    from ..core.models import PersonCandidate, QueueVideoAsset
+    from shared.models import PersonCandidate, QueueVideoAsset, User
     from sqlalchemy import func
 
     existing_candidates = int(session.scalar(select(func.count()).select_from(PersonCandidate)) or 0)
@@ -780,7 +780,7 @@ def _upsert_queue_video_asset(
     local_metadata_path: str | None,
     raw_video_metadata: dict,
 ):
-    from ..core.models import QueueVideoAsset
+    from shared.models import QueueVideoAsset
     row = session.scalar(select(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
     values = {
         "video_id": video_id,
@@ -809,7 +809,7 @@ def _upsert_queue_video_asset(
 
 
 def _upsert_person_candidates(session: Session, people: list[dict], metadata_path: str | None = None) -> dict[str, int]:
-    from ..core.models import PersonCandidate
+    from shared.models import PersonCandidate
     imported_count = 0
     updated_count = 0
     normalized_people: list[dict[str, Any]] = []
@@ -864,7 +864,8 @@ def _upsert_person_candidates(session: Session, people: list[dict], metadata_pat
 
 
 def delete_queue_video_asset(session: Session, video_id: str) -> None:
-    from ..core.models import PersonCandidate, QueueVideoAsset
-    session.execute(delete(PersonCandidate).where(PersonCandidate.video_id == video_id))
-    session.execute(delete(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
-    session.flush()
+        from shared.models import PersonCandidate, QueueVideoAsset
+
+        session.execute(delete(PersonCandidate).where(PersonCandidate.video_id == video_id))
+        session.execute(delete(QueueVideoAsset).where(QueueVideoAsset.video_id == video_id))
+        session.flush()

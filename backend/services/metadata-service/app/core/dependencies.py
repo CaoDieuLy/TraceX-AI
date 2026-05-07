@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from .auth import decode_access_token
 from ..database import get_session
-from .models import User
+from shared.models import User
 
 bearer_scheme = HTTPBearer(auto_error=False)
 

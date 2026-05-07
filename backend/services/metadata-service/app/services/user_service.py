@@ -9,10 +9,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.auth import hash_password, verify_password
-from ..core.models import User
+from shared.models import User
 
 if TYPE_CHECKING:
-    from ..core.models import User
+    from shared.models import User
 
 logger = logging.getLogger(__name__)
 

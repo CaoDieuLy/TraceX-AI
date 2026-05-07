@@ -1,134 +1,309 @@
 """
-Queue Worker - Process videos from queue via LightningAI trace-service.
+Queue Worker — Batch cross-camera processing via metadata-service.
 
-This worker runs continuously, polling the queue for new videos,
-and sends them to the trace-service for AI processing.
+Polls the queue for unprocessed videos from VinUni Storage,
+groups them by timestamp (e.g. all 50 cameras at 2026-04-28_11-00),
+and sends each timestamp-group as ONE batch to the metadata-service
+batch endpoint for cross-camera MCBLT association.
+
+Each batch:
+  1. GROUP: Collect up to --batch-size videos with same timestamp
+  2. BATCH: POST /api/v1/video/batch/process with all videos
+  3. SAVE: Write unified cross-camera tracklets to database
+  4. MARK: Set processed_at on all videos in batch
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import Optional
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+# Match cam_01_2026-04-28_11-00.mp4 → (camera_id, date, hour, minute)
+_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<camera_id>cam_\d{2,})_"
+    r"(?P<date>\d{4}-\d{2}-\d{2})_"
+    r"(?P<hour>\d{2})-(?P<minute>\d{2})"
+    r"(?:-(?P<second>\d{2}))?"
+    r"(?P<suffix>\.mp4)$",
+    re.IGNORECASE,
+)
+
 
 @dataclass
-class QueueItem:
+class BatchItem:
+    """One video entry inside a batch (same timestamp across cameras)."""
     video_id: str
     camera_id: Optional[str]
-    drive_file_id: Optional[str]
-    source_filename: Optional[str]
-    local_video_path: Optional[str]
+    video_path: str
+    source_filename: str
 
 
-def _get_trace_service_url() -> str:
-    return os.getenv(
-        "TRACE_SERVICE_URL",
-        "https://8000-01kqhxrsmzj0gjh7fe5fqga4jm.cloudspaces.litng.ai"
-    )
+@dataclass
+class TimestampBatch:
+    """A group of videos from different cameras at the same timestamp."""
+    timestamp_key: str          # e.g. "2026-04-28_11-00"
+    recorded_at: datetime       # parsed datetime
+    videos: list[BatchItem]
 
 
-def _get_trace_headers() -> dict:
-    token = os.getenv("LIGHTNING_API_TOKEN", "").strip()
-    if not token:
-        return {"Content-Type": "application/json"}
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
+def _parse_timestamp_from_filename(filename: str) -> Optional[tuple[str, datetime]]:
+    """Parse timestamp from filename like cam_01_2026-04-28_11-00.mp4."""
+    m = _TIMESTAMP_PATTERN.fullmatch(filename)
+    if not m:
+        return None
+    try:
+        date_str = m.group("date")
+        hour = int(m.group("hour"))
+        minute = int(m.group("minute"))
+        second = int(m.group("second") or "0")
+        recorded_at = datetime(
+            int(date_str[0:4]),
+            int(date_str[5:7]),
+            int(date_str[8:10]),
+            hour, minute, second,
+        )
+        key = f"{date_str}_{hour:02d}-{minute:02d}"
+        return key, recorded_at
+    except (ValueError, IndexError):
+        return None
 
 
-def _wait_for_trace_service(max_wait: int = 120) -> bool:
-    url = _get_trace_service_url().rstrip("/") + "/health"
+def _wait_for_metadata_service(max_wait: int = 120) -> bool:
+    url = os.getenv(
+        "METADATA_SERVICE_URL",
+        "http://metadata-service:8002"
+    ).rstrip("/") + "/health"
     deadline = time.time() + max_wait
-    poll_interval = 5
 
     while time.time() < deadline:
         try:
             with httpx.Client(timeout=10) as client:
-                response = client.get(url, headers=_get_trace_headers())
+                response = client.get(url)
             if response.is_success:
-                logger.info("Trace service is ready")
+                logger.info("Metadata service is ready")
                 return True
         except httpx.HTTPError as e:
-            logger.info("Waiting for trace service: %s", e)
-        time.sleep(poll_interval)
+            logger.info("Waiting for metadata service: %s", e)
+        time.sleep(5)
 
-    logger.warning("Trace service not ready after %ds, proceeding anyway", max_wait)
+    logger.warning("Metadata service not ready after %ds, proceeding anyway", max_wait)
     return True
 
 
-def process_queue_item(
-    session: Session,
-    item: QueueItem,
-    timeout: int = 600,
-) -> dict:
+def _get_metadata_service_url() -> str:
+    return os.getenv(
+        "METADATA_SERVICE_URL",
+        "http://metadata-service:8002"
+    ).rstrip("/")
+
+
+# ---------------------------------------------------------------------------
+# Batch processing
+# ---------------------------------------------------------------------------
+
+def _group_videos_by_timestamp(
+    queue_videos: list,
+) -> list[TimestampBatch]:
     """
-    Send a queue item to trace-service for processing.
-    Returns the trace service response.
+    Group queue videos by timestamp (date + hour + minute).
+
+    Videos from the same timestamp (different cameras) share the same batch.
+    Returns list of TimestampBatch sorted by timestamp.
     """
-    trace_url = _get_trace_service_url().rstrip("/") + "/api/v1/video/process"
+    entries: list[tuple[Optional[str], datetime, BatchItem]] = []
+
+    for video in queue_videos:
+        source_fn = video.source_filename or ""
+        parsed = _parse_timestamp_from_filename(source_fn)
+
+        if parsed:
+            key, recorded_at = parsed
+        else:
+            # Fallback: use camera_id + video_id as unique key
+            key = f"{video.camera_id}_{video.video_id}"
+            recorded_at = datetime.now(timezone.utc)
+
+        camera_id = video.camera_id or f"cam_unknown"
+        video_path = video.local_video_path or ""
+
+        entries.append((
+            key,
+            recorded_at,
+            BatchItem(
+                video_id=video.video_id,
+                camera_id=camera_id,
+                video_path=video_path,
+                source_filename=source_fn,
+            ),
+        ))
+
+    # Group by timestamp key
+    entries.sort(key=lambda x: (x[0] or "", x[1]))
+    batches: list[TimestampBatch] = []
+
+    for key, group in groupby(entries, key=lambda x: x[0]):
+        group_list = list(group)
+        group_list.sort(key=lambda x: x[1])
+        first_key, first_recorded = group_list[0]
+        batch = TimestampBatch(
+            timestamp_key=str(first_key or "unknown"),
+            recorded_at=first_recorded,
+            videos=[item for _, _, item in group_list],
+        )
+        batches.append(batch)
+
+    return batches
+
+
+def _send_batch_to_metadata(batch: TimestampBatch, timeout: int = 600) -> dict:
+    """POST one timestamp batch to the metadata-service batch endpoint."""
+    import uuid
 
     payload = {
-        "video_id": item.video_id,
-        "camera_id": item.camera_id,
+        "batch_id": f"vinuni_{batch.timestamp_key}_{uuid.uuid4().hex[:8]}",
+        "videos": [
+            {
+                "video_id": v.video_id,
+                "camera_id": v.camera_id,
+                "video_path": v.video_path,
+                "source_filename": v.source_filename,
+                "sample_interval": 15,
+                "bev_max_dist": 1.5,
+            }
+            for v in batch.videos
+        ],
     }
 
-    if item.drive_file_id:
-        payload["drive_file_id"] = item.drive_file_id
-        payload["source_filename"] = item.source_filename
-    elif item.local_video_path:
-        payload["video_path"] = item.local_video_path
-    else:
-        raise ValueError(f"No video source for {item.video_id}")
-
-    logger.info("Processing video: %s (drive: %s)", item.video_id, item.drive_file_id or "local")
+    url = f"{_get_metadata_service_url()}/api/v1/video/batch/process"
+    logger.info(
+        "[%s] Sending batch: %d cameras, timestamp=%s",
+        payload["batch_id"],
+        len(batch.videos),
+        batch.timestamp_key,
+    )
 
     with httpx.Client(timeout=float(timeout)) as client:
-        response = client.post(
-            trace_url,
-            json=payload,
-            headers=_get_trace_headers(),
-        )
+        response = client.post(url, json=payload)
 
     response.raise_for_status()
     return response.json()
 
 
+def _save_candidates_from_batch(
+    session: Session,
+    batch: TimestampBatch,
+    result: dict,
+) -> int:
+    """Save unified cross-camera tracklets from batch response to database."""
+    from shared.models import PersonCandidate
+
+    imported = 0
+    tracklets = result.get("tracklets", [])
+
+    for tracklet in tracklets:
+        tracklet_id = str(tracklet.get("tracklet_id") or "").strip()
+        if not tracklet_id:
+            continue
+
+        # Build raw_metadata from the full tracklet response
+        raw_metadata = {k: v for k, v in tracklet.items()}
+        for key_to_remove in ("tracklet_id", "video_id", "camera_id", "track_id"):
+            raw_metadata.pop(key_to_remove, None)
+
+        # Build search text
+        search_parts = []
+        if tracklet.get("appearance_summary"):
+            search_parts.append(tracklet["appearance_summary"])
+        if tracklet.get("gender"):
+            search_parts.append(tracklet["gender"])
+        if tracklet.get("action"):
+            search_parts.append(tracklet["action"])
+        search_text = " ".join(search_parts)
+
+        # Save one candidate per contributing camera (cross-camera ID)
+        # contributing_cameras may have multiple cameras for the same person
+        contributing_cams = tracklet.get("contributing_cameras", [])
+        contributing_vids = tracklet.get("contributing_video_ids", [])
+
+        # Primary: save under the representative camera
+        primary_cam = tracklet.get("camera_id", "")
+        primary_vid = tracklet.get("video_id", "")
+
+        existing = session.scalar(
+            select(PersonCandidate).where(PersonCandidate.candidate_id == tracklet_id)
+        )
+
+        if existing:
+            existing.raw_metadata = raw_metadata
+            existing.search_text = search_text
+        else:
+            candidate = PersonCandidate(
+                candidate_id=tracklet_id,
+                camera_id=primary_cam,
+                video_id=primary_vid,
+                track_id=str(tracklet.get("track_id") or "0"),
+                frame_idx=0,
+                search_text=search_text,
+                raw_metadata={
+                    **raw_metadata,
+                    "batch_id": batch.timestamp_key,
+                    "contributing_cameras": contributing_cams,
+                    "contributing_video_ids": contributing_vids,
+                    "n_cameras": len(contributing_cams),
+                },
+            )
+            session.add(candidate)
+            imported += 1
+
+    session.flush()
+    return imported
+
+
+# ---------------------------------------------------------------------------
+# Main worker loop
+# ---------------------------------------------------------------------------
+
 def run_worker(
     session_factory,
     poll_interval: int = 30,
-    max_concurrent: int = 3,
+    batch_size: int = 50,
     request_timeout: int = 600,
 ):
     """
-    Main worker loop. Polls the queue for unprocessed videos
-    and sends them to trace-service.
-    """
-    from ..core.models import QueueVideoAsset, PersonCandidate
+    Main worker loop for batch cross-camera processing.
 
-    _wait_for_trace_service()
+    1. Poll queue for unprocessed videos
+    2. Group by timestamp (all cameras at same time → one batch)
+    3. Send each batch to /api/v1/video/batch/process
+    4. Save unified tracklets to DB
+    5. Mark all videos in batch as processed
+    """
+    from shared.models import QueueVideoAsset
+
+    _wait_for_metadata_service()
 
     while True:
         session = session_factory()
         try:
-            # Find queued videos that haven't been processed yet
-            # A video is "processed" if it has PersonCandidate records
+            # Fetch unprocessed videos, ordered by source_filename (≈ timestamp order)
             statement = (
                 select(QueueVideoAsset)
                 .where(QueueVideoAsset.processed_at.is_(None))
-                .order_by(QueueVideoAsset.queue_position.asc())
-                .limit(max_concurrent)
+                .order_by(QueueVideoAsset.source_filename.asc())
+                .limit(batch_size * 3)   # fetch more to ensure full timestamp batches
             )
 
             queued_videos = list(session.scalars(statement).all())
@@ -137,44 +312,63 @@ def run_worker(
                 time.sleep(poll_interval)
                 continue
 
-            logger.info("Found %d videos in queue", len(queued_videos))
+            logger.info("Found %d unprocessed videos in queue", len(queued_videos))
 
-            for video in queued_videos:
-                try:
-                    item = QueueItem(
-                        video_id=video.video_id,
-                        camera_id=video.camera_id,
-                        drive_file_id=video.drive_video_file_id,
-                        source_filename=video.source_filename,
-                        local_video_path=video.local_video_path,
+            # Group by timestamp
+            batches = _group_videos_by_timestamp(queued_videos)
+            logger.info("Formed %d timestamp batches", len(batches))
+
+            for batch in batches:
+                if not batch.videos:
+                    continue
+
+                # Check all videos in batch exist
+                missing = [v for v in batch.videos if not Path(v.video_path).exists()]
+                if missing:
+                    logger.warning(
+                        "[%s] %d video(s) have missing paths — skipping batch",
+                        batch.timestamp_key, len(missing),
                     )
+                    continue
 
-                    result = process_queue_item(session, item, timeout=request_timeout)
+                try:
+                    result = _send_batch_to_metadata(batch, timeout=request_timeout)
 
-                    # Save candidates to database
-                    people = result.get("people", [])
-                    _save_candidates(session, video.video_id, people)
+                    # Save cross-camera tracklets
+                    n_saved = _save_candidates_from_batch(session, batch, result)
 
-                    # Mark video as processed
-                    video.processed_at = datetime.now(timezone.utc)
+                    # Mark all videos in this batch as processed
+                    video_ids = [v.video_id for v in batch.videos]
+                    session.query(QueueVideoAsset).filter(
+                        QueueVideoAsset.video_id.in_(video_ids)
+                    ).update(
+                        {QueueVideoAsset.processed_at: datetime.now(timezone.utc)},
+                        synchronize_session=False,
+                    )
                     session.commit()
 
+                    n_tracklets = result.get("n_tracklets", 0)
+                    n_detections = result.get("total_detections", 0)
+                    elapsed = result.get("processing_time_s", 0)
                     logger.info(
-                        "Video %s processed: %d people detected",
-                        video.video_id,
-                        len(people),
+                        "[%s] Batch done: %d cameras → %d tracklets "
+                        "(%d detections) in %.1fs. Saved %d candidates.",
+                        batch.timestamp_key,
+                        len(batch.videos),
+                        n_tracklets,
+                        n_detections,
+                        elapsed,
+                        n_saved,
                     )
 
                 except httpx.HTTPStatusError as e:
                     logger.error(
-                        "Trace service error for %s: %s %s",
-                        video.video_id,
-                        e.response.status_code,
-                        e.response.text[:500],
+                        "[%s] HTTP error %d: %s",
+                        batch.timestamp_key, e.response.status_code, e.response.text[:500],
                     )
                     session.rollback()
-                except Exception as e:
-                    logger.exception("Error processing video %s", video.video_id)
+                except Exception as exc:
+                    logger.exception("[%s] Batch processing failed: %s", batch.timestamp_key, exc)
                     session.rollback()
 
         except Exception as e:
@@ -184,55 +378,3 @@ def run_worker(
             session.close()
 
         time.sleep(poll_interval)
-
-
-def _save_candidates(session: Session, video_id: str, people: list[dict]) -> int:
-    """
-    Save person candidates to database.
-    """
-    from .models import PersonCandidate
-
-    imported = 0
-    for person in people:
-        candidate_id = str(person.get("candidate_id") or "").strip()
-        if not candidate_id:
-            continue
-
-        raw_metadata = {
-            k: v
-            for k, v in person.items()
-            if k not in ("candidate_id", "camera_id", "video_id", "track_id")
-        }
-
-        existing = session.scalar(
-            select(PersonCandidate).where(PersonCandidate.candidate_id == candidate_id)
-        )
-
-        if existing:
-            existing.raw_metadata = raw_metadata
-            existing.search_text = _build_search_text(person)
-        else:
-            candidate = PersonCandidate(
-                candidate_id=candidate_id,
-                camera_id=str(person.get("camera_id") or "").strip() or None,
-                video_id=video_id,
-                track_id=str(person.get("track_id") or "").strip(),
-                human_key=person.get("human_key"),
-                frame_idx=int(person.get("frame_idx") or 0),
-                search_text=_build_search_text(person),
-                raw_metadata=raw_metadata,
-            )
-            session.add(candidate)
-            imported += 1
-
-    session.flush()
-    return imported
-
-
-def _build_search_text(person: dict) -> str:
-    parts = []
-    for key in ("search_text", "appearance_summary", "attribute_summary"):
-        text = str(person.get(key) or "").strip()
-        if text:
-            parts.append(text)
-    return " ".join(parts)

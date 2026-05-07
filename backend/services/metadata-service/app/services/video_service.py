@@ -10,10 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import settings
-from ..core.models import VideoAsset, VideoQuery
+from shared.models import Video, VideoQuery, User
 
 if TYPE_CHECKING:
-    from ..core.models import User
+    from shared.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def _slugify(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-._") or "video"
 
 
-def video_to_payload(video: VideoAsset) -> dict:
+def video_to_payload(video: Video) -> dict:
     return {
         "video_id": video.video_id,
         "title": video.title,
@@ -59,8 +59,8 @@ def create_video_asset(
     storage_backend: str,
     source_filename: str | None,
     content_type: str | None,
-) -> VideoAsset:
-    video = VideoAsset(
+) -> Video:
+    video = Video(
         user_id=user.id,
         title=title.strip(),
         description=(description or "").strip() or None,
@@ -86,15 +86,15 @@ def save_uploaded_video_bytes(filename: str, content: bytes) -> str:
 
 
 def list_videos(session: Session, user: "User") -> list[dict]:
-    statement = select(VideoAsset).where(VideoAsset.user_id == user.id).order_by(VideoAsset.created_at.desc(), VideoAsset.id.desc())
+    statement = select(Video).where(Video.user_id == user.id).order_by(Video.created_at.desc(), Video.id.desc())
     return [video_to_payload(video) for video in session.scalars(statement).all()]
 
 
-def get_video_by_public_id(session: Session, user: "User", video_id: str) -> VideoAsset | None:
-    return session.scalar(select(VideoAsset).where(VideoAsset.video_id == video_id, VideoAsset.user_id == user.id))
+def get_video_by_public_id(session: Session, user: "User", video_id: str) -> Video | None:
+    return session.scalar(select(Video).where(Video.video_id == video_id, Video.user_id == user.id))
 
 
-def create_video_query(session: Session, user: "User", video: VideoAsset, query_text: str) -> VideoQuery:
+def create_video_query(session: Session, user: "User", video: Video, query_text: str) -> VideoQuery:
     query = VideoQuery(
         user_id=user.id,
         video_id=video.id,

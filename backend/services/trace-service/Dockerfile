@@ -1,31 +1,46 @@
-FROM python:3.11-slim
+# Trace Service Dockerfile — Neural Video Reconstruction on A100 80GB
+# GPU models moved to metadata-service.
+# This service: Real-ESRGAN + ProPainter + RIFE + NVENC
 
-# Set working directory
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV CUDA_VISIBLE_DEVICES=0
+
 WORKDIR /app
 
-# Install system dependencies
+# System dependencies — FFmpeg with NVENC + OpenCV build deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+# Copy requirements
+COPY backend/services/trace-service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY app/ ./app/
+COPY backend/services/shared ./shared
+COPY backend/services/trace-service/app ./app
+COPY backend/config ./backend/config
 
-# Environment variables
 ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
+ENV TRACE_CACHE_ROOT=/workspace/storage/cache
 
-# Expose port
-EXPOSE 8000
+EXPOSE 8004
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=5).read()"
 
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004", "--workers", "1"]

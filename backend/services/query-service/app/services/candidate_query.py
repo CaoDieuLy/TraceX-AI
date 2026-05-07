@@ -181,6 +181,15 @@ def candidate_to_ranking_payload(candidate: PersonCandidate, queue_video: QueueV
         "world_position": raw_metadata.get("world_position"),
         "score": raw_metadata.get("score"),
         "embedding_vector": raw_metadata.get("embedding_vector") if isinstance(raw_metadata.get("embedding_vector"), list) else [],
+        # BEV coordinates (projected 3D world position)
+        "bev_x": raw_metadata.get("bev_x", 0.0),
+        "bev_y": raw_metadata.get("bev_y", 0.0),
+        # Attribute fields from video_process pipeline
+        "top_color": raw_metadata.get("top_color", "unknown"),
+        "bottom_color": raw_metadata.get("bottom_color", "unknown"),
+        "gender": raw_metadata.get("gender", "unknown"),
+        "has_bag": raw_metadata.get("bag", "no_bag"),
+        "has_hat": raw_metadata.get("hat", "no_hat"),
         "timeline": raw_metadata.get("timeline") if isinstance(raw_metadata.get("timeline"), list) else [],
         "matched_segments": raw_metadata.get("matched_segments") or [],
         "action_semantic_embedding": _coerce_mapping(raw_metadata.get("action_semantic_embedding")),

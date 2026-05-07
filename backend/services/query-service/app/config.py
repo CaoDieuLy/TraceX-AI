@@ -12,27 +12,37 @@ class Settings:
     # Database
     database_url: str = os.getenv("DATABASE_URL", "")
 
-    # Translation model path
-    translation_model_path: Path = Path(os.getenv("TRANSLATION_MODEL_PATH", "/workspace/models/translation"))
-    translation_vi_en_model: str = os.getenv("TRANSLATION_VI_EN_MODEL", "Helsinki-NLP/opus-mt-vi-en")
-    translation_en_vi_model: str = os.getenv("TRANSLATION_EN_VI_MODEL", "Helsinki-NLP/opus-mt-en-vi")
+    # SeamlessM4T v2-large (Vietnamese ↔ English translation)
+    # Replaces deprecated Helsinki-NLP opus-mt-vi-en
+    seamless_model: str = os.getenv(
+        "SEAMLESS_MODEL",
+        "facebook/seamless-m4t-v2-large"
+    )
 
-    # Tracking service (for remote ranking)
-    tracking_service_url: str = os.getenv("TRACKING_SERVICE_URL", "")
-    lightning_api_token: str = os.getenv("LIGHTNING_API_TOKEN", "")
-    lightning_api_auth_header: str = os.getenv("LIGHTNING_API_AUTH_HEADER", "Authorization")
-    lightning_api_auth_prefix: str = os.getenv("LIGHTNING_API_AUTH_PREFIX", "Bearer ")
-    tracking_request_timeout_seconds: int = int(os.getenv("TRACKING_REQUEST_TIMEOUT_SECONDS", "120"))
-    tracking_startup_max_wait_seconds: int = int(os.getenv("TRACKING_STARTUP_MAX_WAIT_SECONDS", "60"))
-    tracking_startup_poll_interval_seconds: int = int(os.getenv("TRACKING_STARTUP_POLL_INTERVAL_SECONDS", "5"))
-    tracking_health_timeout_seconds: int = int(os.getenv("TRACKING_HEALTH_TIMEOUT_SECONDS", "10"))
-    tracking_startup_retry_attempts: int = int(os.getenv("TRACKING_STARTUP_RETRY_ATTEMPTS", "3"))
+    # Translation model path (local cache)
+    translation_model_path: Path = Path(
+        os.getenv("TRANSLATION_MODEL_PATH", "/workspace/models/seamless-m4t")
+    )
+
+    # Trace service (for GPU re-ranking)
+    trace_service_url: str = os.getenv(
+        "TRACE_SERVICE_URL",
+        "http://trace-service:8004"
+    )
 
     # Storage
-    preview_root: Path = Path(os.getenv("PREVIEW_ROOT", "/workspace/storage/candidate-previews"))
+    preview_root: Path = Path(
+        os.getenv("PREVIEW_ROOT", "/workspace/storage/candidate-previews")
+    )
 
     # Public API
     public_api_base_url: str = os.getenv("PUBLIC_API_BASE_URL", "")
+
+    # Hybrid search: min score threshold for returning results
+    min_fusion_score: float = float(os.getenv("MIN_FUSION_SCORE", "0.0"))
+
+    # Max candidates to return
+    max_candidates: int = int(os.getenv("MAX_CANDIDATES", "50"))
 
 
 settings = Settings()

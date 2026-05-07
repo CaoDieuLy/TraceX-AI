@@ -1,0 +1,132 @@
+# Docker Compose for TraceX-AI VPS Deployment (Coolify)
+# Database + Metadata API + Frontend
+# Usage: docker-compose -f docker-compose.yml up -d
+
+services:
+    postgres:
+      image: postgres:16-alpine
+      container_name: mcpt-postgres
+      environment:
+        - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
+        - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+        - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt@2026Secure}
+      volumes:
+        - postgres_data:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+        interval: 10s
+        timeout: 5s
+        retries: 10
+      restart: unless-stopped
+      networks:
+        - coolify
+
+    metadata-service:
+      build:
+        context: .
+        dockerfile: backend/services/metadata-service/Dockerfile
+      container_name: mcpt-metadata-service
+      expose:
+        - "8002"
+      restart: unless-stopped
+      environment:
+        - NODE_ENV=production
+        - POSTGRES_HOST=postgres
+        - POSTGRES_PORT=5432
+        - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
+        - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+        - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Mcpt@2026Secure}
+        - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+        - JWT_ALGORITHM=HS256
+        - TRACKING_SERVICE_URL=${TRACKING_SERVICE_URL:-}
+        - LIGHTNING_API_TOKEN=${LIGHTNING_API_TOKEN:-}
+        - LIGHTNING_API_AUTH_HEADER=${LIGHTNING_API_AUTH_HEADER:-Authorization}
+        - LIGHTNING_API_AUTH_PREFIX=${LIGHTNING_API_AUTH_PREFIX:-Bearer }
+        - TRACKING_REQUEST_TIMEOUT_SECONDS=${TRACKING_REQUEST_TIMEOUT_SECONDS:-120}
+        - TRACKING_HEALTH_TIMEOUT_SECONDS=${TRACKING_HEALTH_TIMEOUT_SECONDS:-10}
+        - TRACKING_STARTUP_MAX_WAIT_SECONDS=${TRACKING_STARTUP_MAX_WAIT_SECONDS:-60}
+        - TRACKING_STARTUP_POLL_INTERVAL_SECONDS=${TRACKING_STARTUP_POLL_INTERVAL_SECONDS:-5}
+        - TRACKING_STARTUP_RETRY_ATTEMPTS=${TRACKING_STARTUP_RETRY_ATTEMPTS:-3}
+        - BOOTSTRAP_ADMIN_EMAIL=${BOOTSTRAP_ADMIN_EMAIL:-admin@mcpt.local}
+        - BOOTSTRAP_ADMIN_PASSWORD=${BOOTSTRAP_ADMIN_PASSWORD:-Admin@123456}
+        - BOOTSTRAP_ADMIN_FULL_NAME=${BOOTSTRAP_ADMIN_FULL_NAME:-Administrator}
+        - STORAGE_INGEST_ENABLED=${STORAGE_INGEST_ENABLED:-false}
+        - STORAGE_INGEST_ROOT=${STORAGE_INGEST_ROOT:-/workspace/storage}
+        - VIDEO_STORAGE_ROOT=${VIDEO_STORAGE_ROOT:-/workspace/storage/videos}
+        - TRACKING_OUTPUT_ROOT=${TRACKING_OUTPUT_ROOT:-/workspace/storage/tracking-output}
+        - GOOGLE_DRIVE_ENABLED=${GOOGLE_DRIVE_ENABLED:-false}
+        - MCPT_SECRETS_ROOT=${MCPT_SECRETS_ROOT:-/workspace/secrets}
+        - STARTUP_LOCAL_QUEUE_SYNC_ENABLED=${STARTUP_LOCAL_QUEUE_SYNC_ENABLED:-false}
+        - LOCAL_QUEUE_CACHE_ENABLED=${LOCAL_QUEUE_CACHE_ENABLED:-false}
+      volumes:
+        - mcpt_storage:/workspace/storage
+      healthcheck:
+        test: ["CMD", "curl", "-s", "http://127.0.0.1:8002/health"]
+        interval: 30s
+        timeout: 10s
+        retries: 5
+        start_period: 60s
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=coolify
+        - traefik.http.middlewares.tracex-redirect-https.redirectscheme.scheme=https
+        - traefik.http.middlewares.tracex-redirect-https.redirectscheme.permanent=true
+        - traefik.http.middlewares.tracex-api-strip.stripprefix.prefixes=/api
+        - traefik.http.routers.TraceX-api-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
+        - traefik.http.routers.TraceX-api-https.entrypoints=https
+        - traefik.http.routers.TraceX-api-https.tls=true
+        - traefik.http.routers.TraceX-api-https.tls.certresolver=letsencrypt
+        - traefik.http.routers.TraceX-api-https.middlewares=tracex-api-strip@docker
+        - traefik.http.services.TraceX-api.loadbalancer.server.port=8002
+        - traefik.http.routers.TraceX-api-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
+        - traefik.http.routers.TraceX-api-http.entrypoints=http
+        - traefik.http.routers.TraceX-api-http.middlewares=tracex-redirect-https@docker
+      networks:
+        - coolify
+      depends_on:
+        postgres:
+          condition: service_healthy
+
+    frontend:
+      build:
+        context: ./frontend
+        dockerfile: Dockerfile
+        args:
+          - NEXT_PUBLIC_API_BASE_URL=/api/v1
+      container_name: mcpt-frontend
+      expose:
+        - "3000"
+      restart: unless-stopped
+      environment:
+        - NODE_ENV=production
+        - NEXT_PUBLIC_API_BASE_URL=/api/v1
+        - COOLIFY_DEPLOYMENT=true
+      healthcheck:                                    # THAY ĐỔI 1
+        test: ["CMD", "curl", "-s", "http://localhost:3000"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
+        start_period: 40s
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=coolify
+        - traefik.http.routers.TraceX-frontend-https.rule=Host(`tracex-ai.smartnovi.tech`)
+        - traefik.http.routers.TraceX-frontend-https.entrypoints=https
+        - traefik.http.routers.TraceX-frontend-https.tls=true
+        - traefik.http.routers.TraceX-frontend-https.tls.certresolver=letsencrypt
+        - traefik.http.services.TraceX-frontend.loadbalancer.server.port=3000
+        - traefik.http.routers.TraceX-frontend-http.rule=Host(`tracex-ai.smartnovi.tech`)
+        - traefik.http.routers.TraceX-frontend-http.entrypoints=http
+        - traefik.http.middlewares.tracex-frontend-redirect.redirectscheme.scheme=https   # THAY ĐỔI 2
+        - traefik.http.middlewares.tracex-frontend-redirect.redirectscheme.permanent=true # THAY ĐỔI 2
+        - traefik.http.routers.TraceX-frontend-http.middlewares=tracex-frontend-redirect@docker # THAY ĐỔI 2+3
+      networks:
+        - coolify
+
+volumes:
+  postgres_data:
+  mcpt_storage:
+
+networks:
+  coolify:
+    external: true

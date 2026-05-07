@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ...core.dependencies import get_current_user, require_admin
-from ...core.models import User
+from shared.models import User
 from ...core.schemas import (
     AdminUserCreateRequest,
     AdminUserPatchRequest,

@@ -1,11 +1,32 @@
 """Trace service - business logic for building traces."""
 
+import json
+import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
+
+_LOG_PATH = "/teamspace/studios/this_studio/TraceX-AI/.cursor/debug-a94b91.log"
+
+def _debug_log(hypothesis_id: str, run_id: str, location: str, message: str, data: dict):
+    try:
+        with open(_LOG_PATH, "a") as f:
+            f.write(json.dumps({
+                "sessionId": "a94b91",
+                "id": f"log_{int(datetime.now().timestamp() * 1000)}",
+                "timestamp": int(datetime.now().timestamp() * 1000),
+                "location": location,
+                "message": message,
+                "data": data,
+                "runId": run_id,
+                "hypothesisId": hypothesis_id,
+            }) + "\n")
+    except Exception:
+        pass
 
 from ..config import settings
 from ..core.models import (
@@ -58,7 +79,7 @@ class TraceService:
             self.session.query(Tracklet)
             .join(
                 QueryCandidateTracklet,
-                QueryCandidateTracklet.tracklet_id == Tracklet.id,
+                QueryCandidateTracklet.tracklet_id == Tracklet.tracklet_id,
             )
             .filter(QueryCandidateTracklet.candidate_id == candidate_id)
             .join(Tracklet.video)
@@ -73,6 +94,11 @@ class TraceService:
 
         tracklets = query.all()
 
+        _debug_log("B", "pre-fix",
+            "trace_service.py:95",
+            "get_candidate_tracklets raw query result",
+            {"candidate_id": str(candidate_id), "raw_count": len(tracklets),
+             "first_tid": str(tracklets[0].tracklet_id) if tracklets else None})
         # Filter by time window (based on video created_at + start_time)
         filtered_tracklets = []
         for t in tracklets:
@@ -117,14 +143,11 @@ class TraceService:
             time_end = None
             if video:
                 time_start = video.created_at
-                if tracklet.end_time:
-                    time_end = video.created_at
-                else:
-                    time_end = video.created_at
+                time_end = video.created_at
 
             segment = {
                 "segment_order": idx + 1,
-                "tracklet_id": tracklet.id,
+                "tracklet_id": tracklet.tracklet_id,
                 "camera_id": tracklet.camera_id,
                 "time_start": time_start,
                 "time_end": time_end,
@@ -211,17 +234,13 @@ class TraceService:
 
         evidence = EvidenceVideo(
             query_id=query_id,
-            selected_candidate_id=candidate_id,
-            tracklet_count=len(segments),
-            trace_duration_ms=int(total_duration * 1000) if total_duration else None,
-            trace_method="spatiotemporal",
-            trace_confidence=trace_confidence,
-            status="completed",
-            total_duration=int(total_duration) if total_duration else None,
+            query_candidate_id=candidate_id,
+            video_url=self._generate_merged_video_url(query_id, candidate_id) if segments else None,
+            total_duration=total_duration,
             segment_count=len(segments),
             time_window_start=time_window_start,
             time_window_end=time_window_end,
-            video_url=self._generate_merged_video_url(query_id, candidate_id) if segments else None,
+            trace_confidence=trace_confidence or 0.0,
         )
         self.session.add(evidence)
         self.session.flush()
@@ -242,6 +261,12 @@ class TraceService:
             )
             self.session.add(evidence_tracklet)
 
+        _debug_log("A", "pre-fix",
+            "trace_service.py:251",
+            "create_evidence_video result",
+            {"evidence_id": evidence.id, "query_id": str(query_id),
+             "candidate_id": str(candidate_id), "segment_count": len(segments),
+             "tracklet_count": sum(1 for s in segments if s.get("tracklet_id"))})
         return evidence
 
     def get_trace_segments(self, evidence_id: UUID) -> list[dict[str, Any]]:
@@ -322,7 +347,7 @@ class TraceService:
             return None
 
         video = tracklet.video
-        if not video.file_path:
+        if not video.storage_path:
             return None
 
         # Construct clip URL based on tracklet timing

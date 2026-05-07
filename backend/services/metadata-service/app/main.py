@@ -1,8 +1,11 @@
 """FastAPI application for metadata-service.
 
-Note: Candidate search/ranking/trace logic has been moved to:
-- query-service (search, ranking, Vietnamese translation)
-- trace-service (trace building, feedback)
+Handles queue management, authentication, video metadata, and AI video processing.
+GPU models (Grounding DINO 1.6, EVA-02, SigLIP 2, VideoMAE V2) are loaded
+at startup and used for the /api/v1/video/process endpoint.
+
+Search/ranking is forwarded to query-service (GPU).
+Trace building is forwarded to trace-service (Neural Video Reconstruction).
 """
 
 import logging
@@ -11,7 +14,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routers import auth, users, videos
+from .api.routers import auth, search, users, videos
+from .api.routers.video_process import router as video_process_router
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -21,16 +25,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Import here to avoid circular imports
     from .database import Base, SessionLocal, engine
+    from .services.model_warmup import warmup_models
     from .services.user_service import ensure_bootstrap_admin
 
-    # Create all tables (idempotent — only creates if missing)
+    # 1. Create all tables (idempotent)
     logger.info("Creating database tables if they don't exist...")
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables ready.")
 
-    # Bootstrap admin user from environment variables
+    # 2. Bootstrap admin user
     if settings.bootstrap_admin_email and settings.bootstrap_admin_password:
-        logger.info("Ensuring bootstrap admin user exists: %s", settings.bootstrap_admin_email)
+        logger.info("Ensuring bootstrap admin user: %s", settings.bootstrap_admin_email)
         session = SessionLocal()
         try:
             ensure_bootstrap_admin(
@@ -46,6 +51,11 @@ async def lifespan(app: FastAPI):
             session.close()
     else:
         logger.warning("BOOTSTRAP_ADMIN_EMAIL or BOOTSTRAP_ADMIN_PASSWORD not set — skipping admin bootstrap.")
+
+    # 3. Warmup GPU models (Grounding DINO, EVA-02, SigLIP 2, VideoMAE V2)
+    logger.info("Starting GPU model warmup...")
+    await warmup_models()
+    logger.info("GPU models ready.")
 
     yield
 
@@ -69,20 +79,29 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/v1/auth", tags=["auth"])
 app.include_router(users.router, prefix="/v1/users", tags=["users"])
+app.include_router(search.router, prefix="/v1/search", tags=["search"])
 app.include_router(videos.router, prefix="/v1/videos", tags=["videos"])
+app.include_router(video_process_router, prefix="/api/v1/video", tags=["video"])
 
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "metadata-service"}
+    from .services.model_warmup import get_loaded_models, is_warmup_done
+    return {
+        "status": "healthy",
+        "service": "metadata-service",
+        "gpu_warmup_done": is_warmup_done(),
+        "loaded_models": get_loaded_models(),
+    }
 
 
 @app.get("/")
 def root():
     return {
         "service": "metadata-service",
-        "version": "1.0.0",
-        "description": "Queue management, authentication, and video metadata",
+        "version": "2.0.0",
+        "description": "Queue management, authentication, video metadata + SOTA AI processing",
+        "gpu_models": ["Grounding DINO 1.6", "EVA-02 ViT-L/14", "SigLIP 2", "VideoMAE V2"],
     }
 
 

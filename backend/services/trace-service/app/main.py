@@ -1,21 +1,40 @@
-"""FastAPI application for trace-service.
+"""FastAPI application for trace-service — Neural Video Reconstruction Engine.
 
 Responsibilities:
-- Select candidate as the target for trace
-- Build trace (24h window) from selected candidate's tracklets
-- Merge video segments into complete trace video
-- Handle trace feedback/verification
+  - Neural Video Reconstruction: Real-ESRGAN SR + ProPainter + RIFE + NVENC
+  - Trace building: select candidate, build evidence segments
+  - FIFO cache per user: /workspace/storage/cache/{user_id}/{query_id}/
+  - Forward video processing to metadata-service (GPU AI models)
+
+GPU models have been moved to metadata-service.
+This service focuses on video enhancement + trace logic.
 """
+
+from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routers import trace
+from .api.routers import candidates, trace, video_process
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # GPU warmup is now done in metadata-service
+    # This service focuses on Neural Video Reconstruction
+    logger.info("Trace service starting — Neural Video Reconstruction Engine ready")
+    yield
+    logger.info("Trace service shutting down...")
+
 
 app = FastAPI(
     title="Trace Service",
-    description="Build traces from selected candidates for TraceX",
-    version="1.0.0",
+    description="Neural Video Reconstruction + Trace building for TraceX-AI",
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -27,17 +46,20 @@ app.add_middleware(
 )
 
 app.include_router(trace.router, prefix="/api/v1/trace", tags=["trace"])
+app.include_router(candidates.router, tags=["candidates"])
+app.include_router(video_process.router, tags=["video_process"])
 
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "trace-service"}
+    return {"status": "healthy", "service": "trace-service", "version": "2.0.0"}
 
 
 @app.get("/")
 def root():
     return {
         "service": "trace-service",
-        "version": "1.0.0",
-        "description": "Build traces from selected candidates",
+        "version": "2.0.0",
+        "description": "Neural Video Reconstruction + Trace building",
+        "neural_pipeline": ["Real-ESRGAN", "ProPainter", "RIFE", "NVENC"],
     }

@@ -1,4 +1,4 @@
-# Metadata Service Requirements for Docker/Coolify deployment
+# Metadata Service Requirements — GPU (LightningAI A100 80GB)
 
 fastapi==0.116.1
 uvicorn[standard]==0.32.1
@@ -17,3 +17,16 @@ google-api-python-client==2.156.0
 google-auth==2.36.0
 opencv-python-headless==4.10.0.84
 python-dotenv==1.0.1
+
+# GPU model dependencies — SOTA 2026
+torch>=2.3.0
+torchvision>=0.18.0
+transformers>=4.40.0
+accelerate>=0.30.0
+timm>=1.0.3
+sentencepiece>=0.2.0
+safetensors>=0.4.3
+huggingface-hub>=0.23.0
+numpy>=1.26.0
+pillow>=10.3.0
+scipy>=1.12.0
