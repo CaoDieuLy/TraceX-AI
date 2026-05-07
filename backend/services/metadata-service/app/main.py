@@ -84,3 +84,13 @@ def root():
         "version": "1.0.0",
         "description": "Queue management, authentication, and video metadata",
     }
+
+
+@app.get("/debug/routes")
+def debug_routes():
+    """List all registered routes for debugging."""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "path") and hasattr(route, "methods"):
+            routes.append({"path": route.path, "methods": list(route.methods)})
+    return {"routes": routes, "total": len(routes)}
