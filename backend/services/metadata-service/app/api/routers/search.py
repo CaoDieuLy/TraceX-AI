@@ -5,31 +5,11 @@ Frontend calls POST /api/v1/search → metadata-service → query-service (GPU).
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime
 from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
-
-_LOG_PATH = "/teamspace/studios/this_studio/TraceX-AI/.cursor/debug-a94b91.log"
-
-def _debug_log(hypothesis_id: str, run_id: str, location: str, message: str, data: dict):
-    try:
-        with open(_LOG_PATH, "a") as f:
-            f.write(json.dumps({
-                "sessionId": "a94b91",
-                "id": f"log_{int(datetime.now().timestamp() * 1000)}",
-                "timestamp": int(datetime.now().timestamp() * 1000),
-                "location": location,
-                "message": message,
-                "data": data,
-                "runId": run_id,
-                "hypothesisId": hypothesis_id,
-            }) + "\n")
-    except Exception:
-        pass
 
 logger = logging.getLogger(__name__)
 
@@ -114,10 +94,6 @@ def search_candidates(
 
     try:
         result = _post_to_query_service("/search", payload)
-        _debug_log("D", "pre-fix",
-            "search.py:metadata_forward",
-            "metadata-service forwarded to query-service",
-            {"query": query, "top_k": top_k, "has_query_id": "query_id" in result})
         return result
     except HTTPException:
         raise

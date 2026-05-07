@@ -9,7 +9,7 @@ from ...core.schemas import (
     UserListResponse,
     UserResponse,
 )
-from ...database import get_session, SessionLocal
+from ...database import get_session
 from ...services.user_service import (
     create_user,
     get_user_by_id,
@@ -28,11 +28,6 @@ def admin_create_user(
     session: Session = Depends(get_session),
     _admin: User = Depends(require_admin),
 ) -> User:
-    from functools import partial
-    from ...core.dependencies import get_current_user as gcu
-
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         creator_rank = role_rank(_admin.role)
         requested_role = normalize_role(payload.role)
@@ -51,6 +46,8 @@ def admin_create_user(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
 
 
 @router.get("", response_model=UserListResponse)
@@ -58,8 +55,6 @@ def admin_list_users(
     session: Session = Depends(get_session),
     _admin: User = Depends(require_admin),
 ) -> dict:
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         items = list_users(session)
         return {"count": len(items), "items": items}

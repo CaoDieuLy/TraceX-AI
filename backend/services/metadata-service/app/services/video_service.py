@@ -97,7 +97,7 @@ def get_video_by_public_id(session: Session, user: "User", video_id: str) -> Vid
 def create_video_query(session: Session, user: "User", video: Video, query_text: str) -> VideoQuery:
     query = VideoQuery(
         user_id=user.id,
-        video_id=video.id,
+        video_id=video.video_id,
         query_text=query_text.strip(),
         status="queued",
     )
