@@ -88,7 +88,6 @@ class VideoQueryCreateRequest(BaseModel):
 class VideoQueryUpdateRequest(BaseModel):
     status: str | None = None
     ai_job_id: str | None = None
-    ai_response: dict[str, Any] | None = None
 
 
 class VideoQueryResponse(BaseModel):
@@ -99,7 +98,6 @@ class VideoQueryResponse(BaseModel):
     query_text: str
     status: str
     ai_job_id: str | None = None
-    ai_response: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -44,7 +44,6 @@ def query_to_payload(query: VideoQuery) -> dict:
         "query_text": query.query_text,
         "status": query.status,
         "ai_job_id": query.ai_job_id,
-        "ai_response": query.ai_response,
         "created_at": query.created_at,
         "updated_at": query.updated_at,
     }
@@ -132,14 +131,11 @@ def update_video_query(
     query: VideoQuery,
     status: str | None = None,
     ai_job_id: str | None = None,
-    ai_response: dict | None = None,
 ) -> VideoQuery:
     if status is not None:
         query.status = status
     if ai_job_id is not None:
         query.ai_job_id = ai_job_id
-    if ai_response is not None:
-        query.ai_response = ai_response
     session.add(query)
     session.commit()
     session.refresh(query)

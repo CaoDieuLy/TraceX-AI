@@ -44,7 +44,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -391,7 +391,6 @@ class QueryHistory(Base):
         String(36), nullable=True, index=True,
     )
     ai_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    ai_response: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -529,7 +528,7 @@ class QueryJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    result_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    result_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -729,7 +728,7 @@ class QueueVideoAsset(Base):
     drive_metadata_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     local_video_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     local_metadata_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    raw_video_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    raw_video_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
