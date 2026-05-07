@@ -95,10 +95,10 @@ services:
     expose:
       - "3000"
     restart: unless-stopped
-    environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_API_BASE_URL=
-      - COOLIFY_DEPLOYMENT=true
+      environment:
+        - NODE_ENV=production
+        - NEXT_PUBLIC_API_BASE_URL=https://tracex-ai.smartnovi.tech/api
+        - COOLIFY_DEPLOYMENT=true
     healthcheck:
       test: ["CMD", "curl", "-s", "http://localhost:3000"]
       interval: 30s
