@@ -67,9 +67,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
-app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
+app.include_router(auth.router, prefix="/v1/auth", tags=["auth"])
+app.include_router(users.router, prefix="/v1/users", tags=["users"])
+app.include_router(videos.router, prefix="/v1/videos", tags=["videos"])
 
 
 @app.get("/health")
