@@ -91,6 +91,8 @@ services:
       build:
         context: ./frontend
         dockerfile: Dockerfile
+        args:
+          - NEXT_PUBLIC_API_BASE_URL=https://tracex-ai.smartnovi.tech/api/v1
       container_name: mcpt-frontend
       expose:
         - "3000"
