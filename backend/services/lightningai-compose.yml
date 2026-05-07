@@ -19,6 +19,64 @@
 
 services:
   # ────────────────────────────────────────────────────────────────────
+  # postgres — shared database (same server as GPU services)
+  # ────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: tracex-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
+      - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcpt_user} -d ${POSTGRES_DB:-video_tracking}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - coolify
+
+  # ────────────────────────────────────────────────────────────────────
+  # frontend — Next.js UI (public via Traefik)
+  # ────────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ../..
+      dockerfile: frontend/Dockerfile
+      args:
+        - NEXT_PUBLIC_API_BASE_URL=/api/v1
+    container_name: tracex-frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_BASE_URL=/api/v1
+      - COOLIFY_DEPLOYMENT=true
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - coolify
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.tracex-frontend-https.rule=Host(`tracex-ai.smartnovi.tech`)
+      - traefik.http.routers.tracex-frontend-https.entrypoints=https
+      - traefik.http.routers.tracex-frontend-https.tls=true
+      - traefik.http.routers.tracex-frontend-https.tls.certresolver=letsencrypt
+      - traefik.http.services.tracex-frontend.loadbalancer.server.port=3000
+      - traefik.http.routers.tracex-frontend-http.rule=Host(`tracex-ai.smartnovi.tech`)
+      - traefik.http.routers.tracex-frontend-http.entrypoints=http
+      - traefik.http.middlewares.tracex-frontend-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.tracex-frontend-redirect.redirectscheme.permanent=true
+      - traefik.http.routers.tracex-frontend-http.middlewares=tracex-frontend-redirect@docker
+
+  # ────────────────────────────────────────────────────────────────────
   # metadata-service — GPU Ingest (~50GB VRAM)
   # Grounding DINO 1.6 + EVA-02 ViT-L/14 + SigLIP 2 + VideoMAE V2
   # ────────────────────────────────────────────────────────────────────
@@ -33,12 +91,12 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
       - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-video_tracking}
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-video_tracking}
       - QUERY_SERVICE_URL=http://query-service:8003
       - TRACE_SERVICE_URL=http://trace-service:8004
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
@@ -89,7 +147,25 @@ services:
       retries: 5
       start_period: 120s
     networks:
-      - tracex-internal
+      - coolify
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.middlewares.tracex-metadata-strip.stripprefix.prefixes=/api
+      - traefik.http.routers.tracex-metadata-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
+      - traefik.http.routers.tracex-metadata-https.entrypoints=https
+      - traefik.http.routers.tracex-metadata-https.tls=true
+      - traefik.http.routers.tracex-metadata-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.tracex-metadata-https.middlewares=tracex-metadata-strip@docker
+      - traefik.http.services.tracex-metadata.loadbalancer.server.port=8002
+      - traefik.http.routers.tracex-metadata-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
+      - traefik.http.routers.tracex-metadata-http.entrypoints=http
+      - traefik.http.middlewares.tracex-metadata-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.tracex-metadata-redirect.redirectscheme.permanent=true
+      - traefik.http.routers.tracex-metadata-http.middlewares=tracex-metadata-redirect@docker
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # ────────────────────────────────────────────────────────────────────
   # query-service — Search & Translation (~15GB VRAM)
@@ -105,7 +181,12 @@ services:
       - "8003:8003"
     restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-video_tracking}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
+      - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-video_tracking}
       - METADATA_SERVICE_URL=http://metadata-service:8002
       - TRACE_SERVICE_URL=http://trace-service:8004
       - TRACKING_SERVICE_URL=http://trace-service:8004
@@ -136,8 +217,25 @@ services:
       retries: 5
       start_period: 120s
     networks:
-      - tracex-internal
+      - coolify
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.middlewares.tracex-query-strip.stripprefix.prefixes=/query
+      - traefik.http.routers.tracex-query-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/query`)
+      - traefik.http.routers.tracex-query-https.entrypoints=https
+      - traefik.http.routers.tracex-query-https.tls=true
+      - traefik.http.routers.tracex-query-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.tracex-query-https.middlewares=tracex-query-strip@docker
+      - traefik.http.services.tracex-query.loadbalancer.server.port=8003
+      - traefik.http.routers.tracex-query-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/query`)
+      - traefik.http.routers.tracex-query-http.entrypoints=http
+      - traefik.http.middlewares.tracex-query-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.tracex-query-redirect.redirectscheme.permanent=true
+      - traefik.http.routers.tracex-query-http.middlewares=tracex-query-redirect@docker
     depends_on:
+      postgres:
+        condition: service_healthy
       metadata-service:
         condition: service_healthy
 
@@ -155,7 +253,12 @@ services:
       - "8004:8004"
     restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-video_tracking}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-video_tracking}
+      - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-mcpt_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-video_tracking}
       - VIDEO_STORAGE_PATH=/workspace/storage/videos
       - TRACE_OUTPUT_PATH=/workspace/storage/traces
       - STORAGE_BASE_URL=${STORAGE_BASE_URL:-}
@@ -194,12 +297,29 @@ services:
       retries: 5
       start_period: 60s
     networks:
-      - tracex-internal
+      - coolify
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.middlewares.tracex-trace-strip.stripprefix.prefixes=/trace
+      - traefik.http.routers.tracex-trace-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/trace`)
+      - traefik.http.routers.tracex-trace-https.entrypoints=https
+      - traefik.http.routers.tracex-trace-https.tls=true
+      - traefik.http.routers.tracex-trace-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.tracex-trace-https.middlewares=tracex-trace-strip@docker
+      - traefik.http.services.tracex-trace.loadbalancer.server.port=8004
+      - traefik.http.routers.tracex-trace-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/trace`)
+      - traefik.http.routers.tracex-trace-http.entrypoints=http
+      - traefik.http.middlewares.tracex-trace-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.tracex-trace-redirect.redirectscheme.permanent=true
+      - traefik.http.routers.tracex-trace-http.middlewares=tracex-trace-redirect@docker
 
 # ────────────────────────────────────────────────────────────────────
 # Named volumes
 # ────────────────────────────────────────────────────────────────────
 volumes:
+  postgres_data:
+    driver: local
   mcpt_storage:
     driver: local
   model_weights:
@@ -222,5 +342,5 @@ volumes:
       device: /workspace/a20-root
 
 networks:
-  tracex-internal:
-    driver: bridge
+  coolify:
+    external: true
