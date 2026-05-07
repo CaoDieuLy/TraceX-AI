@@ -18,6 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/services/metadata-service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Increment to force Docker to skip its layer cache for app code below.
+ARG CACHEBUST=2
+
 # Copy application code
 COPY backend/services/metadata-service/app ./app
 
