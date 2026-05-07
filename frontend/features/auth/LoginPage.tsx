@@ -43,11 +43,38 @@ async function loginWithFallback(identifier: string, password: string): Promise<
   let lastResponse: Response | null = null;
 
   for (const endpoint of endpoints) {
+    // #region agent log
+    fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d62f26'},body:JSON.stringify({sessionId:'d62f26',location:'LoginPage.tsx:loginWithFallback',message:'Attempting login endpoint',data:{endpoint,baseUrl,timestamp:Date.now()},runId:'preflight-debug',hypothesisId:'cors'})}).catch(()=>{});
+    // #endregion
+
+    // Test OPTIONS preflight explicitly first
+    // #region agent log
+    fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d62f26'},body:JSON.stringify({sessionId:'d62f26',location:'LoginPage.tsx:PREFLIGHT_TEST',message:'Sending OPTIONS preflight',data:{endpoint},runId:'preflight-debug',hypothesisId:'cors-preflight'})}).catch(()=>{});
+    try {
+      const preflightRes = await fetch(endpoint, {
+        method: "OPTIONS",
+        headers: {
+          "Origin": "https://tracex-ai.smartnovi.tech",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      });
+      const preflightHeaders: Record<string,string> = {};
+      preflightRes.headers.forEach((v,k)=>{preflightHeaders[k]=k==='access-control-allow-origin'||k==='access-control-allow-credentials'?v:'[redacted]';});
+      fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d62f26'},body:JSON.stringify({sessionId:'d62f26',location:'LoginPage.tsx:PREFLIGHT_RESULT',message:'OPTIONS preflight result',data:{endpoint,status:preflightRes.status,ok:preflightRes.ok,headers:preflightHeaders},runId:'preflight-debug',hypothesisId:'cors-preflight'})}).catch(()=>{});
+    } catch(e) {
+      fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d62f26'},body:JSON.stringify({sessionId:'d62f26',location:'LoginPage.tsx:PREFLIGHT_ERROR',message:'OPTIONS preflight FAILED',data:{endpoint,error:String(e)},runId:'preflight-debug',hypothesisId:'cors-preflight'})}).catch(()=>{});
+    }
+    // #endregion
+
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: identifier, identifier, password }),
     });
+    // #region agent log
+    fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d62f26'},body:JSON.stringify({sessionId:'d62f26',location:'LoginPage.tsx:loginWithFallback:response',message:'Login POST response',data:{endpoint,status:response.status,ok:response.ok,type:response.type,headers:Object.fromEntries([...response.headers.entries()].map(([k,v])=>[k,v.startsWith('access-')||k==='authorization'?'[REDACTED]':v])),timestamp:Date.now()},runId:'preflight-debug',hypothesisId:'cors'})}).catch(()=>{});
+    // #endregion
     if (response.ok) {
       return response;
     }
