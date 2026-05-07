@@ -64,8 +64,8 @@ class User(Base):
         UniqueConstraint("email", name="uq_users_email"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
+    email: Mapped[str] = mapped_column(String(255), nullable=False,)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="USER", server_default="USER")
@@ -100,8 +100,8 @@ class Camera(Base):
         UniqueConstraint("camera_id", name="uq_cameras_camera_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    camera_id: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
+    camera_id: Mapped[str] = mapped_column(String(50), nullable=False, unique=True,)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     fps: Mapped[float] = mapped_column(Float, nullable=False, default=30.0)
@@ -115,7 +115,6 @@ class Camera(Base):
     # Relationships
     zones: Mapped[list["CameraZone"]] = relationship(back_populates="camera", cascade="all, delete-orphan")
     settings: Mapped[list["CameraSettings"]] = relationship(back_populates="camera", cascade="all, delete-orphan")
-    tracklets: Mapped[list["Tracklet"]] = relationship(back_populates="camera_rel")
 
 
 class CameraZone(Base):
@@ -125,9 +124,9 @@ class CameraZone(Base):
         UniqueConstraint("camera_id", "zone_type", name="uq_camera_zones_camera_zone"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     camera_id: Mapped[str] = mapped_column(
-        String(50), ForeignKey("cameras.camera_id", ondelete="CASCADE"), nullable=False, index=True,
+        String(50), ForeignKey("cameras.camera_id", ondelete="CASCADE"), nullable=False,
     )
     zone_type: Mapped[str] = mapped_column(String(32), nullable=False)  # "entry" | "exit"
     polygon: Mapped[dict] = mapped_column(JSON, nullable=False)  # [{"x": 0, "y": 0}, ...]
@@ -151,9 +150,9 @@ class CameraEdge(Base):
         Index("ix_camera_edges_to", "to_camera_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    from_camera_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    to_camera_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
+    from_camera_id: Mapped[str] = mapped_column(String(50), nullable=False,)
+    to_camera_id: Mapped[str] = mapped_column(String(50), nullable=False,)
     min_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=30.0)
     max_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=120.0)
     created_at: Mapped[datetime] = mapped_column(
@@ -168,9 +167,9 @@ class CameraSettings(Base):
         UniqueConstraint("camera_id", "setting_key", name="uq_camera_settings_camera_key"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     camera_id: Mapped[str] = mapped_column(
-        String(50), ForeignKey("cameras.camera_id", ondelete="CASCADE"), nullable=False, index=True,
+        String(50), ForeignKey("cameras.camera_id", ondelete="CASCADE"), nullable=False,
     )
     setting_key: Mapped[str] = mapped_column(String(128), nullable=False)
     setting_value: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -193,13 +192,13 @@ class Video(Base):
         Index("ix_videos_camera_id", "camera_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     video_id: Mapped[str] = mapped_column(
-        String(36), default=lambda: str(uuid.uuid4()), nullable=False, index=True,
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False,
     )
-    camera_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    camera_id: Mapped[str | None] = mapped_column(String(50), nullable=True,)
     user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -242,12 +241,12 @@ class Tracklet(Base):
         Index("ix_tracklets_bev_xy", "bev_x", "bev_y"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    tracklet_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
+    tracklet_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True,)
     video_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("videos.video_id", ondelete="CASCADE"), nullable=False, index=True,
+        String(36), ForeignKey("videos.video_id", ondelete="CASCADE"), nullable=False,
     )
-    camera_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    camera_id: Mapped[str] = mapped_column(String(50), nullable=False,)
     track_id: Mapped[str] = mapped_column(String(50), nullable=False)  # ID within the video
 
     # Temporal
@@ -290,7 +289,6 @@ class Tracklet(Base):
 
     # Relationships
     video: Mapped[Video] = relationship(back_populates="tracklets")
-    camera_rel: Mapped[Camera] = relationship(back_populates="tracklets")
     embedding: Mapped["TrackletEmbedding | None"] = relationship(
         back_populates="tracklet", uselist=False, cascade="all, delete-orphan",
     )
@@ -318,10 +316,10 @@ class TrackletEmbedding(Base):
         UniqueConstraint("tracklet_id", name="uq_tracklets_embeddings_tracklet_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     tracklet_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("tracklets.tracklet_id", ondelete="CASCADE"),
-        nullable=False, unique=True, index=True,
+        nullable=False, unique=True,
     )
     embedding_vector: Mapped[list] = mapped_column(JSON, nullable=False)  # [float, ...] 1024 dims
     model_version: Mapped[str] = mapped_column(String(128), nullable=False, default="eva02_l14")
@@ -343,10 +341,10 @@ class TrackletAction(Base):
         Index("ix_tracklets_actions_action", "action_label"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     tracklet_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("tracklets.tracklet_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     action_label: Mapped[str] = mapped_column(String(64), nullable=False)  # simplified taxonomy
     kinetics_label: Mapped[str | None] = mapped_column(String(128), nullable=True)  # raw Kinetics-400
@@ -371,12 +369,12 @@ class QueryHistory(Base):
         Index("ix_query_history_created_at", "created_at"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     query_id: Mapped[str] = mapped_column(
-        String(36), default=lambda: str(uuid.uuid4()), nullable=False, index=True,
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False,
     )
     user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True,
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
     )
     video_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("videos.video_id", ondelete="SET NULL"), nullable=True,
@@ -384,11 +382,11 @@ class QueryHistory(Base):
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
         String(64), nullable=False, default="pending",
-        index=True,
+
     )  # pending → searching → candidates_found → completed
     result_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     selected_candidate_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, index=True,
+        String(36), nullable=True,
     )
     ai_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -424,13 +422,13 @@ class QueryCandidate(Base):
         Index("ix_query_candidates_rank", "query_id", "rank_position"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     candidate_id: Mapped[str] = mapped_column(
-        String(255), nullable=False, index=True,
+        String(255), nullable=False,
     )
     query_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("query_history.query_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     # Fusion scoring
     fusion_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -486,14 +484,14 @@ class QueryCandidateTracklet(Base):
         Index("ix_qct_tracklet", "tracklet_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     candidate_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("query_candidates.candidate_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     tracklet_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("tracklets.tracklet_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     match_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     match_type: Mapped[str] = mapped_column(String(32), nullable=False, default="vector")  # vector | text | spatiotemporal
@@ -513,16 +511,16 @@ class QueryJob(Base):
         Index("ix_query_jobs_status", "status"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     job_id: Mapped[str] = mapped_column(
-        String(36), default=lambda: str(uuid.uuid4()), nullable=False, unique=True, index=True,
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, unique=True,
     )
     query_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("query_history.query_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="pending", index=True,
+        String(32), nullable=False, default="pending",
     )  # pending | running | completed | failed
     worker_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -548,17 +546,17 @@ class SpatiotemporalGroup(Base):
         Index("ix_sg_candidate_id", "candidate_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     group_id: Mapped[str] = mapped_column(
-        String(36), default=lambda: str(uuid.uuid4()), nullable=False, unique=True, index=True,
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, unique=True,
     )
     query_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("query_history.query_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     candidate_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("query_candidates.candidate_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     group_type: Mapped[str] = mapped_column(
         String(64), nullable=False, default="camera_transition",
@@ -588,14 +586,14 @@ class EvidenceVideo(Base):
         Index("ix_evidence_videos_query", "query_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     query_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("query_history.query_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     query_candidate_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("query_candidates.candidate_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     video_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     total_duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -622,14 +620,14 @@ class EvidenceTracklet(Base):
         Index("ix_et_tracklet", "tracklet_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     evidence_video_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("evidence_videos.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     tracklet_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("tracklets.tracklet_id", ondelete="SET NULL"),
-        nullable=True, index=True,
+        nullable=True,
     )
     segment_order: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-based ordering
     camera_id: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -650,13 +648,13 @@ class VerifiedObject(Base):
         Index("ix_vo_user", "verified_by_user_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     candidate_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("query_candidates.candidate_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     verified_by_user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
     )
     is_correct: Mapped[bool] = mapped_column(nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -680,14 +678,14 @@ class VerifiedObjectTracklet(Base):
         Index("ix_vot_tracklet", "tracklet_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     verified_object_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("verified_objects.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
     )
     tracklet_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("tracklets.tracklet_id", ondelete="SET NULL"),
-        nullable=True, index=True,
+        nullable=True,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     verified_at: Mapped[datetime] = mapped_column(
@@ -714,13 +712,13 @@ class QueueVideoAsset(Base):
         Index("ix_qva_processed", "processed_at"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    video_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,)
+    video_id: Mapped[str] = mapped_column(String(255), nullable=False,)
     camera_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     source_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_mode: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    queue_position: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    queue_position: Mapped[int] = mapped_column(Integer, nullable=False,)
     storage_backend: Mapped[str] = mapped_column(String(64), nullable=False, default="google_drive")
     available_link_video: Mapped[str] = mapped_column(String(2048), nullable=False)
     available_link_metadata: Mapped[str | None] = mapped_column(String(2048), nullable=True)
@@ -729,7 +727,7 @@ class QueueVideoAsset(Base):
     local_video_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     local_metadata_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     raw_video_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True,)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )

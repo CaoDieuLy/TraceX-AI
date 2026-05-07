@@ -31,7 +31,7 @@ COPY backend/services/trace-service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY backend/services/shared ./shared
+COPY backend/services/shared ./backend/services/shared
 COPY backend/services/trace-service/app ./app
 COPY backend/config ./backend/config
 

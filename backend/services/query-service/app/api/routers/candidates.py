@@ -19,9 +19,9 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from shared import SessionLocal
+from shared.database import SessionLocal
 from shared.models import PersonCandidate, QueryCandidate, QueryHistory
-from ..services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
+from app.services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
 from sqlalchemy import func, or_, select
 
 _LOG_PATH = "/teamspace/studios/this_studio/TraceX-AI/.cursor/debug-a94b91.log"

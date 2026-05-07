@@ -13,7 +13,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routers import candidates, videos
+from .api.routers import candidates
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,6 @@ app.add_middleware(
 )
 
 app.include_router(candidates.router, prefix="/api/v1", tags=["candidates"])
-app.include_router(videos.router, prefix="/api/v1", tags=["videos"])
 
 
 @app.get("/health")

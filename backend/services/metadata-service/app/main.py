@@ -29,8 +29,10 @@ async def lifespan(app: FastAPI):
     from .services.user_service import ensure_bootstrap_admin
 
     # 1. Create all tables (idempotent)
+    # Import shared Base which has all models registered
+    from shared.models import Base as SharedBase
     logger.info("Creating database tables if they don't exist...")
-    Base.metadata.create_all(bind=engine)
+    SharedBase.metadata.create_all(bind=engine)
     logger.info("Database tables ready.")
 
     # 2. Bootstrap admin user
