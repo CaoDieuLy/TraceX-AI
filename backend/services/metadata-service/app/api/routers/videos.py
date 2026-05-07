@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
-from ..core.dependencies import get_current_user
-from ..core.models import User
-from ..core.schemas import (
+from ...core.dependencies import get_current_user
+from ...core.models import User
+from ...core.schemas import (
     VideoListResponse,
     VideoQueryCreateRequest,
     VideoQueryListResponse,
@@ -11,7 +11,7 @@ from ..core.schemas import (
     VideoQueryUpdateRequest,
     VideoResponse,
 )
-from ..services.video_service import (
+from ...services.video_service import (
     create_video_asset,
     create_video_query,
     get_video_by_public_id,
@@ -36,7 +36,7 @@ async def create_video(
     session: Session = Depends(get_current_user.__self__.__class__),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ..database import get_session
+    from ...database import get_session
     session_gen = get_session()
     session = next(session_gen)
     try:
@@ -75,7 +75,7 @@ def videos(
     session: Session = Depends(get_current_user.__self__.__class__),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ..database import get_session
+    from ...database import get_session
     session_gen = get_session()
     session = next(session_gen)
     try:
@@ -91,7 +91,7 @@ def video_detail(
     session: Session = Depends(get_current_user.__self__.__class__),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ..database import get_session
+    from ...database import get_session
     session_gen = get_session()
     session = next(session_gen)
     try:
@@ -109,7 +109,7 @@ def create_query(
     session: Session = Depends(get_current_user.__self__.__class__),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ..database import get_session
+    from ...database import get_session
     session_gen = get_session()
     session = next(session_gen)
     try:
@@ -127,7 +127,7 @@ def queries(
     session: Session = Depends(get_current_user.__self__.__class__),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ..database import get_session
+    from ...database import get_session
     session_gen = get_session()
     session = next(session_gen)
     try:
@@ -144,7 +144,7 @@ def patch_query(
     session: Session = Depends(get_current_user.__self__.__class__),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ..database import get_session
+    from ...database import get_session
     session_gen = get_session()
     session = next(session_gen)
     try:

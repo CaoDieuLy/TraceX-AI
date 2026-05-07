@@ -1,15 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from ..core.dependencies import get_current_user, require_admin
-from ..core.models import User
-from ..core.schemas import (
+from ...core.dependencies import get_current_user, require_admin
+from ...core.models import User
+from ...core.schemas import (
     AdminUserCreateRequest,
     AdminUserPatchRequest,
     UserListResponse,
     UserResponse,
 )
-from ..services.user_service import (
+from ...services.user_service import (
     create_user,
     get_user_by_id,
     list_users,
@@ -27,7 +27,7 @@ def admin_create_user(
     session: Session = Depends(get_current_user.__self__.__class__),
     _admin: User = Depends(require_admin),
 ) -> User:
-    from ..database import get_session
+    from ...database import get_session
     from functools import partial
     from ..core.dependencies import get_current_user as gcu
 
@@ -58,7 +58,7 @@ def admin_list_users(
     session: Session = Depends(get_current_user.__self__.__class__),
     _admin: User = Depends(require_admin),
 ) -> dict:
-    from ..database import get_session
+    from ...database import get_session
     session_gen = get_session()
     session = next(session_gen)
     try:
