@@ -40,22 +40,17 @@ function placeholderThumbnail(seed: string): string {
   return `https://picsum.photos/seed/${safe}/400/225`;
 }
 
-/** Base URL cho fetch từ browser (ưu tiên same-origin + rewrite) hoặc SSR/server. */
+/** Base URL cho fetch từ browser hoặc SSR/server. */
 export function getApiBaseUrl(): string {
   const envBase = (process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "").trim();
   if (envBase.startsWith("/")) {
     return envBase.replace(/\/$/, "");
   }
-  if (typeof window !== "undefined") {
-    // Browser dùng relative path qua Next rewrite để không phụ thuộc host networking.
-    return "";
-  }
-  const internalApi = (process.env.INTERNAL_API_GATEWAY_URL ?? "").trim();
-  if (internalApi.startsWith("http://") || internalApi.startsWith("https://")) {
-    return internalApi.replace(/\/$/, "");
-  }
   if (envBase.startsWith("http://") || envBase.startsWith("https://")) {
     return envBase.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined") {
+    return "";
   }
   return "http://metadata-service:8000";
 }

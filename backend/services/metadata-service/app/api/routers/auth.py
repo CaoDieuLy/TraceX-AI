@@ -7,7 +7,7 @@ from ...core.schemas import AuthTokenResponse, UserLoginRequest
 from ...core.auth import create_access_token
 from ...services.user_service import authenticate_user
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(tags=["auth"])
 
 
 @router.post("/login", response_model=AuthTokenResponse)
