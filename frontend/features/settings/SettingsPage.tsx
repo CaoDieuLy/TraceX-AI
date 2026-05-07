@@ -62,13 +62,13 @@ export function SettingsPage() {
   async function loadSettingsData() {
     setLoading(true);
     try {
-      const meRes = await authFetch("/api/v1/auth/me");
+      const meRes = await authFetch("/v1/auth/me");
       if (!meRes.ok) throw new Error(await readApiErrorMessage(meRes));
       const mePayload = await parseJsonOrThrow<MeResponse>(meRes);
       setMe(mePayload);
 
       // Overview is optional for settings UX; don't block page on downstream AI auth failures.
-      const overviewRes = await authFetch("/api/v1/overview");
+      const overviewRes = await authFetch("/v1/overview");
       if (overviewRes.ok) {
         const overviewPayload = await parseJsonOrThrow<OverviewResponse>(overviewRes);
         setOverview(overviewPayload);

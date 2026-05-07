@@ -39,7 +39,7 @@ async function readError(response: Response): Promise<string> {
 
 async function loginWithFallback(identifier: string, password: string): Promise<Response> {
   const baseUrl = getApiBaseUrl();
-  const endpoints = [`${baseUrl}/auth/login`, `${baseUrl}/api/v1/auth/login`];
+  const endpoints = [`${baseUrl}/auth/login`, "/v1/auth/login"];
   let lastResponse: Response | null = null;
 
   for (const endpoint of endpoints) {
