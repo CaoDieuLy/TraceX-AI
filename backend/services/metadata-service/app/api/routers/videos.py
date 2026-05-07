@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from ...core.dependencies import get_current_user
@@ -11,6 +11,7 @@ from ...core.schemas import (
     VideoQueryUpdateRequest,
     VideoResponse,
 )
+from ...database import get_session
 from ...services.video_service import (
     create_video_asset,
     create_video_query,
@@ -36,9 +37,6 @@ async def create_video(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ...database import get_session
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         if file is None and not (storage_url or "").strip():
             raise HTTPException(status_code=400, detail="Provide either a file upload or a storage_url")
@@ -75,9 +73,6 @@ def videos(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ...database import get_session
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         items = list_videos(session, current_user)
         return {"count": len(items), "items": items}
@@ -91,9 +86,6 @@ def video_detail(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ...database import get_session
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         video = get_video_by_public_id(session, current_user, video_id)
         if video is None:
@@ -109,9 +101,6 @@ def create_query(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ...database import get_session
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         video = get_video_by_public_id(session, current_user, payload.video_id)
         if video is None:
@@ -127,9 +116,6 @@ def queries(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ...database import get_session
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         items = list_video_queries(session, current_user)
         return {"count": len(items), "items": items}
@@ -144,9 +130,6 @@ def patch_query(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    from ...database import get_session
-    session_gen = get_session()
-    session = next(session_gen)
     try:
         query = get_video_query(session, current_user, query_id)
         if query is None:
