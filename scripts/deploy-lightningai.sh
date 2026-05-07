@@ -9,7 +9,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Internal compose: no Traefik, no frontend — just postgres + 3 GPU services
-COMPOSE_FILE="$SCRIPT_DIR/backend/services/lightningai-internal-compose.yml"
+COMPOSE_FILE="$SCRIPT_DIR/backend/services/lightningai-compose.yml"
 ENV_FILE="${TRACE_ENV_FILE:-$HOME/.tracex.env}"
 
 echo "=== TraceX-AI Backend Deployment (LightningAI) ==="

@@ -1,17 +1,30 @@
-# DEPRECATED — Use lightningai-internal-compose.yml instead.
+# Docker Compose for TraceX-AI — LightningAI (backend + database only)
 #
-# This file is kept for reference only. It combined all services including
-# frontend and Traefik labels, which is no longer the desired architecture.
+# This compose runs on LightningAI and does NOT include:
+#   - Traefik labels (public routing is handled by LightningAI's built-in proxy)
+#   - Frontend (frontend runs on Coolify VPS)
 #
-# New architecture (two-server):
-#   LightningAI → postgres + metadata-service + query-service + trace-service
-#   Coolify VPS  → frontend only
+# Traffic flow after deployment:
+#   Browser → Coolify VPS (frontend, port 443)
+#            → LightningAI (metadata-service :8002, query-service :8003, trace-service :8004)
+#              via NEXT_PUBLIC_API_BASE_URL pointing to LightningAI public URL
 #
-# See: backend/services/lightningai-internal-compose.yml
+# IMPORTANT: Set COOLIFY_PUBLIC_URL to your LightningAI public URL:
+#   e.g. https://8000-xxxx.cloudspaces.litng.ai
+#
+# Usage:
+#   COOLIFY_PUBLIC_URL=https://8000-xxxx.cloudspaces.litng.ai \
+#     docker compose -f backend/services/lightningai-compose.yml up -d
+#
+# Requires on LightningAI:
+#   - /workspace/models/         — SOTA 2026 model weights cache
+#   - /workspace/datasets/     — MTMC 2024 ground truth
+#   - /workspace/a20-root/      — A20 root (secrets, calibration)
+#   - /workspace/secrets/      — OAuth credentials
 
 services:
   # ────────────────────────────────────────────────────────────────────
-  # postgres — shared database (same server as GPU services)
+  # postgres — shared database (LightningAI local storage)
   # ────────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
@@ -29,44 +42,7 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - coolify
-
-  # ────────────────────────────────────────────────────────────────────
-  # frontend — Next.js UI (public via Traefik)
-  # ────────────────────────────────────────────────────────────────────
-  frontend:
-    build:
-      context: ../..
-      dockerfile: frontend/Dockerfile
-      args:
-        - NEXT_PUBLIC_API_BASE_URL=/api/v1
-    container_name: tracex-frontend
-    restart: unless-stopped
-    environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_API_BASE_URL=/api/v1
-      - COOLIFY_DEPLOYMENT=true
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    networks:
-      - coolify
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=coolify
-      - traefik.http.routers.tracex-frontend-https.rule=Host(`tracex-ai.smartnovi.tech`)
-      - traefik.http.routers.tracex-frontend-https.entrypoints=https
-      - traefik.http.routers.tracex-frontend-https.tls=true
-      - traefik.http.routers.tracex-frontend-https.tls.certresolver=letsencrypt
-      - traefik.http.services.tracex-frontend.loadbalancer.server.port=3000
-      - traefik.http.routers.tracex-frontend-http.rule=Host(`tracex-ai.smartnovi.tech`)
-      - traefik.http.routers.tracex-frontend-http.entrypoints=http
-      - traefik.http.middlewares.tracex-frontend-redirect.redirectscheme.scheme=https
-      - traefik.http.middlewares.tracex-frontend-redirect.redirectscheme.permanent=true
-      - traefik.http.routers.tracex-frontend-http.middlewares=tracex-frontend-redirect@docker
+      - internal
 
   # ────────────────────────────────────────────────────────────────────
   # metadata-service — GPU Ingest (~50GB VRAM)
@@ -117,6 +93,8 @@ services:
       - TORCH_HOME=/workspace/models/torch
       - TRANSFORMERS_OFFLINE=1
       - MAX_VIDEO_FRAMES=500
+      # Public base URL for metadata-service (used for generating storage URLs)
+      - NEXT_PUBLIC_API_GATEWAY_URL=${COOLIFY_PUBLIC_URL:-}
     volumes:
       - mcpt_storage:/workspace/storage
       - model_weights:/workspace/models
@@ -133,28 +111,13 @@ services:
               options:
                 NVIDIA_VISIBLE_DEVICES: "0"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8002/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 120s
     networks:
-      - coolify
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=coolify
-      - traefik.http.middlewares.tracex-metadata-strip.stripprefix.prefixes=/api
-      - traefik.http.routers.tracex-metadata-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
-      - traefik.http.routers.tracex-metadata-https.entrypoints=https
-      - traefik.http.routers.tracex-metadata-https.tls=true
-      - traefik.http.routers.tracex-metadata-https.tls.certresolver=letsencrypt
-      - traefik.http.routers.tracex-metadata-https.middlewares=tracex-metadata-strip@docker
-      - traefik.http.services.tracex-metadata.loadbalancer.server.port=8002
-      - traefik.http.routers.tracex-metadata-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api`)
-      - traefik.http.routers.tracex-metadata-http.entrypoints=http
-      - traefik.http.middlewares.tracex-metadata-redirect.redirectscheme.scheme=https
-      - traefik.http.middlewares.tracex-metadata-redirect.redirectscheme.permanent=true
-      - traefik.http.routers.tracex-metadata-http.middlewares=tracex-metadata-redirect@docker
+      - internal
     depends_on:
       postgres:
         condition: service_healthy
@@ -185,7 +148,7 @@ services:
       - SEAMLESS_M4T_MODEL=${SEAMLESS_M4T_MODEL:-facebook/seamless-m4t-v2-large}
       - TRANSLATION_MODEL_PATH=/workspace/models/seamless-m4t
       - PREVIEW_ROOT=/workspace/storage/candidate-previews
-      - PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-}
+      - PUBLIC_API_BASE_URL=${COOLIFY_PUBLIC_URL:-}
       - TRACKING_REQUEST_TIMEOUT_SECONDS=${TRACKING_REQUEST_TIMEOUT_SECONDS:-120}
       - HF_HOME=/workspace/models/huggingface
       - TORCH_HOME=/workspace/models/torch
@@ -203,28 +166,13 @@ services:
               options:
                 NVIDIA_VISIBLE_DEVICES: "0"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8003/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 120s
     networks:
-      - coolify
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=coolify
-      - traefik.http.middlewares.tracex-query-strip.stripprefix.prefixes=/query
-      - traefik.http.routers.tracex-query-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/query`)
-      - traefik.http.routers.tracex-query-https.entrypoints=https
-      - traefik.http.routers.tracex-query-https.tls=true
-      - traefik.http.routers.tracex-query-https.tls.certresolver=letsencrypt
-      - traefik.http.routers.tracex-query-https.middlewares=tracex-query-strip@docker
-      - traefik.http.services.tracex-query.loadbalancer.server.port=8003
-      - traefik.http.routers.tracex-query-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/query`)
-      - traefik.http.routers.tracex-query-http.entrypoints=http
-      - traefik.http.middlewares.tracex-query-redirect.redirectscheme.scheme=https
-      - traefik.http.middlewares.tracex-query-redirect.redirectscheme.permanent=true
-      - traefik.http.routers.tracex-query-http.middlewares=tracex-query-redirect@docker
+      - internal
     depends_on:
       postgres:
         condition: service_healthy
@@ -262,7 +210,6 @@ services:
       - CAMERA_CALIBRATION_PATH=/workspace/a20-root/config/calibration_2025_format.json
       - MTMC_GT_ROOT=/workspace/datasets/MTMC_Tracking_2024/train
       - A20_ROOT=${A20_ROOT:-/workspace/a20-root}
-      # Neural video processing
       - TRACE_CACHE_ROOT=/workspace/storage/cache
       - REALESRGAN_MODEL_PATH=/workspace/models/realesrgan
       - PROPAINTER_MODEL_PATH=/workspace/models/propaint
@@ -283,28 +230,13 @@ services:
               options:
                 NVIDIA_VISIBLE_DEVICES: "0"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8004/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 60s
     networks:
-      - coolify
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=coolify
-      - traefik.http.middlewares.tracex-trace-strip.stripprefix.prefixes=/trace
-      - traefik.http.routers.tracex-trace-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/trace`)
-      - traefik.http.routers.tracex-trace-https.entrypoints=https
-      - traefik.http.routers.tracex-trace-https.tls=true
-      - traefik.http.routers.tracex-trace-https.tls.certresolver=letsencrypt
-      - traefik.http.routers.tracex-trace-https.middlewares=tracex-trace-strip@docker
-      - traefik.http.services.tracex-trace.loadbalancer.server.port=8004
-      - traefik.http.routers.tracex-trace-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/trace`)
-      - traefik.http.routers.tracex-trace-http.entrypoints=http
-      - traefik.http.middlewares.tracex-trace-redirect.redirectscheme.scheme=https
-      - traefik.http.middlewares.tracex-trace-redirect.redirectscheme.permanent=true
-      - traefik.http.routers.tracex-trace-http.middlewares=tracex-trace-redirect@docker
+      - internal
 
 # ────────────────────────────────────────────────────────────────────
 # Named volumes
@@ -334,5 +266,5 @@ volumes:
       device: /workspace/a20-root
 
 networks:
-  coolify:
-    external: true
+  internal:
+    driver: bridge

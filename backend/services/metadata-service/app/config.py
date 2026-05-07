@@ -63,7 +63,7 @@ try:
         resolve_oauth2_token_path,
     )
 
-    loaded_envs = load_runtime_env(include_tracking_service_env=True, override=False)
+    loaded_envs = load_runtime_env(include_tracking_service_env=False, override=False)
     default_oauth_credentials_file = resolve_oauth2_credentials_path()
     default_oauth_token_file = resolve_oauth2_token_path()
 except ImportError:
@@ -101,11 +101,6 @@ class Settings(BaseSettings):
     query_service_url: str = os.getenv(
         "QUERY_SERVICE_URL",
         "http://query-service:8003"
-    )
-    # Backward compat: TRACKING_SERVICE_URL used as alias for trace_service_url
-    tracking_service_url: str = os.getenv(
-        "TRACKING_SERVICE_URL",
-        "http://trace-service:8004"
     )
     public_api_base_url: str = os.getenv("NEXT_PUBLIC_API_GATEWAY_URL", "").strip()
     lightning_api_token: str = ""

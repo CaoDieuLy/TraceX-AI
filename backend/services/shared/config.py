@@ -22,7 +22,6 @@ class Settings:
     queue_local_root: Path = Path(os.getenv("QUEUE_LOCAL_ROOT", "/workspace/storage/queue"))
 
     # Services
-    tracking_service_url: str = os.getenv("TRACKING_SERVICE_URL", "")
     lightning_api_token: str = os.getenv("LIGHTNING_API_TOKEN", "")
     lightning_api_auth_header: str = os.getenv("LIGHTNING_API_AUTH_HEADER", "Authorization")
     lightning_api_auth_prefix: str = os.getenv("LIGHTNING_API_AUTH_PREFIX", "Bearer ")

@@ -32,7 +32,7 @@ def main() -> int:
     if not args.skip_migrate:
         run(["python", "scripts/migrate_secrets_to_canonical_layout.py"])
 
-    loaded = load_runtime_env(include_tracking_service_env=True, override=True)
+    loaded = load_runtime_env(include_tracking_service_env=False, override=True)
     print("Loaded env files:")
     if loaded:
         for env_file in loaded:
