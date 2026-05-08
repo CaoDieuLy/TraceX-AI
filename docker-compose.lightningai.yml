@@ -56,7 +56,7 @@ services:
       - tracex-backend
 
   # ──────────────────────────────────────────────────────────────────────────
-  # metadata-service — port 8002 (public entry point cho frontend)
+  # metadata-service — port 8002 (LightningAI cloudspace exposes 8002)
   # GPU models: Grounding DINO 1.6 + EVA-02 ViT-L/14 + SigLIP 2 + VideoMAE V2
   # ──────────────────────────────────────────────────────────────────────────
   metadata-service:

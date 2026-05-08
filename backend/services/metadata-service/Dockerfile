@@ -29,7 +29,7 @@ COPY backend/services/shared ./shared
 COPY backend/services/metadata-service/app ./app
 COPY backend/config ./backend/config
 
-# Expose port
+# Expose port (LightningAI cloudspace exposes 8002)
 EXPOSE 8002
 
 # Health check
