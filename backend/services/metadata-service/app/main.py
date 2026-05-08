@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Set HF token before any model downloads (non-fatal if missing)
-os.environ.setdefault("HF_TOKEN", "${HF_TOKEN_FROM_ENV}")
+os.environ.setdefault("HF_TOKEN", os.environ.get("HF_TOKEN", ""))
 os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
 from .api.routers import auth, search, users, videos, ingest
