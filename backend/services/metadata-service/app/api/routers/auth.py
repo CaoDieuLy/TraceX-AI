@@ -23,3 +23,14 @@ def login(payload: UserLoginRequest, session: Session = Depends(lambda: None)) -
         return {"access_token": token, "user": user}
     finally:
         session.close()
+
+
+@router.get("/me")
+def get_me(current_user: User = Depends(get_current_user)) -> dict:
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "full_name": getattr(current_user, "full_name", None),
+        "role": current_user.role,
+        "is_active": getattr(current_user, "is_active", True),
+    }
