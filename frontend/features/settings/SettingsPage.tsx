@@ -62,7 +62,7 @@ export function SettingsPage() {
   async function loadSettingsData() {
     setLoading(true);
     try {
-      const meRes = await authFetch("/v1/auth/me");
+      const meRes = await authFetch("/auth/me");
       if (!meRes.ok) throw new Error(await readApiErrorMessage(meRes));
       const mePayload = await parseJsonOrThrow<MeResponse>(meRes);
       setMe(mePayload);

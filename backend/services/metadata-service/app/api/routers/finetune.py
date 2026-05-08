@@ -27,7 +27,7 @@ from ...services.ground_truth_finetune import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/finetune", tags=["finetune"])
+router = APIRouter(tags=["finetune"])
 
 # Default dataset root
 DATASET_ROOT = Path("/workspace/storage/dataset/MTMC_Tracking_2024/train")

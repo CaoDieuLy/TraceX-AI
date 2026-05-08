@@ -39,31 +39,12 @@ async function readError(response: Response): Promise<string> {
 
 async function loginWithFallback(identifier: string, password: string): Promise<Response> {
   const baseUrl = getApiBaseUrl();
-  // #region agent log
-  fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1409ea'},body:JSON.stringify({sessionId:'1409ea',location:'LoginPage.tsx:loginWithFallback',message:'loginWithFallback called',data:{baseUrl,endpoints:[`${baseUrl}/auth/login`,"/v1/auth/login"],timestamp:Date.now()},runId:'run1',hypothesisId:'H3'})}).catch(()=>{});
-  // #endregion
-  const endpoints = [`${baseUrl}/auth/login`, "/v1/auth/login"];
-  let lastResponse: Response | null = null;
-
-  for (const endpoint of endpoints) {
-  // #region agent log
-  fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1409ea'},body:JSON.stringify({sessionId:'1409ea',location:'LoginPage.tsx:endpoint',message:'fetching endpoint',data:{endpoint,responseStatus:null},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-  // #endregion
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: identifier, identifier, password }),
-    });
-    if (response.ok) {
-      return response;
-    }
-    lastResponse = response;
-    if (response.status !== 404) {
-      return response;
-    }
-  }
-  return lastResponse as Response;
+  const endpoint = `${baseUrl}/auth/login`;
+  return fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: identifier, identifier, password }),
+  });
 }
 
 export function LoginPage() {
