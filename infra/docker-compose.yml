@@ -66,21 +66,20 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=coolify
-      - traefik.http.middlewares.tracex-redirect-https.redirectscheme.scheme=https
-      - traefik.http.middlewares.tracex-redirect-https.redirectscheme.permanent=true
-      - traefik.http.middlewares.tracex-api-strip.stripprefix.prefixes=/api
-      - traefik.http.routers.TraceX-api-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(/api)
-      - traefik.http.routers.TraceX-api-https.entrypoints=https
-      - traefik.http.routers.TraceX-api-https.tls=true
-      - traefik.http.routers.TraceX-api-https.tls.certresolver=letsencrypt
-      - traefik.http.routers.TraceX-api-https.middlewares=tracex-api-strip@docker
-      - traefik.http.services.TraceX-api.loadbalancer.server.port=8002
-      - traefik.http.routers.TraceX-api-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(/api)
-      - traefik.http.routers.TraceX-api-http.entrypoints=http
-      - traefik.http.routers.TraceX-api-http.middlewares=tracex-redirect-https@docker
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=coolify
+        - traefik.http.middlewares.tracex-redirect-https.redirectscheme.scheme=https
+        - traefik.http.middlewares.tracex-redirect-https.redirectscheme.permanent=true
+        - traefik.http.routers.TraceX-api-https.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api/v1`)
+        - traefik.http.routers.TraceX-api-https.entrypoints=https
+        - traefik.http.routers.TraceX-api-https.tls=true
+        - traefik.http.routers.TraceX-api-https.tls.certresolver=letsencrypt
+        - traefik.http.routers.TraceX-api-https.priority=100
+        - traefik.http.services.TraceX-api.loadbalancer.server.port=8002
+        - traefik.http.routers.TraceX-api-http.rule=Host(`tracex-ai.smartnovi.tech`) && PathPrefix(`/api/v1`)
+        - traefik.http.routers.TraceX-api-http.entrypoints=http
+        - traefik.http.routers.TraceX-api-http.middlewares=tracex-redirect-https@docker
     networks:
       - coolify
     depends_on:
