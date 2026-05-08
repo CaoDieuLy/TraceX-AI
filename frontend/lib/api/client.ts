@@ -43,9 +43,6 @@ function placeholderThumbnail(seed: string): string {
 /** Base URL cho fetch từ browser hoặc SSR/server. */
 export function getApiBaseUrl(): string {
   const envBase = (process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? "").trim();
-  // #region agent log
-  fetch('http://localhost:7479/ingest/e62bc167-2e7b-462e-b687-5ff2359cf35b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1409ea'},body:JSON.stringify({sessionId:'1409ea',location:'lib/api/client.ts:getApiBaseUrl',message:'getApiBaseUrl result',data:{envBase,rawEnv:{NEXT_PUBLIC_API_BASE_URL:process.env.NEXT_PUBLIC_API_BASE_URL,NEXT_PUBLIC_API_GATEWAY_URL:process.env.NEXT_PUBLIC_API_GATEWAY_URL},windowDefined:typeof window!=="undefined",windowLocation:typeof window!=="undefined"?window.location.origin:null},timestamp:Date.now(),runId:'run1',hypothesisId:'H2'})}).catch(()=>{});
-  // #endregion
   if (envBase.startsWith("/")) {
     return envBase.replace(/\/$/, "");
   }
@@ -180,4 +177,50 @@ export async function listVideos(params: { page?: number; pageSize?: number }): 
       previewUrl: resolveMediaUrl(item.storage_path, getApiBaseUrl()),
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Ingest API
+// ---------------------------------------------------------------------------
+
+export type IngestResponse = {
+  status: string;
+  moved_count: number;
+  ingested_count: number;
+  skipped_count: number;
+  total_videos_in_db: number;
+  total_tracklets_saved?: number;
+  processed_videos?: number;
+  errors: string[];
+  message: string;
+  finetune?: { scenes_processed: number; errors: string[] };
+};
+
+export type IngestStatsResponse = {
+  total_videos_in_db: number;
+  total_cameras_in_db: number;
+  total_tracklets_in_db: number;
+  total_embeddings_in_db: number;
+};
+
+export async function triggerIngest(
+  body: { action: string; dry_run?: boolean } = { action: "move_and_ingest" }
+): Promise<IngestResponse> {
+  return apiFetch<IngestResponse>("/ingest/move-and-process", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getIngestStats(): Promise<IngestStatsResponse> {
+  return apiFetch<IngestStatsResponse>("/ingest/stats");
+}
+
+export async function triggerFullPipeline(
+  body: { action: string; dry_run?: boolean } = { action: "move_and_ingest" }
+): Promise<IngestResponse> {
+  return apiFetch<IngestResponse>("/ingest/full-pipeline", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }

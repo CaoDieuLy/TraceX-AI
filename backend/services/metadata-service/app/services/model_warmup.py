@@ -80,13 +80,16 @@ def _load_eva02(device: torch.device) -> None:
         import numpy as np
         from PIL import Image
 
-        dtype = torch.float16 if device.type == "cuda" else torch.float32
         model = timm.create_model(
-            "eva02_large_patch14_224.mim_m38m_ft_in22k_in1k",
+            "eva02_large_patch14_224.mim_m38m",
             pretrained=True,
             num_classes=0,
         )
-        model = model.to(device=device, dtype=dtype)
+        # Convert to fp16 after loading for timm models
+        if device.type == "cuda":
+            model = model.to(device=device, dtype=torch.float16)
+        else:
+            model = model.to(device=device)
         model.eval()
 
         data_cfg = timm.data.resolve_model_data_config(model)
@@ -94,7 +97,8 @@ def _load_eva02(device: torch.device) -> None:
         dummy = Image.fromarray(
             np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
         )
-        inp = transform(dummy).unsqueeze(0).to(device=device, dtype=dtype)
+        inp_dtype = torch.float16 if device.type == "cuda" else torch.float32
+        inp = transform(dummy).unsqueeze(0).to(device=device, dtype=inp_dtype)
         with torch.no_grad():
             feat = model(inp)
         logger.info("  EVA-02 output dim: %d", feat.shape[-1])
@@ -114,19 +118,17 @@ def _load_grounding_dino_16(device: torch.device) -> None:
     try:
         from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
-        dtype = torch.float16 if device.type == "cuda" else torch.float32
+        torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
         model_id = "IDEA-Research/grounding-dino-1.6-pro"
         try:
             processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModelForZeroShotObjectDetection.from_pretrained(
-                model_id, torch_dtype=dtype,
-            ).to(device)
+            model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, torch_dtype=torch_dtype)
         except Exception:
-            model_id = "IDEA-Research/grounding-dino-1.6-base"
+            model_id = "IDEA-Research/grounding-dino-base"
             processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModelForZeroShotObjectDetection.from_pretrained(
-                model_id, torch_dtype=dtype,
-            ).to(device)
+            model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, torch_dtype=torch_dtype)
+
+        model = model.to(device)
         model.eval()
 
         import numpy as np
@@ -134,7 +136,8 @@ def _load_grounding_dino_16(device: torch.device) -> None:
         dummy_img = Image.fromarray(np.zeros((640, 640, 3), dtype=np.uint8))
         inputs = processor(images=dummy_img, text="person.", return_tensors="pt")
         inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.no_grad():
+        autocast_ctx = torch.autocast(device_type=device.type, dtype=torch_dtype) if device.type == "cuda" else torch.no_grad()
+        with torch.no_grad(), autocast_ctx:
             _ = model(**inputs)
 
         _MODELS["gdino16"] = model
@@ -152,23 +155,26 @@ def _load_siglip2(device: torch.device) -> None:
     try:
         from transformers import AutoProcessor, AutoModel
 
-        dtype = torch.float16 if device.type == "cuda" else torch.float32
+        siglip_torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
         model_id = "google/siglip2-so400m-patch14-384"
         try:
             processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModel.from_pretrained(model_id, torch_dtype=dtype).to(device)
+            model = AutoModel.from_pretrained(model_id, torch_dtype=siglip_torch_dtype)
         except Exception:
             model_id = "google/siglip-so400m-patch14-384"
             processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModel.from_pretrained(model_id, torch_dtype=dtype).to(device)
+            model = AutoModel.from_pretrained(model_id, torch_dtype=siglip_torch_dtype)
+
+        model = model.to(device)
         model.eval()
 
         import numpy as np
         from PIL import Image
+        siglip_dtype = torch.float16 if device.type == "cuda" else torch.float32
         dummy_img = Image.fromarray(np.zeros((384, 384, 3), dtype=np.uint8))
         labels = ["person in red shirt", "person in blue jeans"]
         inputs = processor(text=labels, images=dummy_img, return_tensors="pt", padding=True)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        inputs = {k: v.to(device=device, dtype=siglip_dtype) if v.is_floating_point() else v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             _ = model(**inputs)
 
@@ -187,10 +193,8 @@ def _load_videomae_v2(device: torch.device) -> None:
         from transformers import AutoProcessor, AutoModelForVideoClassification
         import numpy as np
 
-        dtype = torch.float16 if device.type == "cuda" else torch.float32
-        # Try huge first (86.6% top-1 on Kinetics-400), then base, then small
+        videomae_torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
         model_ids = [
-            "MCG-NJU/videomae-huge-finetuned-kinetics",
             "MCG-NJU/videomae-base-finetuned-kinetics",
             "MCG-NJU/videomae-small-finetuned-kinetics",
         ]
@@ -198,9 +202,7 @@ def _load_videomae_v2(device: torch.device) -> None:
         for model_id in model_ids:
             try:
                 processor = AutoProcessor.from_pretrained(model_id)
-                model = AutoModelForVideoClassification.from_pretrained(
-                    model_id, torch_dtype=dtype,
-                ).to(device)
+                model = AutoModelForVideoClassification.from_pretrained(model_id, torch_dtype=videomae_torch_dtype)
                 loaded_model_id = model_id
                 break
             except Exception:
@@ -211,11 +213,13 @@ def _load_videomae_v2(device: torch.device) -> None:
             logger.warning("No VideoMAE Kinetics model available, skipping")
             return
 
+        model = model.to(device)
         model.eval()
 
+        videomae_dtype = torch.float16 if device.type == "cuda" else torch.float32
         dummy_frames = [np.zeros((224, 224, 3), dtype=np.uint8) for _ in range(16)]
         inputs = processor(dummy_frames, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        inputs = {k: v.to(device=device, dtype=videomae_dtype) if v.is_floating_point() else v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             out = model(**inputs)
         logger.info("  VideoMAE V2 logits dim: %d", out.logits.shape[-1])

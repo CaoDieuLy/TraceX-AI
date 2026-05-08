@@ -20,9 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Install PyTorch 2.4+ (base image has 2.3.1, upgrade needed for Grounding DINO 1.6 compatibility)
+RUN pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
+
 # Copy requirements first for better Docker caching
 COPY backend/services/metadata-service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir transformers==4.41.0 accelerate timm sentencepiece safetensors huggingface-hub uvicorn[standard]==0.32.1
 
 # Copy application code
 COPY backend/services/shared ./shared

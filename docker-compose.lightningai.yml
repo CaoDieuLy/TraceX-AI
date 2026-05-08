@@ -102,16 +102,17 @@ services:
       # AI model cache (bind mount vào /workspace/models)
       - HF_HOME=/workspace/models/huggingface
       - TORCH_HOME=/workspace/models/torch
-      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+      - TRANSFORMERS_OFFLINE=0
+      - HF_TOKEN=${HF_TOKEN:-}
       # LightningAI public URL (để tạo download links)
       - NEXT_PUBLIC_API_GATEWAY_URL=${LIGHTNINGAI_PUBLIC_URL:-}
       - A20_ROOT=${A20_ROOT:-/workspace/a20-root}
     volumes:
-      - /workspace/storage:/workspace/storage
-      - /home/zeus/content/.cache/huggingface:/workspace/models/huggingface
-      - /home/zeus/content/TraceX-AI/storage/model-weights:/workspace/models/weights
-      - /workspace/models/torch:/workspace/models/torch
-      - /home/zeus/content/TraceX-AI/secrets:/workspace/secrets:ro
+      - ./storage:/workspace/storage
+      - /home/zeus/.cache/huggingface:/workspace/models/huggingface
+      - ./storage/model-weights:/workspace/models/weights
+      - /home/zeus/.cache/torch:/workspace/models/torch
+      - ./secrets:/workspace/secrets:ro
     deploy:
       resources:
         reservations:
@@ -169,10 +170,10 @@ services:
       - HUGGINGFACE_HUB_CACHE=/workspace/models/huggingface/hub
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
     volumes:
-      - /workspace/storage:/workspace/storage
-      - /home/zeus/content/.cache/huggingface:/workspace/models/huggingface
-      - /home/zeus/content/TraceX-AI/storage/model-weights:/workspace/models/weights
-      - /workspace/models/torch:/workspace/models/torch
+      - ./storage:/workspace/storage
+      - /home/zeus/.cache/huggingface:/workspace/models/huggingface
+      - ./storage/model-weights:/workspace/models/weights
+      - /home/zeus/.cache/torch:/workspace/models/torch
     deploy:
       resources:
         reservations:
@@ -227,9 +228,9 @@ services:
       - TORCH_HOME=/workspace/models/torch
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
     volumes:
-      - /workspace/storage:/workspace/storage
-      - /home/zeus/content/.cache/huggingface:/workspace/models/huggingface
-      - /workspace/models/torch:/workspace/models/torch
+      - ./storage:/workspace/storage
+      - /home/zeus/.cache/huggingface:/workspace/models/huggingface
+      - /home/zeus/.cache/torch:/workspace/models/torch
     deploy:
       resources:
         reservations:

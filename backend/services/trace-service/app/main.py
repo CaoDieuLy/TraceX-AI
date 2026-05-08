@@ -16,7 +16,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routers import candidates, trace, video_process
+from .api.routers import candidates, trace, video_process, ingestion
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ app.add_middleware(
 app.include_router(trace.router, prefix="/api/v1/trace", tags=["trace"])
 app.include_router(candidates.router, tags=["candidates"])
 app.include_router(video_process.router, tags=["video_process"])
+app.include_router(ingestion.router, tags=["ingestion"])
 
 
 @app.get("/health")

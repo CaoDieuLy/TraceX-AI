@@ -24,6 +24,18 @@ class ProcessVideoRequest(BaseModel):
     )
 
 
+class ProcessVideoStreamRequest(BaseModel):
+    """Request body for the streaming upload endpoint.
+
+    Video bytes are sent as a multipart/form-data file field named "video".
+    """
+    video_id: str = Field(..., description="Unique video identifier")
+    camera_id: Optional[str] = Field(None, description="Camera label, e.g. cam_01")
+    source_filename: Optional[str] = Field(None, description="Original filename for suffix detection")
+    sample_interval: Optional[int] = Field(15, description="Frame interval for person detection")
+    bev_max_dist: Optional[float] = Field(1.5, description="MCBLT max BEV distance in metres")
+
+
 class BatchVideoEntry(BaseModel):
     """One video entry inside a batch request."""
     video_id: str = Field(..., description="Unique video identifier")

@@ -31,7 +31,8 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 import torch
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from PIL import Image
 
 from ...services.model_warmup import get_model
@@ -41,6 +42,7 @@ from .video_process_schemas import (
     BatchVideoEntry,
     ProcessVideoRequest,
     ProcessVideoResponse,
+    ProcessVideoStreamRequest,
     TrackletResult,
 )
 
@@ -103,9 +105,12 @@ def _detect_persons(frame: np.ndarray, threshold: float = 0.3) -> list[dict]:
         return []
 
     device = _get_device()
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
     pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     inputs = processor(images=pil_img, text="person.", return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    # input_ids must stay as int64; only float tensors get fp16
+    inputs = {k: (v.to(device, dtype=dtype) if v.dtype in (torch.float32, torch.float16) else v.to(device))
+              for k, v in inputs.items()}
 
     with torch.no_grad():
         outputs = model(**inputs)
@@ -357,7 +362,8 @@ def _run_siglip2_attributes(
                 text=labels, images=pil_crop,
                 return_tensors="pt", padding=True
             )
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+            dtype = torch.float16 if device.type == "cuda" else torch.float32
+            inputs = {k: v.to(device, dtype=dtype) for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = model(**inputs)
             logits_per_image = outputs.logits_per_image
@@ -532,7 +538,7 @@ def _run_videomae_actions(
 
     try:
         inputs = processor(crops, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        inputs = {k: v.to(device, dtype=dtype) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model(**inputs)
         logits = outputs.logits
@@ -694,6 +700,176 @@ def process_video(req: ProcessVideoRequest) -> ProcessVideoResponse:
 
     return ProcessVideoResponse(
         video_id=req.video_id,
+        camera_id=camera_id,
+        tracklets=tracklets,
+        total_detections=len(all_detections),
+        processing_time_s=elapsed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# STREAMING endpoint — accepts video bytes directly (no disk download)
+# ---------------------------------------------------------------------------
+
+@router.post("/process/stream", response_model=ProcessVideoResponse)
+async def process_video_stream(
+    video_id: str = Form(...),
+    camera_id: str | None = Form(None),
+    source_filename: str | None = Form(None),
+    sample_interval: int = Form(15),
+    bev_max_dist: float = Form(1.5),
+    video: UploadFile = File(...),
+) -> ProcessVideoResponse:
+    """
+    Accept video bytes via multipart upload, write to a temp file,
+    process, then delete the temp file.
+
+    This lets ingest_service stream bytes directly from Google Drive
+    to the GPU pipeline without caching the file on disk permanently.
+    """
+    import tempfile
+
+    tmp_path: Path | None = None
+    try:
+        suffix = Path(source_filename or "video").suffix.lower() or ".mp4"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            while True:
+                chunk = await video.read(1024 * 1024 * 50)  # 50 MB chunks
+                if not chunk:
+                    break
+                tmp.write(chunk)
+
+        logger.info("[stream] Received %s (%s), saved to %s", video_id, source_filename, tmp_path)
+
+        # Delegate to the sync process handler (uses cv2 which is sync-only)
+        import asyncio
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            _process_video_sync,
+            str(tmp_path),
+            video_id,
+            camera_id,
+            sample_interval,
+            bev_max_dist,
+        )
+        return result
+
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+                logger.info("[stream] Cleaned up temp file: %s", tmp_path)
+            except OSError:
+                pass
+
+
+def _process_video_sync(
+    video_path: str,
+    video_id: str,
+    camera_id: str | None,
+    sample_interval: int,
+    bev_max_dist: float,
+) -> ProcessVideoResponse:
+    """
+    Sync wrapper around the single-video processing pipeline.
+    Matches the logic of process_video() but as a plain function
+    callable from the async streaming endpoint.
+    """
+    import time
+    start = time.time()
+
+    camera_id = camera_id or "Camera_0000"
+
+    try:
+        frames, fps = _video_to_frames(video_path, max_frames=500)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Cannot read video frames")
+
+    if not frames:
+        raise HTTPException(status_code=400, detail="No frames extracted from video")
+
+    sampled = _sample_frames_uniform(frames, fps, sample_interval)
+    all_detections: list[dict] = []
+
+    for frame_idx, frame in sampled:
+        detections = _detect_persons(frame)
+        for det in detections:
+            det["frame_idx"] = frame_idx
+            det["timestamp"] = frame_idx / fps if fps > 0 else 0
+            det["video_id"] = video_id
+        all_detections.extend(detections)
+
+    if not all_detections:
+        return ProcessVideoResponse(
+            video_id=video_id,
+            camera_id=camera_id,
+            tracklets=[],
+            total_detections=0,
+            processing_time_s=time.time() - start,
+        )
+
+    cal_path = os.getenv("CAMERA_CALIBRATION_PATH")
+    all_detections = _project_to_bev_single(all_detections, camera_id, cal_path)
+
+    detections_by_camera = {camera_id: all_detections}
+    groups = _mcblt_associate(detections_by_camera, max_dist=bev_max_dist)
+
+    tracklets: list[TrackletResult] = []
+    for group_idx, group in enumerate(groups):
+        if len(group) < 2:
+            continue
+
+        group = sorted(group, key=lambda d: d.get("frame_idx", 0))
+        start_frame = group[0].get("frame_idx", 0)
+        end_frame = group[-1].get("frame_idx", len(frames) - 1)
+        step = max(1, (end_frame - start_frame) // 16)
+        tracklet_frames = frames[start_frame:end_frame + 1:step]
+        if not tracklet_frames:
+            tracklet_frames = [frames[min(start_frame, len(frames) - 1)]]
+
+        mid_det = group[len(group) // 2]
+        rep_bbox = mid_det["bbox"]
+        rep_bev_x = mid_det.get("bev_x", 0.0)
+        rep_bev_y = mid_det.get("bev_y", 0.0)
+
+        embedding = _generate_eva02_embeddings(
+            tracklet_frames, [rep_bbox] * len(tracklet_frames),
+            f"{video_id}_{group_idx}",
+        )
+        attributes = _run_siglip2_attributes(tracklet_frames, rep_bbox)
+        action = _run_videomae_actions(tracklet_frames, rep_bbox)
+        summary = _build_appearance_summary(attributes)
+
+        tracklets.append(TrackletResult(
+            tracklet_id=f"{video_id}_{camera_id}_{group_idx}",
+            video_id=video_id,
+            camera_id=camera_id,
+            track_id=group_idx,
+            start_time=group[0].get("timestamp", 0),
+            end_time=group[-1].get("timestamp", 0),
+            quality_score=float(mid_det.get("score", 0.5)),
+            gender=attributes.get("gender", "unknown"),
+            top_color=attributes.get("top_color", "unknown"),
+            bottom_color=attributes.get("bottom_color", "unknown"),
+            shoes_color="unknown",
+            appearance_summary=summary,
+            representative_bbox=[int(x) for x in rep_bbox],
+            bev_x=rep_bev_x,
+            bev_y=rep_bev_y,
+            embedding_vector=embedding or [],
+            action=action,
+            occlusion_score=0.0,
+            contributing_cameras=[camera_id],
+            contributing_video_ids=[video_id],
+        ))
+
+    elapsed = time.time() - start
+    logger.info("Stream-processed %s: %d tracklets in %.1fs", video_id, len(tracklets), elapsed)
+
+    return ProcessVideoResponse(
+        video_id=video_id,
         camera_id=camera_id,
         tracklets=tracklets,
         total_detections=len(all_detections),
