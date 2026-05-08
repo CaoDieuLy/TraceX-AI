@@ -83,11 +83,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router, prefix="/v1/auth", tags=["auth"])
-app.include_router(users.router, prefix="/v1/users", tags=["users"])
-app.include_router(search.router, prefix="/v1/search", tags=["search"])
-app.include_router(videos.router, prefix="/v1/videos", tags=["videos"])
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
+app.include_router(search.router, prefix="/api/v1/search", tags=["search"])
+app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(video_process_router, prefix="/api/v1/video", tags=["video"])
+
+# #region agent_route_debug
+@app.middleware("http")
+async def log_all_requests(request, call_next):
+    import os, logging, json, time
+    _log_path = "/teamspace/studios/this_studio/.cursor/debug-ee8a8e.log"
+    try:
+        with open(_log_path, "a") as f:
+            f.write(json.dumps({
+                "sessionId": "ee8a8e",
+                "id": f"req_{int(time.time()*1000)}",
+                "timestamp": int(time.time()*1000),
+                "location": "metadata-service/main.py:middleware",
+                "message": "incoming_request",
+                "data": {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "query": str(request.url.query),
+                    "hypothesis": "H1"
+                },
+                "runId": "run1",
+                "hypothesisId": "H1"
+            }) + "\n")
+    except Exception:
+        pass
+    return await call_next(request)
+# #endregion
 
 
 @app.get("/health")

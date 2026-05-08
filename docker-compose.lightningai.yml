@@ -1,0 +1,267 @@
+# Docker Compose — LightningAI Backend Deployment
+# Chạy: postgres + metadata-service + query-service + trace-service
+#
+# Frontend KHÔNG chạy ở đây — frontend chạy riêng trên VPS (Coolify).
+# Xem docker-compose.yml (root) cho VPS frontend.
+#
+# ─── Traffic flow ────────────────────────────────────────────────────────────
+#   Browser
+#     → VPS: tracex-ai.smartnovi.tech        (frontend, port 443 HTTPS)
+#     → LightningAI: 8002-XXXX.cloudspaces.litng.ai/api/v1  (metadata-service)
+#
+# ─── Internal service communication ──────────────────────────────────────────
+#   metadata-service  →  query-service (http://query-service:8003)
+#   metadata-service  →  trace-service (http://trace-service:8004)
+#   query-service     →  trace-service (http://trace-service:8004)
+#   *-service         →  postgres      (postgres:5432)
+#
+# ─── Ports exposed trên LightningAI ──────────────────────────────────────────
+#   8002  →  metadata-service  (NEXT_PUBLIC_API_BASE_URL trỏ đến port này)
+#   8003  →  query-service     (internal, metadata-service gọi nội bộ)
+#   8004  →  trace-service     (internal, metadata/query-service gọi nội bộ)
+#   5432  →  postgres          (KHÔNG expose — chỉ dùng nội bộ Docker network)
+#
+# ─── Yêu cầu trước khi chạy ──────────────────────────────────────────────────
+#   1. Tạo file .env.lightningai từ .env.lightningai.example
+#   2. Đảm bảo /workspace/storage/ tồn tại (mkdir -p /workspace/storage)
+#   3. Đảm bảo /workspace/models/ có model weights (chạy scripts/download_models.py nếu cần)
+#   4. NVIDIA Container Toolkit phải được cài đặt (có sẵn trên LightningAI)
+#
+# ─── Usage ───────────────────────────────────────────────────────────────────
+#   docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai up -d
+
+services:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # postgres — database nội bộ, KHÔNG expose ra ngoài
+  # ──────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: tracex-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-mcpt}
+      - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - tracex-backend
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # metadata-service — port 8002 (public entry point cho frontend)
+  # GPU models: Grounding DINO 1.6 + EVA-02 ViT-L/14 + SigLIP 2 + VideoMAE V2
+  # ──────────────────────────────────────────────────────────────────────────
+  metadata-service:
+    build:
+      context: .
+      dockerfile: backend/services/metadata-service/Dockerfile
+    container_name: tracex-metadata-service
+    image: tracex/metadata-service:latest
+    ports:
+      - "8002:8002"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_DB=${POSTGRES_DB:-mcpt}
+      - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - JWT_ALGORITHM=HS256
+      - BOOTSTRAP_ADMIN_EMAIL=${BOOTSTRAP_ADMIN_EMAIL:-admin@tracex.example.com}
+      - BOOTSTRAP_ADMIN_PASSWORD=${BOOTSTRAP_ADMIN_PASSWORD:-Admin@123456}
+      - BOOTSTRAP_ADMIN_FULL_NAME=${BOOTSTRAP_ADMIN_FULL_NAME:-Administrator}
+      # Internal service URLs — dùng Docker service name
+      - QUERY_SERVICE_URL=http://query-service:8003
+      - TRACE_SERVICE_URL=http://trace-service:8004
+      # Storage paths (bind mount vào /workspace/storage)
+      - VIDEO_STORAGE_ROOT=/workspace/storage/videos
+      - TRACKING_OUTPUT_ROOT=/workspace/storage/tracking-output
+      - QUEUE_LOCAL_ROOT=/workspace/storage/queue
+      - STORAGE_INGEST_ENABLED=${STORAGE_INGEST_ENABLED:-false}
+      - STORAGE_INGEST_ROOT=/workspace/storage
+      - STARTUP_LOCAL_QUEUE_SYNC_ENABLED=false
+      - LOCAL_QUEUE_CACHE_ENABLED=false
+      # Google Drive (tùy chọn)
+      - GOOGLE_DRIVE_ENABLED=${GOOGLE_DRIVE_ENABLED:-false}
+      - MCPT_SECRETS_ROOT=/workspace/secrets
+      # Tracking timeouts
+      - TRACKING_REQUEST_TIMEOUT_SECONDS=${TRACKING_REQUEST_TIMEOUT_SECONDS:-600}
+      - TRACKING_HEALTH_TIMEOUT_SECONDS=${TRACKING_HEALTH_TIMEOUT_SECONDS:-10}
+      - TRACKING_STARTUP_MAX_WAIT_SECONDS=${TRACKING_STARTUP_MAX_WAIT_SECONDS:-120}
+      - TRACKING_STARTUP_POLL_INTERVAL_SECONDS=${TRACKING_STARTUP_POLL_INTERVAL_SECONDS:-10}
+      - TRACKING_STARTUP_RETRY_ATTEMPTS=${TRACKING_STARTUP_RETRY_ATTEMPTS:-3}
+      # AI model cache (bind mount vào /workspace/models)
+      - HF_HOME=/workspace/models/huggingface
+      - TORCH_HOME=/workspace/models/torch
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+      # LightningAI public URL (để tạo download links)
+      - NEXT_PUBLIC_API_GATEWAY_URL=${LIGHTNINGAI_PUBLIC_URL:-}
+      - A20_ROOT=${A20_ROOT:-/workspace/a20-root}
+    volumes:
+      - /workspace/storage:/workspace/storage
+      - /home/zeus/content/.cache/huggingface:/workspace/models/huggingface
+      - /home/zeus/content/TraceX-AI/storage/model-weights:/workspace/models/weights
+      - /workspace/models/torch:/workspace/models/torch
+      - /home/zeus/content/TraceX-AI/secrets:/workspace/secrets:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+      - tracex-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # query-service — port 8003
+  # GPU models: SeamlessM4T v2-large (translation) + SigLIP 2 text tower
+  # ──────────────────────────────────────────────────────────────────────────
+  query-service:
+    build:
+      context: .
+      dockerfile: backend/services/query-service/Dockerfile
+    container_name: tracex-query-service
+    image: tracex/query-service:latest
+    ports:
+      - "8003:8003"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_DB=${POSTGRES_DB:-mcpt}
+      - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_URL=${DATABASE_URL}
+      # Internal service URLs
+      - TRACE_SERVICE_URL=http://trace-service:8004
+      - METADATA_SERVICE_URL=http://metadata-service:8002
+      # Translation model
+      - SEAMLESS_MODEL=${SEAMLESS_MODEL:-facebook/seamless-m4t-v2-large}
+      - TRANSLATION_MODEL_PATH=/workspace/models/seamless-m4t
+      # Storage
+      - PREVIEW_ROOT=/workspace/storage/candidate-previews
+      - PUBLIC_API_BASE_URL=${LIGHTNINGAI_PUBLIC_URL:-}
+      # Search tuning
+      - MIN_FUSION_SCORE=${MIN_FUSION_SCORE:-0.0}
+      - MAX_CANDIDATES=${MAX_CANDIDATES:-50}
+      # AI model cache
+      - HF_HOME=/workspace/models/huggingface
+      - TORCH_HOME=/workspace/models/torch
+      - HUGGINGFACE_HUB_CACHE=/workspace/models/huggingface/hub
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+    volumes:
+      - /workspace/storage:/workspace/storage
+      - /home/zeus/content/.cache/huggingface:/workspace/models/huggingface
+      - /home/zeus/content/TraceX-AI/storage/model-weights:/workspace/models/weights
+      - /workspace/models/torch:/workspace/models/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+      - tracex-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # trace-service — port 8004
+  # GPU models: Real-ESRGAN + ProPainter + RIFE + NVENC
+  # ──────────────────────────────────────────────────────────────────────────
+  trace-service:
+    build:
+      context: .
+      dockerfile: backend/services/trace-service/Dockerfile
+    container_name: tracex-trace-service
+    image: tracex/trace-service:latest
+    ports:
+      - "8004:8004"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_DB=${POSTGRES_DB:-mcpt}
+      - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_URL=${DATABASE_URL}
+      # Storage
+      - VIDEO_STORAGE_PATH=/workspace/storage/videos
+      - TRACE_OUTPUT_PATH=/workspace/storage/traces
+      - TRACE_CACHE_ROOT=/workspace/storage/cache
+      - STORAGE_BASE_URL=${STORAGE_BASE_URL:-https://tracex-ai.smartnovi.tech/storage}
+      # Trace settings
+      - MAX_TRACE_WINDOW_HOURS=${MAX_TRACE_WINDOW_HOURS:-168}
+      - DEFAULT_TRACE_WINDOW_HOURS=${DEFAULT_TRACE_WINDOW_HOURS:-24}
+      - VIDEO_MERGE_ENABLED=${VIDEO_MERGE_ENABLED:-true}
+      - MAX_SEGMENTS_PER_TRACE=${MAX_SEGMENTS_PER_TRACE:-50}
+      # AI model cache
+      - HF_HOME=/workspace/models/huggingface
+      - TORCH_HOME=/workspace/models/torch
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+    volumes:
+      - /workspace/storage:/workspace/storage
+      - /home/zeus/content/.cache/huggingface:/workspace/models/huggingface
+      - /workspace/models/torch:/workspace/models/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+      - tracex-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+# ────────────────────────────────────────────────────────────────────────────
+# Volumes
+# ────────────────────────────────────────────────────────────────────────────
+volumes:
+  # postgres_data: Docker managed volume — persists giữa các container restart
+  # Các service khác dùng bind mounts trực tiếp vào /workspace/ của LightningAI
+  postgres_data:
+    driver: local
+
+# ────────────────────────────────────────────────────────────────────────────
+# Networks
+# ────────────────────────────────────────────────────────────────────────────
+networks:
+  tracex-backend:
+    driver: bridge

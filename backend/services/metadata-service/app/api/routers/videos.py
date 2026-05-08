@@ -25,7 +25,7 @@ from ...services.video_service import (
     video_to_payload,
 )
 
-router = APIRouter(prefix="/videos", tags=["videos"])
+router = APIRouter(tags=["videos"])
 
 
 @router.post("", response_model=VideoResponse, status_code=status.HTTP_201_CREATED)

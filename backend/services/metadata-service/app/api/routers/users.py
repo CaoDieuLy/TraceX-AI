@@ -19,7 +19,7 @@ from ...services.user_service import (
     update_user_access,
 )
 
-router = APIRouter(prefix="/users", tags=["users"])
+router = APIRouter(tags=["users"])
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

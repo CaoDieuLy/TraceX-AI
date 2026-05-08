@@ -1,350 +1,267 @@
-# TraceX-AI Docker Deployment Guide
+# TraceX-AI — Hướng dẫn Deploy
 
-## Architecture Overview
+## Kiến trúc tổng quan
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         VPS (Coolify)                                 │
-│   tracex-ai.smartnovi.tech                                           │
-│   ┌───────────────────────────────────────────────────────────────┐   │
-│   │  frontend (Next.js)  :3000  ───► Traefik (HTTPS :443)       │   │
-│   └───────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      │ Browser calls directly
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     LightningAI (NVIDIA A100 80GB)                    │
-│   https://8000-xxxx.cloudspaces.litng.ai                             │
-│                                                                       │
-│   ┌──────────────┐  ┌───────────────────┐  ┌────────────────────┐   │
-│   │  postgres    │  │metadata-service  │  │  query-service     │   │
-│   │    :5432     │  │     :8002         │  │     :8003          │   │
-│   │  (internal)  │  │  GPU (50GB VRAM) │  │  GPU (15GB VRAM)   │   │
-│   └──────────────┘  └───────────────────┘  └────────────────────┘   │
-│                          │                                           │
-│                          │ (internal bridge network: "internal")      │
-│                          ▼                                           │
-│                    ┌───────────────────┐                             │
-│                    │  trace-service    │                             │
-│                    │     :8004         │                             │
-│                    │  GPU (15GB VRAM)  │                             │
-│                    └───────────────────┘                             │
-└─────────────────────────────────────────────────────────────────────┘
+Browser
+  │
+  ├──► VPS (tracex-ai.smartnovi.tech)
+  │      └─ frontend  [Next.js :3000 → Traefik → HTTPS :443]
+  │
+  └──► LightningAI (8002-XXXX.cloudspaces.litng.ai)
+         ├─ metadata-service  [FastAPI :8002]  ← frontend gọi vào đây
+         ├─ query-service     [FastAPI :8003]  ← metadata-service gọi nội bộ
+         ├─ trace-service     [FastAPI :8004]  ← metadata-service gọi nội bộ
+         └─ postgres          [:5432, KHÔNG expose ra ngoài]
 ```
 
-**Traffic Flow:**
-- User Browser → `tracex-ai.smartnovi.tech` (VPS) — serves frontend HTML/JS
-- Frontend (browser) → `NEXT_PUBLIC_API_BASE_URL` = LightningAI URL + `/api/v1`
-- Backend services communicate internally via Docker bridge network
-- Database accessed only by backend services (not exposed publicly)
+**Quy tắc cứng:**
+- VPS chỉ chạy `frontend` — KHÔNG database, KHÔNG backend.
+- LightningAI chạy tất cả backend và database.
+- Video lưu Google Drive (tùy chọn) hoặc `/workspace/storage` — KHÔNG lưu trong database.
 
 ---
 
-## Service Summary
+## Các file deploy
 
-| Service | Runs On | Port | GPU | Description |
-|---------|---------|------|-----|-------------|
-| `frontend` | VPS | 3000 | No | Next.js web app |
-| `postgres` | LightningAI | 5432 | No | PostgreSQL 16 database |
-| `metadata-service` | LightningAI | 8002 | Yes | Auth, queue, video metadata + SOTA AI |
-| `query-service` | LightningAI | 8003 | Yes | Search, translation (SeamlessM4T) |
-| `trace-service` | LightningAI | 8004 | Yes | Neural video reconstruction |
-
----
-
-## Prerequisites
-
-### On LightningAI
-- Docker and Docker Compose installed
-- NVIDIA GPU with nvidia-docker runtime
-- Access to `/workspace/` directory
-
-### On VPS (Coolify)
-- Docker and Docker Compose installed
-- Coolify configured with Traefik
+| File | Máy | Mục đích |
+|------|-----|----------|
+| `docker-compose.yml` | VPS | Chạy `frontend` |
+| `docker-compose.lightningai.yml` | LightningAI | Chạy `postgres + metadata-service + query-service + trace-service` |
+| `.env` (copy từ `.env.vps.example`) | VPS | Env vars cho frontend |
+| `.env.lightningai` (copy từ `.env.lightningai.example`) | LightningAI | Env vars cho backend |
 
 ---
 
-## Environment Files
+## Phần 1 — Deploy LightningAI (Backend + Database)
 
-### LightningAI — `.env.lightningai`
-Copy and configure:
+### 1.1 Chuẩn bị thư mục
 
 ```bash
+# Trên terminal LightningAI
+mkdir -p /workspace/storage/videos
+mkdir -p /workspace/storage/traces
+mkdir -p /workspace/storage/queue
+mkdir -p /workspace/storage/candidate-previews
+mkdir -p /workspace/storage/cache
+mkdir -p /workspace/models/huggingface
+mkdir -p /workspace/models/torch
+```
+
+### 1.2 Tạo .env.lightningai
+
+```bash
+cd /home/zeus/content/TraceX-AI
 cp .env.lightningai.example .env.lightningai
-nano .env.lightningai
 ```
 
-Required variables:
+Mở `.env.lightningai` và điền các giá trị bắt buộc:
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `COOLIFY_PUBLIC_URL` | LightningAI public URL | `https://8000-xxxx.cloudspaces.litng.ai` |
-| `POSTGRES_PASSWORD` | Database password | (generate with `openssl rand -base64 32`) |
-| `JWT_SECRET_KEY` | JWT signing key | (generate with `openssl rand -base64 64`) |
-| `STORAGE_BASE_URL` | VPS domain for static files | `https://tracex-ai.smartnovi.tech/storage` |
-| `BOOTSTRAP_ADMIN_EMAIL` | Initial admin email | `admin@tracex.example.com` |
-| `BOOTSTRAP_ADMIN_PASSWORD` | Initial admin password | `Admin@123456` |
-
-### VPS — `.env.vps`
-Copy and configure:
+| Biến | Mô tả |
+|------|--------|
+| `LIGHTNINGAI_PUBLIC_URL` | URL cổng 8002: `https://8002-XXXX.cloudspaces.litng.ai` |
+| `POSTGRES_PASSWORD` | Mật khẩu mạnh, không dùng `@ # %` |
+| `DATABASE_URL` | `postgresql+psycopg2://mcpt_user:PASSWORD@postgres:5432/mcpt` |
+| `JWT_SECRET_KEY` | Tạo bằng `openssl rand -base64 64` |
+| `BOOTSTRAP_ADMIN_EMAIL` | Email admin đầu tiên |
+| `BOOTSTRAP_ADMIN_PASSWORD` | Mật khẩu admin đầu tiên |
 
 ```bash
-cp .env.vps.example .env.vps
-nano .env.vps
+# Tạo JWT key
+openssl rand -base64 64
 ```
 
-Required variables:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `NEXT_PUBLIC_API_BASE_URL` | LightningAI URL + `/api/v1` | `https://8000-xxxx.cloudspaces.litng.ai/api/v1` |
-
----
-
-## Deployment Steps
-
-### Step 1: Deploy Backend on LightningAI
-
-SSH into LightningAI machine and run:
+### 1.3 Build Docker images
 
 ```bash
-# Navigate to project
-cd /path/to/TraceX-AI
+# Build tất cả (lần đầu mất 10–30 phút)
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai build
 
-# Create environment file
-cp .env.lightningai.example .env.lightningai
-nano .env.lightningai  # Fill in COOLIFY_PUBLIC_URL and secrets
-
-# Create required directories (if not exist)
-sudo mkdir -p /workspace/models \
-    /workspace/datasets/MTMC_Tracking_2024/train \
-    /workspace/a20-root \
-    /workspace/storage/videos \
-    /workspace/storage/tracking-output \
-    /workspace/storage/traces \
-    /workspace/storage/candidate-previews \
-    /workspace/storage/cache \
-    /workspace/secrets
-sudo chmod -R 777 /workspace
-
-# Deploy using script
-./scripts/deploy-lightningai.sh
-
-# Or manually:
-docker compose -f backend/services/lightningai-compose.yml --env-file .env.lightningai build
-docker compose -f backend/services/lightningai-compose.yml --env-file .env.lightningai up -d
+# Hoặc build từng service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai build metadata-service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai build query-service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai build trace-service
 ```
 
-### Step 2: Deploy Frontend on VPS
-
-On VPS machine:
+### 1.4 Khởi chạy
 
 ```bash
-# Navigate to project
-cd /path/to/TraceX-AI
-
-# Create environment file
-cp .env.vps.example .env.vps
-nano .env.vps  # Set NEXT_PUBLIC_API_BASE_URL to your LightningAI URL + /api/v1
-
-# Deploy using script
-./scripts/deploy-vps.sh
-
-# Or manually:
-docker compose build frontend
-docker compose --env-file .env.vps up -d
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai up -d
 ```
 
----
-
-## Verify Deployment
-
-### Check Backend Health (LightningAI)
+### 1.5 Kiểm tra logs
 
 ```bash
-# Check all services
-docker compose -f backend/services/lightningai-compose.yml ps
+# Xem tất cả
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai logs -f
 
-# Check specific service logs
-docker compose -f backend/services/lightningai-compose.yml logs -f metadata-service
-docker compose -f backend/services/lightningai-compose.yml logs -f query-service
-docker compose -f backend/services/lightningai-compose.yml logs -f trace-service
+# Xem từng service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai logs -f metadata-service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai logs -f query-service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai logs -f trace-service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai logs -f postgres
+```
 
-# Test health endpoints
+### 1.6 Test health check
+
+```bash
+# Cục bộ trên LightningAI (GPU model warmup ~2 phút)
 curl http://localhost:8002/health
 curl http://localhost:8003/health
 curl http://localhost:8004/health
+
+# Từ bên ngoài
+curl https://8002-YOUR-WORKSPACE-ID.cloudspaces.litng.ai/health
 ```
 
-Expected output:
-```json
-{"status":"healthy","service":"metadata-service","gpu_warmup_done":true,...}
-{"status":"healthy","service":"query-service","version":"2.0.0"}
-{"status":"healthy","service":"trace-service","version":"2.0.0"}
-```
+Kết quả mong đợi: HTTP 200, `{"status": "ok", ...}`
 
-### Check Database Connection
+### 1.7 Test kết nối database
 
 ```bash
-# Connect to postgres
-docker compose -f backend/services/lightningai-compose.yml exec postgres psql -U mcpt_user -d video_tracking -c "\dt"
+# Kết nối vào postgres container
+docker exec -it tracex-postgres psql -U mcpt_user -d mcpt
+
+# Trong psql
+\dt           # Xem danh sách tables (~18 tables)
+\q            # Thoát
 ```
 
-Expected: List of tables (users, videos, camera_locations, tracking_results, etc.)
-
-### Check Frontend (VPS)
+### 1.8 Ghi lại URL public
 
 ```bash
-# Check frontend logs
-docker compose logs -f frontend
-
-# Test frontend
-curl https://tracex-ai.smartnovi.tech
-
-# Check browser console for API errors
-# Navigate to frontend in browser
-# Open DevTools → Console → Should see no API errors
-# Check Network tab → API calls should return 200
+# URL này sẽ dùng cho NEXT_PUBLIC_API_BASE_URL trên VPS
+echo "https://8002-$(hostname).cloudspaces.litng.ai/api/v1"
 ```
 
 ---
 
-## Update Services When Code Changes
+## Phần 2 — Deploy VPS (Frontend Only)
 
-### Update Backend (LightningAI)
+### 2.1 Tạo .env
 
 ```bash
 cd /path/to/TraceX-AI
-
-# Pull latest code
-git pull origin main
-
-# Rebuild and restart backend services
-docker compose -f backend/services/lightningai-compose.yml --env-file .env.lightningai build
-docker compose -f backend/services/lightningai-compose.yml --env-file .env.lightningai up -d
-
-# Or use deploy script
-./scripts/deploy-lightningai.sh
+cp .env.vps.example .env
 ```
 
-### Update Frontend (VPS)
+Điền URL LightningAI vừa lấy ở bước 1.8:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=https://8002-YOUR-WORKSPACE-ID.cloudspaces.litng.ai/api/v1
+```
+
+### 2.2 Build và chạy
 
 ```bash
-cd /path/to/TraceX-AI
-
-# Pull latest code
-git pull origin main
-
-# Rebuild and restart frontend
+# Build (Next.js bake URL vào bundle tại bước này)
 docker compose build frontend
-docker compose --env-file .env.vps up -d
 
-# Or use deploy script
-./scripts/deploy-vps.sh
+# Chạy
+docker compose up -d
+```
+
+### 2.3 Kiểm tra
+
+```bash
+docker compose logs -f frontend
+curl http://localhost:3000
 ```
 
 ---
 
-## Troubleshooting
+## Phần 3 — Test End-to-End
 
-### Backend Services Won't Start
+1. Mở `https://tracex-ai.smartnovi.tech` trong trình duyệt
+2. Đăng nhập bằng `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`
+3. Dashboard load thành công
+4. Kiểm tra Network tab trong DevTools — API calls đến `8002-XXXX.cloudspaces.litng.ai` trả về 200
 
 ```bash
-# Check logs
-docker compose -f backend/services/lightningai-compose.yml logs
+# Test login API trực tiếp
+curl -X POST https://8002-YOUR-WORKSPACE-ID.cloudspaces.litng.ai/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@tracex.example.com","password":"Admin@123456"}'
+```
 
-# Check GPU availability
+---
+
+## Phần 4 — Bảo trì
+
+### Restart service
+
+```bash
+# LightningAI
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai restart metadata-service
+
+# VPS
+docker compose restart frontend
+```
+
+### Cập nhật khi code thay đổi
+
+**Backend (LightningAI):**
+```bash
+git pull
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai build metadata-service
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai up -d metadata-service
+```
+
+**Frontend (VPS) — bắt buộc rebuild:**
+```bash
+git pull
+docker compose build frontend && docker compose up -d frontend
+```
+
+### Khi LightningAI URL thay đổi
+
+LightningAI URL thay đổi mỗi khi workspace restart:
+
+```bash
+# 1. Lấy URL mới
+NEW_URL="https://8002-NEW-ID.cloudspaces.litng.ai/api/v1"
+
+# 2. Cập nhật .env trên VPS
+sed -i "s|NEXT_PUBLIC_API_BASE_URL=.*|NEXT_PUBLIC_API_BASE_URL=$NEW_URL|" .env
+
+# 3. Rebuild frontend (bắt buộc — URL được baked vào JS bundle)
+docker compose build frontend && docker compose up -d frontend
+```
+
+### Dừng toàn bộ
+
+```bash
+# LightningAI
+docker compose -f docker-compose.lightningai.yml --env-file .env.lightningai down
+
+# VPS
+docker compose down
+```
+
+### Xem resource GPU
+
+```bash
+docker stats tracex-metadata-service tracex-query-service tracex-trace-service
 nvidia-smi
-
-# Verify docker can see GPU
-docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
-```
-
-### Frontend Can't Connect to Backend
-
-```bash
-# Verify NEXT_PUBLIC_API_BASE_URL is correct
-cat .env.vps | grep NEXT_PUBLIC_API_BASE_URL
-
-# Test backend directly from VPS
-curl https://YOUR-LIGHTNINGAI-URL/health
-
-# Check browser network tab for failed API calls
-```
-
-### Database Connection Issues
-
-```bash
-# Check postgres is running
-docker compose -f backend/services/lightningai-compose.yml ps postgres
-
-# Check postgres logs
-docker compose -f backend/services/lightningai-compose.yml logs postgres
-
-# Test connection from metadata-service
-docker compose -f backend/services/lightningai-compose.yml exec metadata-service python -c \
-  "from app.config import settings; print(f'Host: {settings.postgres_host}')"
-```
-
-### Reset Everything
-
-```bash
-# Stop all services
-docker compose -f backend/services/lightningai-compose.yml down
-
-# Remove volumes (WARNING: deletes all data!)
-docker compose -f backend/services/lightningai-compose.yml down -v
-
-# Restart fresh
-docker compose -f backend/services/lightningai-compose.yml --env-file .env.lightningai up -d
 ```
 
 ---
 
-## Port Reference
+## Tham khảo nhanh — Port
 
-| Service | Internal Port | Exposed | Used By |
-|---------|--------------|---------|---------|
-| `postgres` | 5432 | No | metadata-service, query-service, trace-service |
-| `metadata-service` | 8002 | 8002 | Frontend, query-service, trace-service |
-| `query-service` | 8003 | 8003 | Frontend, metadata-service |
-| `trace-service` | 8004 | 8004 | Frontend, metadata-service, query-service |
-| `frontend` | 3000 | 3000 | Browser |
-
----
-
-## Security Notes
-
-- Never commit `.env` files to git
-- Use strong passwords for `POSTGRES_PASSWORD` and `JWT_SECRET_KEY`
-- The database port (5432) is NOT exposed publicly — only accessible within Docker network
-- Backend ports (8002, 8003, 8004) are exposed via LightningAI's built-in proxy with HTTPS
-- Consider enabling CORS restrictions in production
+| Service | Port | Máy | Expose công khai |
+|---------|------|-----|-----------------|
+| frontend | 3000 | VPS | Qua Traefik → HTTPS 443 |
+| metadata-service | 8002 | LightningAI | ✅ (frontend gọi) |
+| query-service | 8003 | LightningAI | Chỉ nội bộ Docker |
+| trace-service | 8004 | LightningAI | Chỉ nội bộ Docker |
+| postgres | 5432 | LightningAI | ❌ KHÔNG expose |
 
 ---
 
-## File Structure
+## Bảo mật
 
-```
-TraceX-AI/
-├── docker-compose.yml                    # VPS: frontend only
-├── .env.vps.example                     # VPS env template
-├── .env.lightningai.example             # LightningAI env template
-├── backend/
-│   └── services/
-│       ├── lightningai-compose.yml      # LightningAI: backend + postgres
-│       ├── metadata-service/
-│       │   └── Dockerfile
-│       ├── query-service/
-│       │   └── Dockerfile
-│       └── trace-service/
-│           └── Dockerfile
-├── frontend/
-│   └── Dockerfile
-├── scripts/
-│   ├── deploy-lightningai.sh            # Deploy backend
-│   └── deploy-vps.sh                   # Deploy frontend
-└── DEPLOY.md                           # This file
-```
+- Không commit `.env` và `.env.lightningai` vào git (đã có trong `.gitignore`)
+- Dùng mật khẩu mạnh cho `POSTGRES_PASSWORD` và `JWT_SECRET_KEY`
+- Port 5432 của postgres chỉ accessible trong Docker network nội bộ
+- Port 8003 và 8004 chỉ cần accessible từ nội bộ LightningAI (metadata-service gọi)

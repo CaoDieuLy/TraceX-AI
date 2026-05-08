@@ -46,7 +46,7 @@ from .video_process_schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/video", tags=["video"])
+router = APIRouter(tags=["video"])
 
 DEFAULT_SAMPLE_INTERVAL = 15
 DEFAULT_MIN_BBOX_AREA = 400
