@@ -25,10 +25,13 @@ const ROLE_RANK: Record<UserItem["role"], number> = {
 };
 const ROLE_OPTIONS: UserItem["role"][] = ["SUPER_ADMIN", "ADMIN", "USER"];
 const ROLE_BADGE_CLASS: Record<UserItem["role"], string> = {
-  SUPER_ADMIN: "bg-violet-100 text-violet-700 border-violet-200",
-  ADMIN: "bg-blue-100 text-blue-700 border-blue-200",
-  USER: "bg-slate-100 text-slate-700 border-slate-200",
+  SUPER_ADMIN: "bg-violet-100 text-violet-700 border-violet-200 dark:bg-violet-500/15 dark:text-violet-200 dark:border-violet-500/30",
+  ADMIN: "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-500/15 dark:text-blue-200 dark:border-blue-500/30",
+  USER: "bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700",
 };
+
+const fieldClass =
+  "rounded-xl border border-surface-muted bg-white px-3 py-2 text-slate-900 outline-none ring-blue-300/25 transition focus:border-blue-400 focus:ring-2 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-500";
 
 export function UsersPage() {
   const router = useRouter();
@@ -147,46 +150,46 @@ export function UsersPage() {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">
-        <h1 className="text-xl font-semibold text-ink">Users</h1>
-        <p className="mt-1 text-sm text-ink-secondary">Quan ly user (ADMIN va SUPER_ADMIN).</p>
+      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_14px_34px_rgba(0,0,0,0.28)]">
+        <h1 className="text-xl font-semibold text-ink dark:text-white">Người dùng</h1>
+        <p className="mt-1 text-sm text-ink-secondary dark:text-slate-300">Quản lý người dùng (ADMIN và SUPER_ADMIN).</p>
       </section>
 
-      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">
+      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_14px_34px_rgba(0,0,0,0.28)]">
         <form className="grid grid-cols-1 gap-3 md:grid-cols-12" onSubmit={handleCreateUser}>
           <input
-            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-3"
+            className={[fieldClass, "md:col-span-3"].join(" ")}
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
           />
           <input
-            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-3"
-            placeholder="Full name"
+            className={[fieldClass, "md:col-span-3"].join(" ")}
+            placeholder="Họ tên"
             value={fullName}
             onChange={(e) => setFullName(e.target.value)}
             required
           />
           <input
-            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-2"
-            placeholder="Password"
+            className={[fieldClass, "md:col-span-2"].join(" ")}
+            placeholder="Mật khẩu"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
           />
           <select
-            className="rounded-xl border border-surface-muted px-3 py-2 md:col-span-2"
+            className={[fieldClass, "md:col-span-2"].join(" ")}
             value={isActive ? "active" : "inactive"}
             onChange={(e) => setIsActive(e.target.value === "active")}
           >
-            <option value="active">Active</option>
-            <option value="inactive">Inactive</option>
+            <option value="active">Đang hoạt động</option>
+            <option value="inactive">Không hoạt động</option>
           </select>
           <div className="flex min-w-0 gap-2 md:col-span-2">
             <select
-              className="min-w-0 flex-1 rounded-xl border border-surface-muted px-3 py-2"
+              className={[fieldClass, "min-w-0 flex-1"].join(" ")}
               value={role}
               onChange={(e) => setRole(e.target.value as UserItem["role"])}
             >
@@ -196,36 +199,36 @@ export function UsersPage() {
                 </option>
               ))}
             </select>
-            <button className="shrink-0 rounded-xl bg-accent px-4 py-2 text-white" type="submit">
-              Create
+            <button className="shrink-0 rounded-xl bg-accent px-4 py-2 font-semibold text-white transition hover:opacity-90" type="submit">
+              Tạo
             </button>
           </div>
         </form>
       </section>
 
-      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">
-        {loading ? <p className="text-sm text-ink-secondary">Dang tai users...</p> : null}
+      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_14px_34px_rgba(0,0,0,0.28)]">
+        {loading ? <p className="text-sm text-ink-secondary dark:text-slate-300">Đang tải người dùng...</p> : null}
         <div className="space-y-2">
           {items.map((user) => {
             const isSelf = user.id === currentUserId;
             const targetRank = ROLE_RANK[user.role] ?? 1;
             const canManageTarget = targetRank < currentUserRank;
             return (
-              <div key={user.id} className="flex items-center justify-between rounded-xl border border-surface-muted px-3 py-2">
+              <div key={user.id} className="flex items-center justify-between rounded-xl border border-surface-muted bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-950">
                 <div>
-                  <p className="flex items-center gap-2 text-sm font-medium text-ink">
+                  <p className="flex items-center gap-2 text-sm font-medium text-ink dark:text-slate-100">
                     <span>{user.email}</span>
                     <span className={["rounded-full border px-2 py-0.5 text-[11px] font-semibold", ROLE_BADGE_CLASS[user.role]].join(" ")}>
                       {user.role}
                     </span>
                   </p>
-                  <p className="text-xs text-ink-secondary">
-                    {user.full_name} · {user.is_active ? "Active" : "Inactive"}
+                  <p className="text-xs text-ink-secondary dark:text-slate-400">
+                    {user.full_name} · {user.is_active ? "Đang hoạt động" : "Không hoạt động"}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <select
-                    className="rounded-lg border border-surface-muted px-2 py-1 text-sm"
+                    className="rounded-lg border border-surface-muted bg-white px-2 py-1 text-sm text-slate-900 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
                     value={user.role}
                     disabled={isSelf || !canManageTarget}
                     onChange={(e) => void handleUpdateUser(user.id, { role: e.target.value as UserItem["role"] })}
@@ -240,13 +243,13 @@ export function UsersPage() {
                     type="button"
                     disabled={isSelf || !canManageTarget}
                     onClick={() => void handleUpdateUser(user.id, { is_active: !user.is_active })}
-                    className="rounded-lg border border-surface-muted px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded-lg border border-surface-muted bg-white px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:bg-slate-800"
                   >
-                    {user.is_active ? "Disable" : "Enable"}
+                    {user.is_active ? "Vô hiệu hóa" : "Kích hoạt"}
                   </button>
                   <Link
                     href={`/admin/users/${user.id}/queries`}
-                    className="rounded-lg border border-surface-muted px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface"
+                    className="rounded-lg border border-surface-muted bg-white px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:bg-slate-800"
                   >
                     Queries
                   </Link>
