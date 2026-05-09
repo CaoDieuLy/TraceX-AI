@@ -94,6 +94,7 @@ class TrackletResult(BaseModel):
     bev_y: float = 0.0
     embedding_vector: list[float] = Field(default_factory=list)
     action: str = "standing"
+    action_confidence: float = 0.0
     occlusion_score: float = 0.0
     # Cross-camera: which cameras/frames contributed to this tracklet
     contributing_cameras: list[str] = Field(default_factory=list)

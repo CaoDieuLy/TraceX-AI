@@ -182,75 +182,61 @@ def _parse_recorded_at(filename: str) -> datetime | None:
 
 
 # ---------------------------------------------------------------------------
-# GPU processing (local via metadata-service)
+# GPU processing (direct call — no HTTP self-loop)
 # ---------------------------------------------------------------------------
-
-_METADATA_SERVICE_URL = "http://localhost:8002"
-
 
 def _process_video_stream(drive_file_id: str, filename: str, video_id: str, camera_id: str) -> dict:
     """
-    Stream video bytes from Google Drive directly to the GPU service via multipart upload.
-    The GPU service writes a temp file, processes, then deletes it.
-    No video is cached to disk permanently.
+    Download video from Google Drive then process directly with GPU models.
+    Calls _process_video_sync() directly to avoid HTTP self-call deadlock.
     """
-    import sys
+    import sys, tempfile
+    from pathlib import Path
+    from io import BytesIO
     sys.path.insert(0, "/workspace/secrets")
     from shared_secret_runtime import build_google_drive_sa_service
+    from googleapiclient.http import MediaIoBaseDownload
 
-    logger.info("[gpu] Streaming %s from Drive (id=%s) to metadata-service", filename, drive_file_id)
+    logger.info("[gpu] Downloading %s from Drive (id=%s)", filename, drive_file_id)
 
     drive_service = build_google_drive_sa_service()
-
-    from googleapiclient.http import MediaIoBaseDownload, HttpRequest
-    from io import BytesIO
-
-    request: HttpRequest = drive_service.files().get_media(fileId=drive_file_id)
+    request = drive_service.files().get_media(fileId=drive_file_id)
     buffer = BytesIO()
     downloader = MediaIoBaseDownload(buffer, request, chunksize=1024 * 1024 * 50)
 
     done = False
     while not done:
         _, done = downloader.next_chunk()
-        logger.info("[gpu] Downloaded chunk for %s", filename)
 
     buffer.seek(0)
     video_bytes = buffer.getvalue()
-    logger.info("[gpu] Downloaded %s: %d bytes, sending to GPU service", filename, len(video_bytes))
+    logger.info("[gpu] Downloaded %s: %d bytes, processing with GPU", filename, len(video_bytes))
 
-    # Send to GPU service via multipart upload
-    import mimetypes
-    content_type = mimetypes.guess_type(filename)[0] or "video/mp4"
+    # Write to temp file and call GPU pipeline directly (no HTTP)
+    suffix = Path(filename).suffix.lower() or ".mp4"
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(video_bytes)
 
-    with httpx.Client(timeout=600) as client:
-        files = {
-            "video": (filename, video_bytes, content_type),
-        }
-        data = {
-            "video_id": video_id,
-            "camera_id": camera_id,
-            "source_filename": filename,
-            "sample_interval": 15,
-            "bev_max_dist": 1.5,
-        }
-        response = client.post(
-            f"{_METADATA_SERVICE_URL}/api/v1/video/process/stream",
-            files=files,
-            data=data,
-            timeout=600,
+        from ..api.routers.video_process import _process_video_sync
+        result = _process_video_sync(
+            str(tmp_path), video_id, camera_id,
+            sample_interval=15, bev_max_dist=1.5,
         )
 
-    response.raise_for_status()
-    result = response.json()
-
-    tracklets = result.get("tracklets", [])
-    logger.info("[gpu] Got %d tracklets for %s", len(tracklets), video_id)
-    return {
-        "tracklets": tracklets,
-        "person_count": len(tracklets),
-        "total_detections": result.get("total_detections", 0),
-        "processing_time_s": result.get("processing_time_s", 0),
-    }
+        tracklets = [t.model_dump() if hasattr(t, "model_dump") else t for t in (result.tracklets or [])]
+        logger.info("[gpu] Got %d tracklets for %s (%.1fs)", len(tracklets), video_id, result.processing_time_s)
+        return {
+            "tracklets": tracklets,
+            "person_count": len(tracklets),
+            "total_detections": result.total_detections or 0,
+            "processing_time_s": result.processing_time_s or 0,
+        }
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +260,12 @@ def _ensure_camera(session: Session, camera_id: str) -> None:
 
 
 def _video_exists_in_db(session: Session, video_id: str) -> bool:
+    """Return True only if video exists AND has been successfully processed."""
     from shared.models import Video
-    return session.scalar(select(Video).where(Video.video_id == video_id)) is not None
+    video = session.scalar(select(Video).where(Video.video_id == video_id))
+    if video is None:
+        return False
+    return bool(video.processed)
 
 
 def _upsert_video(
@@ -359,7 +349,7 @@ def _save_tracklets_from_gpu_result(
             session.add(TrackletEmbedding(
                 tracklet_id=tracklet_id,
                 embedding_vector=embedding_vec,
-                model_version="eva02_l14",
+                model_version="dinov2_l14",
             ))
 
         # Action (VideoMAE V2)
@@ -404,6 +394,7 @@ def ingest_move_and_process(
     logger.info("[drive] Found %d .mp4 files in Temp/", len(temp_files))
 
     moved_count = 0
+    sa_read_only = False
     for f in temp_files:
         filename = f["name"]
         if not _parse_camera_id(filename):
@@ -424,16 +415,23 @@ def ingest_move_and_process(
                 _move_file(drive, f["id"], DRIVE_TEMP_FOLDER_ID, date_folder_id)
                 logger.info("[drive] Moved: %s → Storage/%s/%s/", filename, m.group("camera_id"), recorded_date)
             except Exception as move_err:
-                logger.warning("[drive] Move failed for %s (SA may be read-only): %s — files already in Storage, continuing.", filename, move_err)
-                break  # stop trying moves; process from Storage directly
+                logger.warning("[drive] Move failed (SA read-only): %s — will process from Temp directly.", move_err)
+                sa_read_only = True
+                break  # stop trying moves
 
         moved_count += 1
 
     logger.info("[drive] Moved %d files", moved_count)
 
-    # --- Step 2: Scan Storage/ ---
+    # --- Step 2: Scan Storage/ + Temp/ (if SA is read-only) ---
     storage_files = _list_drive_mp4s(drive, DRIVE_STORAGE_FOLDER_ID)
     logger.info("[drive] Found %d .mp4 files in Storage/", len(storage_files))
+
+    # If SA can't move, also include Temp files for processing
+    if sa_read_only and temp_files:
+        valid_temp = [f for f in temp_files if _parse_camera_id(f["name"])]
+        storage_files = storage_files + valid_temp
+        logger.info("[drive] SA read-only: added %d files from Temp/ for processing (total: %d)", len(valid_temp), len(storage_files))
 
     pending: list[dict] = []
     for f in storage_files:
@@ -442,6 +440,16 @@ def ingest_move_and_process(
             pending.append(f)
         else:
             logger.debug("[ingest] Skip already ingested: %s", video_id)
+
+    # Sort cam_01 → cam_50 theo thứ tự đúng
+    def _sort_key(f: dict) -> tuple:
+        m = CAMERA_VIDEO_PATTERN.match(f["name"])
+        if not m:
+            return (999, f["name"])
+        cam_num = int(m.group("camera_id").replace("cam_", ""))
+        return (cam_num, f["name"])
+
+    pending.sort(key=_sort_key)
 
     if max_videos:
         pending = pending[:max_videos]
@@ -460,64 +468,137 @@ def ingest_move_and_process(
             "message": f"Moved {moved_count} videos, 0 pending (all already in DB)",
         }
 
-    # --- Step 3: Process each video ---
+    # --- Step 3: Process videos — download in parallel, prefetch frame decode, GPU sequential ---
     ingested_count = 0
     tracklet_count = 0
     errors: list[str] = []
     processed_videos = 0
+    PARALLEL_VIDEOS = 4
 
-    for i, f in enumerate(pending, 1):
+    import queue as _queue
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path as _Path
+
+    def _download_video(f: dict) -> tuple[dict, bytes | None, str | None]:
+        try:
+            from io import BytesIO
+            drive_dl = _build_drive_service()
+            from googleapiclient.http import MediaIoBaseDownload
+            req = drive_dl.files().get_media(fileId=f["id"])
+            buf = BytesIO()
+            dl = MediaIoBaseDownload(buf, req, chunksize=1024 * 1024 * 50)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+            buf.seek(0)
+            return f, buf.getvalue(), None
+        except Exception as e:
+            return f, None, str(e)
+
+    def _presample_bytes(f: dict, video_bytes: bytes):
+        """Write bytes to tempfile and decode frames — runs in background thread while GPU is busy."""
+        from ..api.routers.tracking_pipeline import VideoFrameSampler
         filename = f["name"]
-        file_id = f["id"]
-        camera_id = _parse_camera_id(filename) or "unknown"
-        video_id = filename
+        suffix = _Path(filename).suffix or ".mp4"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = _Path(tmp.name)
+            tmp.write(video_bytes)
+        try:
+            sampled = VideoFrameSampler(sample_fps=4).sample(str(tmp_path))
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        return sampled
 
-        logger.info("[%d/%d] Processing: %s (camera=%s)", i, len(pending), filename, camera_id)
+    def _run_gpu(f: dict, presampled) -> dict:
+        """GPU pipeline using pre-decoded frames (skips frame sampling stage)."""
+        from ..api.routers.video_process import _process_video_sync
+        filename = f["name"]
+        camera_id = _parse_camera_id(filename) or "unknown"
+        result = _process_video_sync("", filename, camera_id, 15, 1.5, presampled_frames=presampled)
+        tracklets = [t.model_dump() if hasattr(t, "model_dump") else t for t in (result.tracklets or [])]
+        return {"tracklets": tracklets, "person_count": len(tracklets),
+                "total_detections": result.total_detections or 0,
+                "processing_time_s": result.processing_time_s or 0}
+
+    for batch_start in range(0, len(pending), PARALLEL_VIDEOS):
+        batch = pending[batch_start: batch_start + PARALLEL_VIDEOS]
+        batch_num = batch_start // PARALLEL_VIDEOS + 1
+        total_batches = (len(pending) + PARALLEL_VIDEOS - 1) // PARALLEL_VIDEOS
+        logger.warning("[ingest] Batch %d/%d: downloading %d videos in parallel",
+                       batch_num, total_batches, len(batch))
 
         if dry_run:
-            logger.info("[dry-run] Would ingest: %s", filename)
+            for f in batch:
+                logger.info("[dry-run] Would ingest: %s", f["name"])
             continue
 
-        try:
-            # Ensure camera and upsert video record FIRST (commit separately)
-            _ensure_camera(session, camera_id)
-            recorded_at = _parse_recorded_at(filename)
-            _upsert_video(
-                session,
-                video_id=video_id,
-                camera_id=camera_id,
-                title=filename,
-                source_filename=filename,
-                drive_file_id=file_id,
-                recorded_at=recorded_at,
-            )
-            session.commit()  # Commit video record first
-            logger.info("[%d/%d] Video record saved: %s", i, len(pending), filename)
-
-            # Stream from Drive → GPU service directly (no disk cache)
-            gpu_result = _process_video_stream(file_id, filename, video_id, camera_id)
-
-            # Save to v3.3 tables
-            saved = _save_tracklets_from_gpu_result(session, gpu_result, video_id, camera_id)
-            tracklet_count += saved
-
-            # Mark video as processed (even if no tracklets detected)
-            video = session.scalar(select(Video).where(Video.video_id == video_id))
-            if video:
-                video.processed = True
-
-            session.commit()
-            processed_videos += 1
-            ingested_count += saved
-            logger.info("[%d/%d] ✓ %s: %d tracklets saved", i, len(pending), filename, saved)
-
-        except Exception as exc:
-            logger.error("[%d/%d] ✗ FAILED %s: %s", i, len(pending), filename, exc)
-            errors.append(f"{filename}: {exc}")
+        for f in batch:
             try:
-                session.rollback()
+                cam_id = _parse_camera_id(f["name"]) or "unknown"
+                _ensure_camera(session, cam_id)
+                _upsert_video(session, video_id=f["name"], camera_id=cam_id,
+                              title=f["name"], source_filename=f["name"],
+                              drive_file_id=f["id"],
+                              recorded_at=_parse_recorded_at(f["name"]))
             except Exception:
                 pass
+        session.commit()
+
+        # Stage A: download 4 videos in parallel
+        # Stage B: as each download finishes, immediately start frame decoding in background
+        # Stage C: GPU processes each video using pre-decoded frames (no wait for decode)
+        download_queue: _queue.Queue = _queue.Queue()
+        decode_exec = ThreadPoolExecutor(max_workers=2)
+
+        def _download_and_start_decode(f: dict) -> None:
+            f_item, vid_bytes, err = _download_video(f)
+            if err or vid_bytes is None:
+                download_queue.put((f_item, None, err))
+                return
+            logger.warning("[ingest] ✓ Downloaded %s (%d MB) → decoding frames...",
+                           f_item["name"], len(vid_bytes) // 1024 // 1024)
+            decode_fut = decode_exec.submit(_presample_bytes, f_item, vid_bytes)
+            download_queue.put((f_item, decode_fut, None))
+
+        with ThreadPoolExecutor(max_workers=PARALLEL_VIDEOS) as dl_pool:
+            for f in batch:
+                dl_pool.submit(_download_and_start_decode, f)
+
+            for _ in range(len(batch)):
+                f_item, decode_fut, err = download_queue.get()
+                filename = f_item["name"]
+                i = batch_start + next((j for j, b in enumerate(batch) if b["name"] == filename), 0) + 1
+                if err:
+                    errors.append(f"{filename}: download failed: {err}")
+                    logger.error("[ingest] ✗ Download failed %s: %s", filename, err)
+                    continue
+                try:
+                    presampled = decode_fut.result()
+                    logger.warning("[ingest] ✓ %s frames ready → GPU", filename)
+                    gpu_result = _run_gpu(f_item, presampled)
+                    saved = _save_tracklets_from_gpu_result(session, gpu_result, filename,
+                                                             _parse_camera_id(filename) or "unknown")
+                    tracklet_count += saved
+                    video = session.scalar(select(Video).where(Video.video_id == filename))
+                    if video:
+                        video.processed = True
+                    session.commit()
+                    processed_videos += 1
+                    ingested_count += saved
+                    logger.warning("[%d/%d] ✓ %s: %d tracklets in %.1fs",
+                                   i, len(pending), filename, saved, gpu_result.get("processing_time_s", 0))
+                except Exception as exc:
+                    logger.error("[%d/%d] ✗ FAILED %s: %s", i, len(pending), filename, exc)
+                    errors.append(f"{filename}: {exc}")
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+
+        decode_exec.shutdown(wait=False)
+
+    # (error handling done inline per-video above)
 
     final_total = int(session.scalar(select(func.count()).select_from(Video)) or 0)
 

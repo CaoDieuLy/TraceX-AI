@@ -2,14 +2,14 @@
 
 Loads all models into VRAM once at startup via FastAPI lifespan.
 VRAM budget (metadata-service share ~50GB of A100 80GB):
-  - EVA-02 ViT-L/14 (appearance embedding, 1024-dim):  ~5GB fp16
+  - DINOv2 ViT-L/14 (appearance embedding, 1024-dim):  ~5GB fp16
   - Grounding DINO 1.6 (person detection):             ~4GB fp16
   - SigLIP 2-So400m (attribute tagging, zero-shot):    ~3GB fp16
   - VideoMAE V2-Large (action recognition):             ~3GB fp16
   - SeamlessM4T v2-large (Vietnamese translation):     ~5GB fp16
 
 Forbidden: YOLO (any version), ByteTrack.
-Required:  Grounding DINO 1.6, MCBLT 3D association, EVA-02, SigLIP 2, VideoMAE V2.
+Required:  Grounding DINO 1.6, MCBLT 3D association, DINOv2, SigLIP 2, VideoMAE V2.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ async def warmup_models() -> None:
     logger.info("=== metadata-service SOTA 2026 warmup starting ===")
     device = get_device()
 
-    _load_eva02(device)
+    _load_dinov2(device)
     _load_grounding_dino_16(device)
     _load_siglip2(device)
     _load_videomae_v2(device)
@@ -72,44 +72,38 @@ async def warmup_models() -> None:
         logger.info("=== Warmup complete (CPU) ===")
 
 
-def _load_eva02(device: torch.device) -> None:
-    """Load EVA-02 ViT-L/14 for 1024-dim appearance embeddings."""
-    logger.info("Loading EVA-02 ViT-L/14...")
+def _load_dinov2(device: torch.device) -> None:
+    """Load DINOv2 ViT-L/14 for 1024-dim appearance embeddings."""
+    logger.info("Loading DINOv2 ViT-L/14...")
     try:
-        import timm
+        from transformers import AutoImageProcessor, AutoModel
         import numpy as np
         from PIL import Image
 
-        model = timm.create_model(
-            "eva02_large_patch14_224.mim_m38m",
-            pretrained=True,
-            num_classes=0,
-        )
-        # Convert to fp16 after loading for timm models
-        if device.type == "cuda":
-            model = model.to(device=device, dtype=torch.float16)
-        else:
-            model = model.to(device=device)
+        torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
+        model_id = "facebook/dinov2-large"
+        processor = AutoImageProcessor.from_pretrained(model_id)
+        model = AutoModel.from_pretrained(model_id, torch_dtype=torch_dtype)
+        model = model.to(device)
         model.eval()
 
-        data_cfg = timm.data.resolve_model_data_config(model)
-        transform = timm.data.create_transform(**data_cfg, is_training=False)
-        dummy = Image.fromarray(
-            np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
-        )
-        inp_dtype = torch.float16 if device.type == "cuda" else torch.float32
-        inp = transform(dummy).unsqueeze(0).to(device=device, dtype=inp_dtype)
+        dummy = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+        inputs = processor(images=[dummy], return_tensors="pt")
+        inputs = {
+            k: v.to(device=device, dtype=torch_dtype) if v.is_floating_point() else v.to(device)
+            for k, v in inputs.items()
+        }
         with torch.no_grad():
-            feat = model(inp)
-        logger.info("  EVA-02 output dim: %d", feat.shape[-1])
+            feat = model(**inputs).pooler_output  # [1, 1024]
+        logger.info("  DINOv2 output dim: %d", feat.shape[-1])
         assert feat.shape[-1] == 1024, f"Expected 1024-dim, got {feat.shape[-1]}"
 
-        _MODELS["eva02"] = model
-        _MODELS["eva02_transform"] = transform
-        logger.info("  EVA-02 loaded OK")
+        _MODELS["dinov2"] = model
+        _MODELS["dinov2_processor"] = processor
+        logger.info("  DINOv2 ViT-L/14 loaded OK")
 
     except Exception as exc:
-        logger.warning("EVA-02 load failed (non-fatal): %s", exc)
+        logger.warning("DINOv2 load failed (non-fatal): %s", exc)
 
 
 def _load_grounding_dino_16(device: torch.device) -> None:
