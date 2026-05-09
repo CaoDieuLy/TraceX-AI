@@ -12,7 +12,7 @@ import { Sidebar } from "./Sidebar";
 
 function SidebarFallback() {
   return (
-    <aside className="flex h-screen w-[252px] shrink-0 animate-pulse border-r border-slate-700/40 bg-slate-900" />
+    <aside className="flex h-screen w-[264px] shrink-0 animate-pulse border-r border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950" />
   );
 }
 
