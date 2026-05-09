@@ -56,37 +56,12 @@ const guideCards = [
       </svg>
     ),
   },
-] as const;
+];
 
 function iconClass(tone: "blue" | "teal" | "amber") {
   if (tone === "teal") return "bg-teal-500 text-white shadow-[0_14px_26px_rgba(20,184,166,0.28)]";
   if (tone === "amber") return "bg-amber-500 text-white shadow-[0_14px_26px_rgba(245,158,11,0.28)]";
   return "bg-blue-600 text-white shadow-[0_14px_26px_rgba(37,99,235,0.28)]";
-}
-
-function featureIcon(index: number) {
-  if (index === 1) {
-    return (
-      <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M16 19c0-2.2-1.8-4-4-4s-4 1.8-4 4" />
-        <circle cx="12" cy="9" r="3" />
-        <path d="M20 19a3 3 0 0 0-3-3M18 9a2.5 2.5 0 0 0-2.5-2.5" />
-      </svg>
-    );
-  }
-  if (index === 2) {
-    return (
-      <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="m13 2-9 13h8l-1 7 9-13h-8l1-7Z" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M15 10 20 7v10l-5-3" />
-      <rect x="4" y="6" width="11" height="12" rx="2" />
-    </svg>
-  );
 }
 
 function HomeViewInner() {
@@ -96,17 +71,22 @@ function HomeViewInner() {
   const { hasSearched, isLoading, error, hasMore, results, gridPage, setGridPage, topK, loadMore, setQuery } = useSearch();
   const lastErrorRef = useRef<string | null>(null);
 
+  // History state
   const [historyItems, setHistoryItems] = useState<SearchHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [selectedHistoryClips, setSelectedHistoryClips] = useState<VideoClip[]>([]);
 
+  // Admin import state
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const isAdmin = currentUser?.role === "SUPER_ADMIN" || currentUser?.role === "ADMIN";
 
-  useEffect(() => { setCurrentUser(loadSessionUser()); }, []);
+  useEffect(() => {
+    setCurrentUser(loadSessionUser());
+  }, []);
 
+  // Results pagination
   const pageItems = useMemo(
     () => results.slice(gridPage * PAGE_SIZE, gridPage * PAGE_SIZE + PAGE_SIZE),
     [results, gridPage],
@@ -124,14 +104,24 @@ function HomeViewInner() {
     }
   }, [error, showToast]);
 
+  // Load history when view=history
   useEffect(() => {
     if (view !== "history") return;
     let cancelled = false;
     setHistoryLoading(true);
     void getSearchHistory()
-      .then((items) => { if (cancelled) return; setHistoryItems(items); })
-      .catch((err) => { if (cancelled) return; showToast(err instanceof Error ? err.message : "Không thể tải lịch sử.", "error"); })
-      .finally(() => { if (cancelled) return; setHistoryLoading(false); });
+      .then((items) => {
+        if (cancelled) return;
+        setHistoryItems(items);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        showToast(err instanceof Error ? err.message : "Không thể tải lịch sử.", "error");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setHistoryLoading(false);
+      });
     return () => { cancelled = true; };
   }, [showToast, view]);
 
@@ -153,40 +143,43 @@ function HomeViewInner() {
     }
   }, [isImporting, showToast]);
 
-  // ── History view ─────────────────────────────────────────────────────────────
+  // ── History view ────────────────────────────────────────────────────────────
   if (view === "history") {
     return (
       <div className="mx-auto w-full max-w-4xl">
         <div className="mb-8 text-center">
-          <p className="text-xs font-black uppercase tracking-[0.16em] text-blue-700 dark:text-blue-300">Search Intelligence</p>
-          <h1 className="mt-3 text-3xl font-black tracking-normal text-slate-950 dark:text-white md:text-5xl">Lịch sử truy vấn</h1>
-          <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-slate-600 dark:text-slate-300">
+          <p className="text-xs font-black uppercase tracking-[0.16em] text-blue-700">Search Intelligence</p>
+          <h1 className="mt-3 text-3xl font-black tracking-normal text-slate-950 md:text-5xl">Lịch sử truy vấn</h1>
+          <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-slate-600">
             Chỉ hiển thị 20 truy vấn gần nhất. Bấm vào một dòng để lặp lại query.
           </p>
         </div>
-        {historyLoading ? <p className="mb-4 text-sm text-slate-500 dark:text-slate-400">Đang tải lịch sử...</p> : null}
+        {historyLoading ? <p className="mb-4 text-sm text-slate-500">Đang tải lịch sử...</p> : null}
         <ul className="space-y-3">
           {historyItems.map((row) => (
             <li
               key={row.queryId}
-              className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition hover:border-blue-200 hover:shadow-[0_16px_30px_rgba(37,99,235,0.1)] dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-700"
+              className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition hover:border-blue-200 hover:shadow-[0_16px_30px_rgba(37,99,235,0.1)]"
             >
               <button
                 type="button"
                 className="w-full text-left"
                 onClick={() => {
                   setQuery(row.queryText);
-                  if (!row.videoId) { setSelectedHistoryClips([]); return; }
+                  if (!row.videoId) {
+                    setSelectedHistoryClips([]);
+                    return;
+                  }
                   void getVideoDetail(row.videoId)
                     .then((payload) => setSelectedHistoryClips(payload.segments))
                     .catch((err) => showToast(err instanceof Error ? err.message : "Không thể tải video.", "error"));
                 }}
               >
-                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                   {new Date(row.updatedAt).toLocaleString("vi-VN")}
                 </span>
-                <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 md:text-base">{row.queryText}</p>
-                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                <p className="mt-1 text-sm font-bold text-slate-900 md:text-base">{row.queryText}</p>
+                <p className="mt-2 text-xs text-slate-500">
                   {row.videoId ? `Video: ${row.videoId}` : "Chưa có video được chọn"}
                 </p>
               </button>
@@ -194,23 +187,25 @@ function HomeViewInner() {
           ))}
         </ul>
         {selectedHistoryClips.length > 0 ? (
-          <div className="mt-8"><VideoList clips={selectedHistoryClips} /></div>
+          <div className="mt-8">
+            <VideoList clips={selectedHistoryClips} />
+          </div>
         ) : null}
       </div>
     );
   }
 
-  // ── Pre-search guide ──────────────────────────────────────────────────────────
+  // ── Pre-search guide ────────────────────────────────────────────────────────
   if (!hasSearched) {
     return (
       <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col items-center pb-24 md:pb-0">
 
         {/* Admin import panel */}
         {isAdmin ? (
-          <div className="mb-6 flex w-full items-center justify-between gap-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-3 dark:border-emerald-500/30 dark:bg-emerald-500/10">
+          <div className="mb-6 flex w-full items-center justify-between gap-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-3">
             <div>
-              <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">Import video mới</p>
-              <p className="text-xs text-emerald-600 dark:text-emerald-400">Di chuyển từ Drive → Storage và chạy pipeline</p>
+              <p className="text-sm font-semibold text-emerald-800">Import video mới</p>
+              <p className="text-xs text-emerald-600">Di chuyển từ Drive → Storage và chạy pipeline</p>
             </div>
             <button
               type="button"
@@ -219,8 +214,8 @@ function HomeViewInner() {
               className={[
                 "shrink-0 rounded-xl border px-4 py-2 text-sm font-medium transition",
                 isImporting
-                  ? "cursor-not-allowed border-emerald-200 bg-emerald-100 text-emerald-400 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-500"
-                  : "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/50 dark:bg-transparent dark:text-emerald-300 dark:hover:bg-emerald-500/10",
+                  ? "cursor-not-allowed border-emerald-200 bg-emerald-100 text-emerald-400"
+                  : "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-100",
               ].join(" ")}
             >
               {isImporting ? "Đang xử lý..." : "Import Videos"}
@@ -231,14 +226,14 @@ function HomeViewInner() {
           <div className={[
             "mb-4 w-full rounded-xl border px-4 py-3 text-sm",
             importMessage.toLowerCase().includes("thất bại") || importMessage.toLowerCase().includes("error")
-              ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300"
-              : "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300",
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-emerald-200 bg-emerald-50 text-emerald-700",
           ].join(" ")}>
             {importMessage}
           </div>
         ) : null}
 
-        <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-xs font-black uppercase tracking-wide text-blue-700 shadow-[0_8px_18px_rgba(37,99,235,0.12)] dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300">
+        <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-xs font-black uppercase tracking-wide text-blue-700 shadow-[0_8px_18px_rgba(37,99,235,0.12)]">
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 2v5" /><path d="M12 17v5" />
             <path d="M2 12h5" /><path d="M17 12h5" />
@@ -249,10 +244,9 @@ function HomeViewInner() {
         </div>
 
         <section className="mt-8 w-full text-center">
-          <h1 className="text-4xl font-black tracking-normal text-slate-950 dark:text-white md:text-6xl">{HOME_GUIDE_TITLE}</h1>
-          <p className="mx-auto mt-7 max-w-3xl text-lg leading-8 text-slate-600 dark:text-slate-300">
-            Tập trung mô tả ngắn gọn và chính xác để hệ thống phân tích nhanh hơn, đối chiếu đặc điểm hiệu quả hơn và
-            trả về kết quả phù hợp.
+          <h1 className="text-4xl font-black tracking-normal text-slate-950 md:text-6xl">{HOME_GUIDE_TITLE}</h1>
+          <p className="mx-auto mt-7 max-w-3xl text-lg leading-8 text-slate-600">
+            Tập trung mô tả ngắn gọn và chính xác để hệ thống phân tích nhanh hơn và trả về kết quả phù hợp.
           </p>
         </section>
 
@@ -260,18 +254,18 @@ function HomeViewInner() {
           {guideCards.map((card, index) => (
             <article
               key={card.title}
-              className="relative min-h-[236px] overflow-visible rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-[0_12px_28px_rgba(15,23,42,0.05)] transition duration-200 hover:-translate-y-1 hover:border-blue-200 hover:shadow-[0_18px_36px_rgba(15,23,42,0.1)] dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-700"
+              className="relative min-h-[236px] overflow-visible rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-[0_12px_28px_rgba(15,23,42,0.05)] transition duration-200 hover:-translate-y-1 hover:border-blue-200 hover:shadow-[0_18px_36px_rgba(15,23,42,0.1)]"
             >
-              <span className="pointer-events-none absolute right-5 top-1 text-6xl font-black leading-none text-slate-50 dark:text-slate-800/70">
+              <span className="pointer-events-none absolute right-5 top-1 text-6xl font-black leading-none text-slate-50">
                 {String(index + 1).padStart(2, "0")}
               </span>
               <div className={["relative flex h-14 w-14 items-center justify-center rounded-2xl", iconClass(card.tone)].join(" ")}>
                 {card.icon}
               </div>
-              <h2 className="relative mt-7 text-xl font-black tracking-normal text-slate-950 dark:text-white">{card.title}</h2>
-              <p className="relative mt-4 text-sm leading-7 text-slate-600 dark:text-slate-300">{card.body}</p>
+              <h2 className="relative mt-7 text-xl font-black tracking-normal text-slate-950">{card.title}</h2>
+              <p className="relative mt-4 text-sm leading-7 text-slate-600">{card.body}</p>
               {index < guideCards.length - 1 ? (
-                <span className="absolute right-[-13px] top-1/2 hidden h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-500 md:flex">
+                <span className="absolute right-[-13px] top-1/2 hidden h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 shadow-sm md:flex">
                   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M5 12h14" /><path d="m12 5 7 7-7 7" />
                   </svg>
@@ -286,40 +280,32 @@ function HomeViewInner() {
             <article
               key={feature.title}
               className={[
-                "flex min-h-[116px] items-center gap-4 rounded-2xl border bg-white p-5 text-left shadow-[0_12px_28px_rgba(15,23,42,0.06)] transition-colors dark:bg-slate-900",
-                index === 0
-                  ? "border-blue-300 shadow-[0_14px_30px_rgba(37,99,235,0.14)] dark:border-blue-500/50"
-                  : "border-slate-200 dark:border-slate-800",
+                "flex min-h-[116px] items-center gap-4 rounded-2xl border bg-white p-5 text-left shadow-[0_12px_28px_rgba(15,23,42,0.06)]",
+                index === 0 ? "border-blue-300 shadow-[0_14px_30px_rgba(37,99,235,0.14)]" : "border-slate-200",
               ].join(" ")}
             >
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300">
-                {featureIcon(index)}
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2">
+                  {index === 0 ? <><path d="M15 10 20 7v10l-5-3" /><rect x="4" y="6" width="11" height="12" rx="2" /></> : null}
+                  {index === 1 ? <><path d="M16 19c0-2.2-1.8-4-4-4s-4 1.8-4 4" /><circle cx="12" cy="9" r="3" /></> : null}
+                  {index === 2 ? <path d="m13 2-9 13h8l-1 7 9-13h-8l1-7Z" /> : null}
+                </svg>
               </div>
               <div>
-                <h2 className="text-base font-black tracking-normal text-slate-950 dark:text-white">{feature.title}</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">{feature.body}</p>
+                <h2 className="text-base font-black tracking-normal text-slate-950">{feature.title}</h2>
+                <p className="mt-2 text-sm leading-6 text-slate-600">{feature.body}</p>
               </div>
             </article>
           ))}
         </section>
 
-        <section className="mt-12 w-full rounded-3xl border border-slate-200 bg-white p-6 text-left shadow-[0_14px_34px_rgba(15,23,42,0.08)] dark:border-slate-800 dark:bg-slate-900 md:p-8">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300">
-              <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2v5" /><path d="M12 17v5" />
-                <path d="M2 12h5" /><path d="M17 12h5" />
-                <path d="m4.9 4.9 3.5 3.5" /><path d="m15.6 15.6 3.5 3.5" />
-                <path d="m19.1 4.9-3.5 3.5" /><path d="m8.4 15.6-3.5 3.5" />
-              </svg>
-            </div>
-            <h2 className="text-xl font-black tracking-normal text-slate-950 dark:text-white">Các tiêu chí tìm kiếm được hỗ trợ</h2>
-          </div>
+        <section className="mt-12 w-full rounded-3xl border border-slate-200 bg-white p-6 text-left shadow-[0_14px_34px_rgba(15,23,42,0.08)] md:p-8">
+          <h2 className="text-xl font-black tracking-normal text-slate-950">Các tiêu chí tìm kiếm được hỗ trợ</h2>
           <div className="mt-7 flex flex-wrap gap-3">
             {HOME_GUIDE_SUPPORTED_CRITERIA.map((criterion) => (
               <span
                 key={criterion}
-                className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+                className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm"
               >
                 {criterion}
               </span>
@@ -327,13 +313,13 @@ function HomeViewInner() {
           </div>
         </section>
 
-        <section className="mt-6 w-full rounded-3xl border border-amber-200 bg-amber-50/70 p-6 text-left shadow-[0_14px_34px_rgba(146,64,14,0.08)] dark:border-amber-500/30 dark:bg-amber-500/10 md:p-8">
-          <h2 className="text-xl font-black tracking-normal text-slate-950 dark:text-white">Ví dụ chưa hỗ trợ</h2>
+        <section className="mt-6 w-full rounded-3xl border border-amber-200 bg-amber-50/70 p-6 text-left shadow-[0_14px_34px_rgba(146,64,14,0.08)] md:p-8">
+          <h2 className="text-xl font-black tracking-normal text-slate-950">Ví dụ chưa hỗ trợ</h2>
           <div className="mt-5 grid gap-3 md:grid-cols-2">
             {HOME_GUIDE_UNSUPPORTED_EXAMPLES.map((example) => (
               <p
                 key={example}
-                className="rounded-2xl border border-amber-200 bg-white px-4 py-3 text-sm font-semibold leading-6 text-slate-700 dark:border-amber-500/30 dark:bg-slate-950 dark:text-slate-200"
+                className="rounded-2xl border border-amber-200 bg-white px-4 py-3 text-sm font-semibold leading-6 text-slate-700"
               >
                 {example}
               </p>
@@ -344,41 +330,47 @@ function HomeViewInner() {
     );
   }
 
-  // ── Search results ────────────────────────────────────────────────────────────
+  // ── Search results ──────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-8">
       {isLoading ? (
-        <p className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-900 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
+        <p className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-900">
           Đang tải kết quả...
         </p>
       ) : null}
       {!isLoading && !error && results.length === 0 ? (
-        <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+        <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
           Không tìm thấy kết quả phù hợp.
         </p>
       ) : null}
       <VideoGrid items={pageItems} />
 
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.06)]">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
+          <p className="text-sm font-bold text-slate-700">
             {isLastPage ? "Hết kết quả" : `Top ${startRank}–${endRank}`}
           </p>
           <button
             type="button"
             disabled={isLastPage || isLoading}
             onClick={async () => {
-              if (!isLastLoadedPage) { setGridPage(gridPage + 1); return; }
-              if (hasMore) { const added = await loadMore(); if (added) setGridPage(gridPage + 1); }
+              if (!isLastLoadedPage) {
+                setGridPage(gridPage + 1);
+                return;
+              }
+              if (hasMore) {
+                const added = await loadMore();
+                if (added) setGridPage(gridPage + 1);
+              }
             }}
-            className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-bold text-white shadow-[0_12px_28px_rgba(15,23,42,0.22)] transition duration-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-blue-600 dark:hover:bg-blue-500"
+            className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-bold text-white shadow-[0_12px_28px_rgba(15,23,42,0.22)] transition duration-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Tiếp theo
           </button>
         </div>
       </div>
 
-      <p className="text-center text-xs font-semibold tracking-wide text-slate-500 dark:text-slate-400">
+      <p className="text-center text-xs font-semibold tracking-wide text-slate-500">
         Mỗi trang {PAGE_SIZE} kết quả · Top n hiện tại = {topK}
       </p>
     </div>
@@ -387,7 +379,7 @@ function HomeViewInner() {
 
 export function HomeView() {
   return (
-    <Suspense fallback={<div className="flex flex-1 items-center justify-center py-24 text-sm text-ink-secondary dark:text-slate-400">Đang tải...</div>}>
+    <Suspense fallback={<div className="flex flex-1 items-center justify-center py-24 text-sm text-ink-secondary">Đang tải...</div>}>
       <HomeViewInner />
     </Suspense>
   );
