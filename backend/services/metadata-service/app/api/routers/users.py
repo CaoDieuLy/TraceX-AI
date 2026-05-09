@@ -95,3 +95,33 @@ def admin_patch_user(
         return update_user_access(session, target, role=payload.role, is_active=payload.is_active)
     finally:
         session.close()
+
+
+@router.get("/{user_id}/queries")
+def admin_get_user_queries(
+    user_id: int,
+    session: Session = Depends(get_session),
+    _admin: User = Depends(require_admin),
+) -> dict:
+    from sqlalchemy import select as sa_select
+    from shared.models import QueryHistory
+    try:
+        rows = session.scalars(
+            sa_select(QueryHistory)
+            .where(QueryHistory.user_id == user_id)
+            .order_by(QueryHistory.created_at.desc())
+        ).all()
+        items = [
+            {
+                "query_id": r.query_id,
+                "query_text": r.query_text,
+                "video_id": r.video_id,
+                "storage_path": None,
+                "created_at": r.created_at.isoformat(),
+                "updated_at": r.updated_at.isoformat(),
+            }
+            for r in rows
+        ]
+        return {"count": len(items), "items": items}
+    finally:
+        session.close()

@@ -1,3 +1,3 @@
-export { getApiBaseUrl, searchVideos, getVideoDetail, listVideos, triggerIngest, getIngestStats, triggerFullPipeline } from "./client";
+export { getApiBaseUrl, searchVideos, getVideoDetail, listVideos, triggerIngest, getIngestStats, triggerFullPipeline, getSearchHistory, selectHistoryVideo, getAdminUserQueries } from "./client";
 export { parseJsonOrThrow, readApiErrorMessage, mapBackendErrorMessage } from "./errors";
-export type { SearchFilters, IngestResponse, IngestStatsResponse } from "./client";
+export type { SearchFilters, IngestResponse, IngestStatsResponse, SearchHistoryItem } from "./client";

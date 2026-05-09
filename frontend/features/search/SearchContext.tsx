@@ -13,7 +13,14 @@ import {
 import { GRID_BATCH_SIZE } from "@/lib/config";
 import type { VideoItem } from "@/lib/types";
 import { mapLocationIdsToCameraIds } from "@/lib/config";
-import { searchVideos } from "@/lib/api";
+import { searchVideos, selectHistoryVideo } from "@/lib/api";
+
+export type SearchImageState = {
+  name: string;
+  size: number;
+  type: string;
+  previewUrl: string;
+};
 
 type SearchFiltersState = {
   locationIds: string[];
@@ -24,6 +31,8 @@ type SearchFiltersState = {
 type SearchContextValue = {
   query: string;
   setQuery: (value: string) => void;
+  image: SearchImageState | null;
+  setImage: (value: SearchImageState | null) => void;
   topK: number;
   setTopK: (value: number) => void;
   hasSearched: boolean;
@@ -48,7 +57,8 @@ const SearchContext = createContext<SearchContextValue | null>(null);
 
 export function SearchProvider({ children }: { children: ReactNode }) {
   const [query, setQuery] = useState("");
-  const [topK, setTopK] = useState(50);
+  const [image, setImageState] = useState<SearchImageState | null>(null);
+  const [topK, setTopKState] = useState(50);
   const [hasSearched, setHasSearched] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +69,17 @@ export function SearchProvider({ children }: { children: ReactNode }) {
   const [timeFrom, setTimeFrom] = useState("");
   const [timeTo, setTimeTo] = useState("");
   const [filterError, setFilterError] = useState<string | null>(null);
+
+  const setTopK = useCallback((value: number) => {
+    setTopKState(value);
+    if (hasSearched && query.trim()) {
+      void selectHistoryVideo(query, value - 1).catch(() => { /* no-op */ });
+    }
+  }, [hasSearched, query]);
+
+  const setImage = useCallback((value: SearchImageState | null) => {
+    setImageState(value);
+  }, []);
 
   const filters = useMemo(
     () => ({ locationIds, timeFrom, timeTo }),
@@ -202,10 +223,13 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topK, hasSearched]);
 
+
   const value = useMemo(
     () => ({
       query,
       setQuery,
+      image,
+      setImage,
       topK,
       setTopK,
       hasSearched,
@@ -227,6 +251,8 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     }),
     [
       query,
+      image,
+      setImage,
       topK,
       hasSearched,
       isLoading,

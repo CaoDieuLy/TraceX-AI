@@ -10,6 +10,29 @@ type SearchApiResponse = {
   }>;
 };
 
+type SearchHistoryApiItem = {
+  query_id: string;
+  query_text: string;
+  video_id: string | null;
+  storage_path: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type SearchHistoryApiResponse = {
+  count: number;
+  items: SearchHistoryApiItem[];
+};
+
+export type SearchHistoryItem = {
+  queryId: string;
+  queryText: string;
+  videoId: string | null;
+  storagePath: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type VideoDetailApiResponse = {
   id: string;
   segments: Array<{
@@ -103,16 +126,17 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return parseJsonOrThrow<T>(response);
 }
 
-export async function searchVideos(query: string, topK: number, offset = 0, filters?: SearchFilters): Promise<VideoItem[]> {
+export async function searchVideos(query: string, topK: number, offset = 0, filters?: SearchFilters, persistQuery = false): Promise<VideoItem[]> {
   const apiBaseUrl = getApiBaseUrl();
   const payloadBody: {
     query: string;
     top_k: number;
     offset: number;
+    persist_query: boolean;
     camera_ids?: string[];
     time_from?: string;
     time_to?: string;
-  } = { query, top_k: topK, offset };
+  } = { query, top_k: topK, offset, persist_query: persistQuery };
   if (filters?.camera_ids?.length) {
     payloadBody.camera_ids = filters.camera_ids;
   }
@@ -223,4 +247,35 @@ export async function triggerFullPipeline(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+export async function getSearchHistory(): Promise<SearchHistoryItem[]> {
+  const payload = await apiFetch<SearchHistoryApiResponse>("/history");
+  return payload.items.map((item) => ({
+    queryId: item.query_id,
+    queryText: item.query_text,
+    videoId: item.video_id,
+    storagePath: item.storage_path,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  }));
+}
+
+export async function selectHistoryVideo(query: string, selectedIndex: number): Promise<void> {
+  await apiFetch<Record<string, unknown>>("/history/select", {
+    method: "POST",
+    body: JSON.stringify({ query, selectedIndex }),
+  });
+}
+
+export async function getAdminUserQueries(userId: number): Promise<SearchHistoryItem[]> {
+  const payload = await apiFetch<SearchHistoryApiResponse>(`/admin/users/${userId}/queries`);
+  return payload.items.map((item) => ({
+    queryId: item.query_id,
+    queryText: item.query_text,
+    videoId: item.video_id,
+    storagePath: item.storage_path,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  }));
 }

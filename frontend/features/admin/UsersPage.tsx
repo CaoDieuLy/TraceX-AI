@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { loadAccessToken } from "@/lib/auth";
@@ -132,7 +133,7 @@ export function UsersPage() {
   }
 
   async function handleUpdateUser(userId: number, patch: { role?: UserItem["role"]; is_active?: boolean }) {
-    const response = await authFetch(`/api/users/${userId}`, {
+    const response = await authFetch(`/users/${userId}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
@@ -243,6 +244,12 @@ export function UsersPage() {
                   >
                     {user.is_active ? "Disable" : "Enable"}
                   </button>
+                  <Link
+                    href={`/admin/users/${user.id}/queries`}
+                    className="rounded-lg border border-surface-muted px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface"
+                  >
+                    Queries
+                  </Link>
                 </div>
               </div>
             );

@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 os.environ.setdefault("HF_TOKEN", os.environ.get("HF_TOKEN", ""))
 os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
-from .api.routers import auth, search, users, videos, ingest
+from .api.routers import auth, search, users, videos, ingest, history
 from .api.routers.candidates import router as candidates_router
 from .api.routers.finetune import router as finetune_router
 from .api.routers.video_process import router as video_process_router
@@ -101,6 +101,9 @@ app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(video_process_router, prefix="/api/v1/video", tags=["video"])
 app.include_router(ingest.router, prefix="/api/v1/ingest", tags=["ingest"])
 app.include_router(finetune_router, prefix="/api/v1/finetune", tags=["finetune"])
+app.include_router(history.router, prefix="/api/v1/history", tags=["history"])
+# /api/v1/admin/users/{user_id}/queries — admin view of per-user query history
+app.include_router(users.router, prefix="/api/v1/admin/users", tags=["admin"])
 
 # Serve crop/preview images saved during video processing
 _CROPS_DIR = Path("/workspace/storage/crops")

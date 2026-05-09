@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 
 import { clearSession, loadAccessToken, loadSessionUser, type AuthUser } from "@/lib/auth";
 import { getApiBaseUrl } from "@/lib/api";
@@ -43,20 +43,60 @@ export function SettingsPage() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
 
   const isAdmin = useMemo(
     () => ["ADMIN", "SUPER_ADMIN"].includes((me?.role || sessionUser?.role || "").toUpperCase()),
     [me?.role, sessionUser?.role],
   );
 
-  async function authFetch(path: string): Promise<Response> {
+  async function authFetch(path: string, init?: RequestInit): Promise<Response> {
     const token = loadAccessToken();
     return fetch(`${getApiBaseUrl()}${path}`, {
+      ...init,
       headers: {
+        "Content-Type": "application/json",
         Authorization: `Bearer ${token ?? ""}`,
+        ...(init?.headers ?? {}),
       },
       cache: "no-store",
     });
+  }
+
+  async function handleChangePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentPassword.trim() || !newPassword.trim() || !confirmPassword.trim()) {
+      showToast("Vui lòng nhập đầy đủ thông tin.", "error");
+      return;
+    }
+    if (newPassword.length < 8) {
+      showToast("Mật khẩu mới phải có ít nhất 8 ký tự.", "error");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      showToast("Xác nhận mật khẩu không khớp.", "error");
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      const res = await authFetch("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      });
+      if (!res.ok) throw new Error(await readApiErrorMessage(res));
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      showToast("Đổi mật khẩu thành công.", "success");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Không thể đổi mật khẩu.";
+      showToast(mapBackendErrorMessage(message), "error");
+    } finally {
+      setChangingPassword(false);
+    }
   }
 
   async function loadSettingsData() {
@@ -154,6 +194,40 @@ export function SettingsPage() {
             </button>
           </div>
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">
+        <p className="text-sm font-semibold text-ink">Đổi mật khẩu</p>
+        <form className="mt-3 flex flex-col gap-3" onSubmit={handleChangePassword}>
+          <input
+            type="password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            placeholder="Mật khẩu hiện tại"
+            className="rounded-xl border border-surface-muted px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+          <input
+            type="password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            placeholder="Mật khẩu mới (tối thiểu 8 ký tự)"
+            className="rounded-xl border border-surface-muted px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+          <input
+            type="password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder="Xác nhận mật khẩu mới"
+            className="rounded-xl border border-surface-muted px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+          <button
+            type="submit"
+            disabled={changingPassword}
+            className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {changingPassword ? "Đang xử lý..." : "Đổi mật khẩu"}
+          </button>
+        </form>
       </section>
 
       <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">

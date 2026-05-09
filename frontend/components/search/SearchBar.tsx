@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { LOCATION_OPTIONS, summarizeSelectedLocations } from "@/lib/config";
 import { useSearch } from "@/features/search/SearchContext";
@@ -13,6 +13,8 @@ export function SearchBar({ className = "" }: SearchBarProps) {
   const {
     query,
     setQuery,
+    image,
+    setImage,
     runSearch,
     isLoading,
     filters,
@@ -24,7 +26,9 @@ export function SearchBar({ className = "" }: SearchBarProps) {
   } = useSearch();
   const [locationOpen, setLocationOpen] = useState(false);
   const [locationKeyword, setLocationKeyword] = useState("");
+  const [imageError, setImageError] = useState<string | null>(null);
   const locationRef = useRef<HTMLDivElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     function onClickOutside(event: MouseEvent) {
@@ -36,6 +40,28 @@ export function SearchBar({ className = "" }: SearchBarProps) {
     document.addEventListener("mousedown", onClickOutside);
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
+    };
+  }, [image]);
+
+  function handleImageChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setImageError("Chỉ hỗ trợ file ảnh.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setImageError("Ảnh không được vượt quá 5MB.");
+      return;
+    }
+    if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
+    setImageError(null);
+    setImage({ name: file.name, size: file.size, type: file.type, previewUrl: URL.createObjectURL(file) });
+  }
 
   const filteredLocations = useMemo(() => {
     const keyword = locationKeyword.trim().toLowerCase();
@@ -78,6 +104,35 @@ export function SearchBar({ className = "" }: SearchBarProps) {
           className="min-h-[52px] flex-1 rounded-2xl border border-slate-200/90 bg-gradient-to-br from-white/95 to-blue-50/70 px-5 text-base font-medium text-slate-900 shadow-[0_12px_30px_rgba(15,23,42,0.08)] outline-none ring-sky-300/35 transition-[border-color,box-shadow] duration-200 placeholder:text-slate-400 focus:border-sky-400 focus:ring-2"
           aria-label="Ô tìm kiếm"
         />
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleImageChange}
+        />
+        <button
+          type="button"
+          onClick={() => imageInputRef.current?.click()}
+          title="Tải ảnh mẫu (tối đa 5MB)"
+          className="min-h-[52px] shrink-0 cursor-pointer rounded-2xl border border-slate-200/90 bg-white/85 px-4 text-sm font-medium text-slate-700 shadow-[0_12px_30px_rgba(15,23,42,0.08)] transition duration-200 hover:border-sky-300 hover:text-slate-900"
+        >
+          {image ? (
+            <span className="flex items-center gap-1.5">
+              <svg viewBox="0 0 24 24" className="h-4 w-4 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M20 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2Z" />
+                <circle cx="12" cy="13" r="3" />
+              </svg>
+              {image.name.length > 14 ? image.name.slice(0, 12) + "…" : image.name}
+            </span>
+          ) : (
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M3 15l6-6 4 4 2-2 6 6" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+            </svg>
+          )}
+        </button>
         <button
           type="submit"
           disabled={isLoading}
@@ -158,6 +213,7 @@ export function SearchBar({ className = "" }: SearchBarProps) {
         </button>
       </div>
       {filterError ? <p className="text-xs font-medium text-red-600">{filterError}</p> : null}
+      {imageError ? <p className="text-xs font-medium text-red-600">{imageError}</p> : null}
     </form>
   );
 }
