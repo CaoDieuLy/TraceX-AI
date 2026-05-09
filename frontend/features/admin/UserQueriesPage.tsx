@@ -66,36 +66,36 @@ export function UserQueriesPage({ userId }: UserQueriesPageProps) {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_14px_34px_rgba(0,0,0,0.28)]">
+      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold text-ink dark:text-white">Query của user #{userId}</h1>
-            <p className="mt-1 text-sm text-ink-secondary dark:text-slate-300">
+            <h1 className="text-xl font-semibold text-ink">Query của user #{userId}</h1>
+            <p className="mt-1 text-sm text-ink-secondary">
               {currentUser ? `Đăng nhập bởi ${currentUser.email}` : "Đang kiểm tra quyền truy cập..."}
             </p>
           </div>
           <Link
             href="/admin/users"
-            className="rounded-xl border border-surface-muted bg-white px-4 py-2 text-sm font-medium text-ink-secondary shadow-card transition hover:border-accent hover:text-ink dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300"
+            className="rounded-xl border border-surface-muted bg-white px-4 py-2 text-sm font-medium text-ink-secondary shadow-card transition hover:border-accent hover:text-ink"
           >
             Quay lại
           </Link>
         </div>
       </section>
 
-      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_14px_34px_rgba(0,0,0,0.28)]">
-        {loading ? <p className="text-sm text-ink-secondary dark:text-slate-300">Đang tải query...</p> : null}
+      <section className="rounded-2xl border border-surface-muted bg-white p-5 shadow-card">
+        {loading ? <p className="text-sm text-ink-secondary">Đang tải query...</p> : null}
         {!loading && items.length === 0 ? (
-          <p className="text-sm text-ink-secondary dark:text-slate-300">Chưa có query nào.</p>
+          <p className="text-sm text-ink-secondary">Chưa có query nào.</p>
         ) : null}
         <div className="space-y-3">
           {items.map((item) => (
             <div
               key={item.queryId}
-              className="rounded-xl border border-surface-muted bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-950"
+              className="rounded-xl border border-surface-muted bg-white px-4 py-3"
             >
-              <p className="text-sm font-semibold text-ink dark:text-slate-100">{item.queryText}</p>
-              <p className="mt-1 text-xs text-ink-secondary dark:text-slate-400">
+              <p className="text-sm font-semibold text-ink">{item.queryText}</p>
+              <p className="mt-1 text-xs text-ink-secondary">
                 {new Date(item.createdAt).toLocaleString("vi-VN")}
               </p>
             </div>
