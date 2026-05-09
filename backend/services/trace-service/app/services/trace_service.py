@@ -3,12 +3,37 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
+
+_CAM_NEIGHBOR_RADIUS = 10
+
+
+def _extract_cam_num(cam_id: str) -> int | None:
+    m = re.search(r'\d+', cam_id or "")
+    return int(m.group()) if m else None
+
+
+def _neighbor_cameras(primary_cam: str, radius: int = _CAM_NEIGHBOR_RADIUS) -> list[str]:
+    """Return cam IDs within ±radius of primary_cam by numeric suffix.
+
+    cam_20, radius=10 → [cam_10, cam_11, ..., cam_30]
+    """
+    num = _extract_cam_num(primary_cam)
+    if num is None:
+        return [primary_cam]
+    digits = re.search(r'\d+', primary_cam).group()
+    prefix = primary_cam[: primary_cam.index(digits)]
+    width = len(digits)
+    return [
+        f"{prefix}{i:0{width}d}"
+        for i in range(max(1, num - radius), num + radius + 1)
+    ]
 
 _LOG_PATH = "/teamspace/studios/this_studio/TraceX-AI/.cursor/debug-a94b91.log"
 
@@ -61,57 +86,63 @@ class TraceService:
     ) -> list[Tracklet]:
         """Get all tracklets for a candidate within time window.
 
-        Args:
-            candidate_id: The candidate UUID
-            time_window_start: Start of time window
-            time_window_end: End of time window
-
-        Returns:
-            List of tracklets sorted by video timestamp
+        Strategy:
+        1. Try query_candidate_tracklets join table (populated by advanced re-ID flows).
+        2. Fallback: use primary_camera_id of the candidate → expand to ±_CAM_NEIGHBOR_RADIUS
+           neighbouring cameras → return all tracklets in that range.
+           This covers the case where person found in cam_20 can realistically
+           appear in cam_10…cam_30.
         """
-        # Get candidate to check for representative tracklet
         candidate = self.session.get(QueryCandidate, candidate_id)
         if not candidate:
             return []
 
-        # Query tracklets through join table
-        query = (
+        # ── 1. Try join table ──────────────────────────────────────────────
+        via_join = (
             self.session.query(Tracklet)
             .join(
                 QueryCandidateTracklet,
                 QueryCandidateTracklet.tracklet_id == Tracklet.tracklet_id,
             )
             .filter(QueryCandidateTracklet.candidate_id == candidate_id)
-            .join(Tracklet.video)
-            .filter(
-                and_(
-                    Tracklet.start_time >= 0,
-                    Tracklet.end_time >= Tracklet.start_time,
-                )
-            )
             .order_by(Tracklet.start_time.asc())
+            .all()
         )
 
-        tracklets = query.all()
+        if via_join:
+            tracklets = via_join
+        else:
+            # ── 2. Fallback: neighbor-camera expansion ─────────────────────
+            primary_cam = candidate.primary_camera_id or ""
+            neighbor_cams = _neighbor_cameras(primary_cam)
+            logger.info(
+                "Trace expand: candidate %s primary_cam=%s → %d neighbour cams %s…%s",
+                candidate_id, primary_cam, len(neighbor_cams),
+                neighbor_cams[0], neighbor_cams[-1],
+            )
+            tracklets = (
+                self.session.query(Tracklet)
+                .filter(Tracklet.camera_id.in_(neighbor_cams))
+                .order_by(Tracklet.camera_id.asc(), Tracklet.start_time.asc())
+                .all()
+            )
 
-        _debug_log("B", "pre-fix",
-            "trace_service.py:95",
-            "get_candidate_tracklets raw query result",
-            {"candidate_id": str(candidate_id), "raw_count": len(tracklets),
-             "first_tid": str(tracklets[0].tracklet_id) if tracklets else None})
-        # Filter by time window (based on video created_at + start_time)
-        filtered_tracklets = []
+        # ── Time-window filter ─────────────────────────────────────────────
+        # Use recorded_at (actual recording time from filename) when available,
+        # fall back to created_at (ingest time).
+        filtered: list[Tracklet] = []
         for t in tracklets:
             video = t.video
             if video:
-                tracklet_start = video.created_at.timestamp() + (t.start_time or 0)
-                tracklet_end = video.created_at.timestamp() + (t.end_time or 0)
+                base_ts = (video.recorded_at or video.created_at).timestamp()
+                t_start = base_ts + (t.start_time or 0)
+                t_end = base_ts + (t.end_time or 0)
+                if t_start <= time_window_end.timestamp() and t_end >= time_window_start.timestamp():
+                    filtered.append(t)
+            else:
+                filtered.append(t)  # no video metadata: include anyway
 
-                # Check if tracklet overlaps with time window
-                if tracklet_start <= time_window_end.timestamp() and tracklet_end >= time_window_start.timestamp():
-                    filtered_tracklets.append(t)
-
-        return filtered_tracklets
+        return filtered
 
     def build_trace_segments(
         self,

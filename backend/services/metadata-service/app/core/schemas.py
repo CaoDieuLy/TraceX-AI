@@ -123,6 +123,7 @@ class CandidateResponse(BaseModel):
     appearance_embedding_vector: list[float] = Field(default_factory=list)
     semantic_attributes: list[str] = Field(default_factory=list)
     embedding_vector: list[float] = Field(default_factory=list)
+    siglip_embedding: list[float] = Field(default_factory=list)
     visibility_scores: dict[str, Any] = Field(default_factory=dict)
     world_position: dict[str, Any] | None = None
     score: float | None = None

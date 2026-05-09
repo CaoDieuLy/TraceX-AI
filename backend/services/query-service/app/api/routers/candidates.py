@@ -30,11 +30,42 @@ class SearchRequest(BaseModel):
     camera_ids: list[str] | None = None
     time_from: str | None = None
     time_to: str | None = None
+    query_image_url: str | None = None  # URL of uploaded query image (for history display)
 
 from shared.database import SessionLocal
-from shared.models import PersonCandidate, QueryCandidate, QueryHistory, Tracklet
+from shared.models import PersonCandidate, QueryCandidate, QueryHistory, Tracklet, Video
 from app.services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
+from sqlalchemy.orm import joinedload
+import re
+
+_CAM_NEIGHBOR_RADIUS = 10
+
+
+def _extract_cam_num(cam_id: str) -> int | None:
+    m = re.search(r'\d+', cam_id or "")
+    return int(m.group()) if m else None
+
+
+def _expand_camera_range(camera_ids: list[str], radius: int = _CAM_NEIGHBOR_RADIUS) -> list[str]:
+    """Expand camera_ids to include all cams within ±radius of each cam number.
+
+    cam_20 with radius=10 → cam_10 … cam_30.
+    Cams with non-numeric IDs are kept as-is without expansion.
+    """
+    expanded: set[str] = set()
+    for cam_id in camera_ids:
+        num = _extract_cam_num(cam_id)
+        if num is None:
+            expanded.add(cam_id)
+            continue
+        # preserve prefix ("cam_") and zero-padding width ("01" → width=2)
+        digits = re.search(r'\d+', cam_id).group()
+        prefix = cam_id[: cam_id.index(digits)]
+        width = len(digits)
+        for i in range(max(1, num - radius), num + radius + 1):
+            expanded.add(f"{prefix}{i:0{width}d}")
+    return list(expanded)
 
 _LOG_PATH = "/teamspace/studios/this_studio/TraceX-AI/.cursor/debug-a94b91.log"
 
@@ -116,6 +147,20 @@ def _post_to_trace_service(path: str, payload: dict[str, Any], timeout: float = 
     )
 
 
+def _parse_dt(value: str | None):
+    """Parse ISO datetime string to timezone-aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            from datetime import timezone as _tz
+            dt = dt.replace(tzinfo=_tz.utc)
+        return dt
+    except ValueError:
+        return None
+
+
 def _local_prefilter(
     session: Session,
     query_text: str,
@@ -124,15 +169,39 @@ def _local_prefilter(
     time_to: str | None = None,
     limit: int = 200,
 ) -> list[Tracklet]:
-    """Pre-filter tracklets using text matching against appearance_summary."""
+    """Pre-filter tracklets using camera, time range, and text matching."""
     cleaned_query = (query_text or "").strip().lower()
 
-    statement = select(Tracklet).order_by(Tracklet.created_at.desc(), Tracklet.id.desc())
+    # Join Video so we can filter by absolute recording timestamp.
+    # Absolute tracklet time = video.created_at + start_time (seconds).
+    statement = (
+        select(Tracklet)
+        .join(Video, Tracklet.video_id == Video.video_id)
+        .options(joinedload(Tracklet.embedding))
+        .order_by(Tracklet.created_at.desc(), Tracklet.id.desc())
+    )
 
     if camera_ids:
         cam_lower = [c.lower().strip() for c in camera_ids if c.strip()]
         if cam_lower:
             statement = statement.where(func.lower(Tracklet.camera_id).in_(cam_lower))
+
+    tf = _parse_dt(time_from)
+    tt = _parse_dt(time_to)
+    if tf:
+        # Tracklet still active at time_from:
+        # video.recorded_at + end_time seconds >= time_from
+        statement = statement.where(
+            text("videos.recorded_at + (tracklets.end_time * interval '1 second') >= :tf")
+            .bindparams(tf=tf)
+        )
+    if tt:
+        # Tracklet started before time_to:
+        # video.recorded_at + start_time seconds <= time_to
+        statement = statement.where(
+            text("videos.recorded_at + (tracklets.start_time * interval '1 second') <= :tt")
+            .bindparams(tt=tt)
+        )
 
     rows = session.scalars(statement).all()
     if not rows:
@@ -171,11 +240,16 @@ def _local_prefilter(
 
 
 def _candidate_to_payload(row: Tracklet) -> dict:
-    """Convert Tracklet DB row to candidate payload."""
+    """Convert Tracklet DB row to candidate payload, including embedding vector."""
     appearance = " ".join(filter(None, [
         row.gender, row.top_color, "shirt" if row.top_color else "",
         row.bottom_color, "pants" if row.bottom_color else "",
     ])).strip()
+    dinov2_emb: list[float] = []
+    siglip_emb: list[float] = []
+    if row.embedding:
+        dinov2_emb = row.embedding.embedding_vector or []
+        siglip_emb = list(row.embedding.siglip_embedding) if row.embedding.siglip_embedding is not None else []
     return {
         "candidate_id": row.tracklet_id,
         "camera_id": row.camera_id,
@@ -186,6 +260,7 @@ def _candidate_to_payload(row: Tracklet) -> dict:
         "top_color": row.top_color,
         "bottom_color": row.bottom_color,
         "score": float(row.quality_score),
+        "embedding_vector": siglip_emb or dinov2_emb,  # prefer SigLIP2 (same space as text queries)
     }
 
 
@@ -212,6 +287,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             user_id=1,
             query_text=query or "",
             status="searching",
+            query_image_url=body.query_image_url or None,
         )
         db.add(qh)
         db.flush()  # FK constraint: query_candidates.query_id → query_history.query_id

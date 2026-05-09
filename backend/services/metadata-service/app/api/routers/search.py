@@ -21,6 +21,7 @@ class SearchRequest(BaseModel):
     camera_ids: list[str] | None = None
     time_from: str | None = None
     time_to: str | None = None
+    query_image_url: str | None = None  # URL of uploaded query image (for history display)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,8 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         payload["time_from"] = body.time_from
     if body.time_to:
         payload["time_to"] = body.time_to
+    if body.query_image_url:
+        payload["query_image_url"] = body.query_image_url
 
     try:
         result = _post_to_query_service("/search", payload)

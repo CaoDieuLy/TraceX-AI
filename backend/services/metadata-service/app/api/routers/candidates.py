@@ -58,25 +58,37 @@ def _placeholder_png(candidate_id: str) -> bytes:
 
 @router.get("/{candidate_id}/preview")
 def candidate_preview(candidate_id: str) -> Response:
-    """Return a preview thumbnail PNG for a candidate tracklet.
+    """Return a preview thumbnail JPEG for a candidate tracklet.
 
-    Falls back to a deterministic placeholder if no stored crop is available.
+    Serves the saved crop image from /workspace/storage/crops/.
+    Falls back to a deterministic placeholder if no crop is available.
     """
+    from pathlib import Path
     from app.database import SessionLocal
     from shared.models import Tracklet
+
+    _CROPS_ROOT = Path("/workspace/storage/crops")
 
     db = SessionLocal()
     try:
         tracklet = db.query(Tracklet).filter(Tracklet.tracklet_id == candidate_id).first()
         if tracklet and tracklet.crop_url and tracklet.crop_url.strip():
-            # Future: serve from crop_url path
-            pass
+            # crop_url is "/static/crops/{filename}" — resolve to disk path
+            filename = tracklet.crop_url.lstrip("/").removeprefix("static/crops/")
+            crop_path = _CROPS_ROOT / filename
+            if crop_path.exists():
+                return Response(
+                    content=crop_path.read_bytes(),
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"},
+                )
     except Exception:
         pass
     finally:
         db.close()
 
+    # Fallback: colored placeholder with candidate_id label
     png = _placeholder_png(candidate_id)
     return Response(content=png, media_type="image/png", headers={
-        "Cache-Control": "public, max-age=86400",
+        "Cache-Control": "public, max-age=3600",
     })

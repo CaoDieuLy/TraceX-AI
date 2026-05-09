@@ -319,6 +319,9 @@ def _save_tracklets_from_gpu_result(
         if existing is not None:
             continue
 
+        def _opt_float(val) -> float | None:
+            return float(val) if val is not None else None
+
         tracklet = Tracklet(
             tracklet_id=tracklet_id,
             video_id=video_id,
@@ -340,16 +343,23 @@ def _save_tracklets_from_gpu_result(
             representative_bbox=t.get("representative_bbox") or [],
             contributing_cameras=t.get("contributing_cameras") or [],
             contributing_video_ids=t.get("contributing_video_ids") or [],
+            gender_conf=_opt_float(t.get("gender_conf")),
+            top_color_conf=_opt_float(t.get("top_color_conf")),
+            shoes_conf=_opt_float(t.get("shoes_conf")),
+            accessory_conf=_opt_float(t.get("accessory_conf")),
         )
         session.add(tracklet)
 
         # Embedding (EVA-02 1024-dim)
         embedding_vec = t.get("embedding_vector") or []
-        if embedding_vec and len(embedding_vec) > 0:
+        siglip_vec = t.get("siglip_embedding") or []
+        if embedding_vec or siglip_vec:
             session.add(TrackletEmbedding(
                 tracklet_id=tracklet_id,
-                embedding_vector=embedding_vec,
-                model_version="dinov2_l14",
+                embedding_vector=embedding_vec or [],   # DINOv2 JSON fallback
+                embedding=embedding_vec or None,        # DINOv2 vector(1024)
+                siglip_embedding=siglip_vec or None,    # SigLIP2 vector(1152)
+                model_version="dinov2_vitl14+siglip2",
             ))
 
         # Action (VideoMAE V2)

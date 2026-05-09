@@ -96,6 +96,11 @@ class TrackletResult(BaseModel):
     action: str = "standing"
     action_confidence: float = 0.0
     occlusion_score: float = 0.0
+    # Per-attribute SigLIP2 confidence scores [0, 1] (None = not yet extracted)
+    gender_conf: Optional[float] = None
+    top_color_conf: Optional[float] = None
+    shoes_conf: Optional[float] = None
+    accessory_conf: Optional[float] = None
     # Cross-camera: which cameras/frames contributed to this tracklet
     contributing_cameras: list[str] = Field(default_factory=list)
     contributing_video_ids: list[str] = Field(default_factory=list)

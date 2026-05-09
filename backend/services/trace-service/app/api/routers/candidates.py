@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import Any, Optional
 
 import numpy as np
@@ -22,11 +23,47 @@ from fastapi import APIRouter
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["candidates"])
 
-# Fusion weights (sum = 1.0)
+# Fusion weights — no camera reference (sum = 1.0)
 _W_VECTOR = 0.50      # EVA-02 cosine similarity
 _W_ATTRIBUTE = 0.20   # SigLIP 2 attribute match
 _W_TEXT = 0.20        # Text token overlap
 _W_QUALITY = 0.10     # Detection confidence + BEV coverage
+
+# Fusion weights — with camera reference (sum = 1.0)
+_W_VECTOR_CAM = 0.45
+_W_ATTRIBUTE_CAM = 0.15
+_W_TEXT_CAM = 0.15
+_W_QUALITY_CAM = 0.10
+_W_SPATIAL_CAM = 0.15  # camera proximity score
+
+_CAM_NEIGHBOR_RADIUS = 10  # person seen in cam_N can appear in cam_(N-R)…cam_(N+R)
+
+
+def _extract_cam_num(cam_id: str) -> int | None:
+    m = re.search(r'\d+', cam_id or "")
+    return int(m.group()) if m else None
+
+
+def _spatiotemporal_cam_score(
+    candidate: dict,
+    ref_nums: list[int],
+    radius: int = _CAM_NEIGHBOR_RADIUS,
+) -> float:
+    """Score 0–1 based on how close candidate's camera is to reference cameras.
+
+    - Same camera → 1.0
+    - Within radius → linear decay 1.0 → 0.5
+    - Outside radius → 0.0 (this candidate will be filtered before scoring)
+    """
+    cam_num = _extract_cam_num(candidate.get("camera_id", ""))
+    if cam_num is None:
+        return 0.5  # unknown cam ID: neutral
+    min_dist = min(abs(cam_num - r) for r in ref_nums)
+    if min_dist == 0:
+        return 1.0
+    if min_dist <= radius:
+        return 1.0 - (min_dist / radius) * 0.5  # 1.0 → 0.5
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +88,9 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 def _build_query_embedding(query_text: str) -> list[float]:
     """
-    Encode query text into a 1024-dim vector using SigLIP 2's text tower.
-    Falls back to a seeded pseudo-embedding when SigLIP 2 is unavailable.
+    Encode query text into a vector using SigLIP 2's text tower (same space as SigLIP2 image embeddings).
+    Returns the raw SigLIP2 text feature vector (1152-dim for So400m).
+    Falls back to empty list when SigLIP 2 is unavailable.
     """
     if not query_text:
         return []
@@ -69,15 +107,11 @@ def _build_query_embedding(query_text: str) -> list[float]:
             inputs = processor(text=[query_text], return_tensors="pt", padding=True)
             inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
             with torch.no_grad():
-                text_emb = model.get_text_features(**inputs)  # (1, D)
+                text_emb = model.get_text_features(**{k: v for k, v in inputs.items()
+                                                      if k in ["input_ids", "attention_mask"]})
             vec = text_emb[0].cpu().float().numpy()
             vec = vec / (np.linalg.norm(vec) + 1e-8)
-            # Pad or truncate to 1024
-            if len(vec) < 1024:
-                vec = np.concatenate([vec, np.zeros(1024 - len(vec))])
-            else:
-                vec = vec[:1024]
-            return vec.tolist()
+            return vec.tolist()  # 1152-dim — matches siglip_embedding column
     except Exception as exc:
         logger.debug("SigLIP 2 text encoding failed: %s", exc)
 
@@ -201,14 +235,6 @@ def candidates_search(
     # Build query embedding once
     query_emb = _build_query_embedding(query_text) if query_text else []
 
-    # Camera filter (secondary — query-service pre-filters but double-check)
-    cam_set = {c.lower() for c in (camera_ids or [])}
-    if cam_set:
-        candidates = [
-            c for c in candidates
-            if not c.get("camera_id") or str(c["camera_id"]).lower() in cam_set
-        ]
-
     scored: list[tuple[float, int, dict[str, Any]]] = []
 
     for idx, candidate in enumerate(candidates):
@@ -226,7 +252,6 @@ def candidates_search(
         # 4. Detection quality + BEV coverage
         quality = _quality_score(candidate)
 
-        # Weighted fusion
         fusion = (
             _W_VECTOR * vec_sim
             + _W_ATTRIBUTE * attr_sim

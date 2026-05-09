@@ -903,14 +903,20 @@ async def process_video_stream(
 def _batch_extract_features(
     t_data: list,
     video_id: str,
-) -> tuple[list, list, list]:
+) -> tuple[list, list, list, list, list]:
     """
     TRUE batch GPU inference: 1 call per model for ALL tracklets combined.
     DINOv2: stack all crops → 1 forward pass → split results.
-    SigLIP: stack all crops → 1 forward pass.
+    SigLIP: stack all crops → 1 forward pass → also returns per-attribute confidence.
     VideoMAE: stack all clips → 1 forward pass.
     A100 80GB can handle 150+ tracklets × 5 crops in one shot.
+
+    Returns: (all_embeddings, all_attributes, all_attr_confs, all_actions, all_rep_crops)
+      all_attr_confs[i]: dict with keys gender_conf, top_color_conf, shoes_conf, accessory_conf
+      all_rep_crops[i]:  PIL Image (384×384) — representative crop for saving
     """
+    import torch.nn.functional as F
+
     device = _get_device()
     dtype = torch.float16 if device.type == "cuda" else torch.float32
 
@@ -933,6 +939,16 @@ def _batch_extract_features(
             cv2.BORDER_CONSTANT, value=(0, 0, 0)
         )
         return cv2.resize(pad, (size, size), interpolation=cv2.INTER_LINEAR)
+
+    # ── Representative crops (384×384) — built once, shared by SigLIP + storage ──
+    all_rep_crops: list[Image.Image] = []
+    for lt, t_idx, rep_bbox, t_frames in t_data:
+        mid_idx = len(t_frames) // 2
+        c = _extract_crop(t_frames[mid_idx], rep_bbox, 384) if t_frames else None
+        all_rep_crops.append(
+            Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)) if c is not None
+            else Image.fromarray(np.zeros((384, 384, 3), dtype=np.uint8))
+        )
 
     # ── DINOv2 batch ──────────────────────────────────────────────────────────
     all_embeddings = []
@@ -976,21 +992,13 @@ def _batch_extract_features(
         all_embeddings = [None] * len(t_data)
 
     # ── SigLIP TRUE BATCH: 1 call per attribute type × ALL tracklets ────────
-    all_attributes = []
+    all_attributes: list[dict] = []
+    all_attr_confs: list[dict] = [{} for _ in t_data]
+    img_feats = None  # SigLIP2 image embeddings, captured for storage
     model_sip = get_model("siglip2")
     proc_sip = get_model("siglip2_processor")
     if model_sip and proc_sip and t_data:
         try:
-            # Build crops for all tracklets at once — use middle frame (better quality)
-            pil_crops_384 = []
-            for lt, t_idx, rep_bbox, t_frames in t_data:
-                mid_idx = len(t_frames) // 2
-                c = _extract_crop(t_frames[mid_idx], rep_bbox, 384) if t_frames else None
-                pil_crops_384.append(
-                    Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)) if c is not None
-                    else Image.fromarray(np.zeros((384, 384, 3), dtype=np.uint8))
-                )
-
             label_groups = {
                 "top_color": ["red shirt", "blue shirt", "green shirt", "white shirt",
                                "black shirt", "yellow shirt", "orange shirt",
@@ -998,12 +1006,14 @@ def _batch_extract_features(
                 "bottom_color": ["black pants", "blue jeans", "gray pants",
                                   "white pants", "brown pants", "beige pants", "dark pants"],
                 "gender": ["male person", "female person"],
+                "shoes_color": ["white shoes", "black shoes", "brown shoes",
+                                 "gray shoes", "blue shoes", "red shoes"],
                 "bag": ["person carrying bag", "person without bag"],
                 "hat": ["person wearing hat", "person without hat"],
             }
 
-            # Encode ALL crop images once (N × 1024)
-            img_inputs = proc_sip(images=pil_crops_384, return_tensors="pt", padding=True)
+            # Encode ALL crop images once using the pre-built 384px crops
+            img_inputs = proc_sip(images=all_rep_crops, return_tensors="pt", padding=True)
             img_inputs = {k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device)
                           for k, v in img_inputs.items()}
             with torch.no_grad(), torch.autocast(device_type=device.type, dtype=dtype):
@@ -1011,8 +1021,9 @@ def _batch_extract_features(
                                                              if k in ["pixel_values"]})
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)  # [N, D]
 
-            # For each attribute group: 1 text encode call → classify all N tracklets at once
+            # For each attribute group: 1 text encode → softmax probability → label + confidence
             attr_votes: list[dict] = [{} for _ in t_data]
+            attr_raw_confs: list[dict] = [{} for _ in t_data]
             for attr_name, labels in label_groups.items():
                 txt_inputs = proc_sip(text=labels, return_tensors="pt", padding=True)
                 txt_inputs = {k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device)
@@ -1022,8 +1033,11 @@ def _batch_extract_features(
                                                                 if k in ["input_ids", "attention_mask"]})
                 txt_feats = txt_feats / txt_feats.norm(dim=-1, keepdim=True)  # [L, D]
                 scores = (img_feats @ txt_feats.T).cpu().float()  # [N, L]
-                best_idx = scores.argmax(dim=1).tolist()
-                for i_t, b_idx in enumerate(best_idx):
+                # Softmax across labels gives per-class probability within this attribute group
+                probs = F.softmax(scores, dim=1)  # [N, L]
+                best_idx = probs.argmax(dim=1).tolist()
+                best_conf = probs.max(dim=1).values.tolist()
+                for i_t, (b_idx, conf) in enumerate(zip(best_idx, best_conf)):
                     lbl = labels[b_idx]
                     if attr_name == "bag":
                         val = "no_bag" if "without" in lbl else "carrying_bag"
@@ -1032,20 +1046,33 @@ def _batch_extract_features(
                     else:
                         val = lbl.split()[0]
                     attr_votes[i_t][attr_name] = val
+                    attr_raw_confs[i_t][attr_name] = float(conf)
 
-            for av in attr_votes:
+            for i_t, av in enumerate(attr_votes):
                 all_attributes.append({
                     "gender": av.get("gender", "unknown"),
                     "top_color": av.get("top_color", "unknown"),
                     "bottom_color": av.get("bottom_color", "unknown"),
+                    "shoes_color": av.get("shoes_color", "unknown"),
                     "bag": av.get("bag", "unknown"),
                     "hat": av.get("hat", "unknown"),
                 })
+                rc = attr_raw_confs[i_t]
+                bag_conf = rc.get("bag", 0.0)
+                hat_conf = rc.get("hat", 0.0)
+                all_attr_confs[i_t] = {
+                    "gender_conf": rc.get("gender"),
+                    "top_color_conf": rc.get("top_color"),
+                    "shoes_conf": rc.get("shoes_color"),
+                    "accessory_conf": float(max(bag_conf, hat_conf)) if (bag_conf or hat_conf) else None,
+                }
         except Exception as exc:
             logger.warning("[pipeline] SigLIP true-batch failed: %s — fallback", exc)
             all_attributes = [_run_siglip2_attributes(t[3], t[2]) for t in t_data]
+            all_attr_confs = [{} for _ in t_data]
     else:
         all_attributes = [_default_attributes()] * len(t_data)
+        all_attr_confs = [{} for _ in t_data]
 
     # ── VideoMAE TRUE BATCH: stack all tracklet clips → 1 forward pass ───────
     all_actions = []
@@ -1095,11 +1122,22 @@ def _batch_extract_features(
     else:
         all_actions = [("unknown", 0.0)] * len(t_data)
 
+    # Capture SigLIP2 image embeddings (already computed above as img_feats)
+    # These are in the same embedding space as SigLIP2 text queries → usable for text search
+    all_siglip_embeddings: list[list[float]] = []
+    try:
+        if img_feats is not None:
+            all_siglip_embeddings = [img_feats[i].cpu().float().tolist() for i in range(len(t_data))]
+        else:
+            all_siglip_embeddings = [[]] * len(t_data)
+    except Exception:
+        all_siglip_embeddings = [[]] * len(t_data)
+
     logger.warning("[pipeline] batch features done: %d tracklets | DINOv2=%d | SigLIP=%d | VideoMAE=%d",
                    len(t_data), sum(1 for e in all_embeddings if e),
                    sum(1 for a in all_attributes if a.get("gender") != "unknown"),
                    sum(1 for a in all_actions if a != "unknown"))
-    return all_embeddings, all_attributes, all_actions
+    return all_embeddings, all_attributes, all_attr_confs, all_actions, all_rep_crops, all_siglip_embeddings
 
 
 def _process_video_sync(
@@ -1217,17 +1255,33 @@ def _process_video_sync(
         t_frames = [frame_lookup[o.frame_index] for o in obs if o.frame_index in frame_lookup] or [sampled_frames[0].image]
         t_data.append((lt, t_idx, rep_bbox_float, t_frames))
 
-    all_embeddings, all_attributes, all_actions = _batch_extract_features(t_data, video_id)
+    all_embeddings, all_attributes, all_attr_confs, all_actions, all_rep_crops, all_siglip_embeddings = _batch_extract_features(t_data, video_id)
+
+    _CROPS_DIR = Path("/workspace/storage/crops")
+    _CROPS_DIR.mkdir(parents=True, exist_ok=True)
 
     tracklets: list[TrackletResult] = []
     for t_idx, (lt, _, rep_bbox_float, t_frames) in enumerate(t_data):
         obs = lt.observations
         attributes = all_attributes[t_idx]
         embedding = all_embeddings[t_idx]
+        siglip_emb = all_siglip_embeddings[t_idx] if t_idx < len(all_siglip_embeddings) else []
         action_tuple = all_actions[t_idx]
         action = action_tuple[0] if isinstance(action_tuple, tuple) else str(action_tuple)
         action_conf = float(action_tuple[1]) if isinstance(action_tuple, tuple) else 0.0
         summary = _build_appearance_summary(attributes)
+        attr_conf = all_attr_confs[t_idx]
+
+        # Save representative crop image
+        crop_url = ""
+        try:
+            rep_crop = all_rep_crops[t_idx]
+            crop_filename = f"{video_id}_{camera_id}_{t_idx}.jpg"
+            crop_path = _CROPS_DIR / crop_filename
+            rep_crop.save(str(crop_path), "JPEG", quality=85)
+            crop_url = f"/static/crops/{crop_filename}"
+        except Exception as exc:
+            logger.warning("[pipeline] Failed to save crop for %s_%s_%d: %s", video_id, camera_id, t_idx, exc)
 
         quality = quality_results[lt.track_id]
         tracklets.append(TrackletResult(
@@ -1241,15 +1295,21 @@ def _process_video_sync(
             gender=attributes.get("gender", "unknown"),
             top_color=attributes.get("top_color", "unknown"),
             bottom_color=attributes.get("bottom_color", "unknown"),
-            shoes_color="unknown",
+            shoes_color=attributes.get("shoes_color", "unknown"),
             appearance_summary=summary,
+            crop_url=crop_url,
             representative_bbox=[int(x) for x in rep_bbox_float],
             bev_x=0.0,
             bev_y=0.0,
             embedding_vector=embedding or [],
+            siglip_embedding=siglip_emb or [],
             action=action,
             action_confidence=action_conf,
             occlusion_score=0.0,
+            gender_conf=attr_conf.get("gender_conf"),
+            top_color_conf=attr_conf.get("top_color_conf"),
+            shoes_conf=attr_conf.get("shoes_conf"),
+            accessory_conf=attr_conf.get("accessory_conf"),
             contributing_cameras=[camera_id],
             contributing_video_ids=[video_id],
         ))

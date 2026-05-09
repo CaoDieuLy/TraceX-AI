@@ -11,9 +11,11 @@ Trace building is forwarded to trace-service (Neural Video Reconstruction).
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # Set HF token before any model downloads (non-fatal if missing)
 os.environ.setdefault("HF_TOKEN", os.environ.get("HF_TOKEN", ""))
@@ -99,6 +101,11 @@ app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(video_process_router, prefix="/api/v1/video", tags=["video"])
 app.include_router(ingest.router, prefix="/api/v1/ingest", tags=["ingest"])
 app.include_router(finetune_router, prefix="/api/v1/finetune", tags=["finetune"])
+
+# Serve crop/preview images saved during video processing
+_CROPS_DIR = Path("/workspace/storage/crops")
+_CROPS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/crops", StaticFiles(directory=str(_CROPS_DIR)), name="crops")
 
 @app.get("/health")
 def health_check():

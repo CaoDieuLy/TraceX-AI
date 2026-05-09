@@ -12,8 +12,11 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, text
 
 from .api.routers import candidates
+from shared.database import SessionLocal
+from shared.models import Camera, QueryCandidate, QueryHistory, User, Video
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,41 @@ app.include_router(candidates.router, prefix="/api/v1", tags=["candidates"])
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "service": "query-service", "version": "2.0.0"}
+
+
+@app.post("/api/v1/overview")
+@app.get("/api/v1/overview")
+def overview():
+    """Return system-wide metrics for the settings/overview page."""
+    db = SessionLocal()
+    try:
+        total_users = db.query(func.count(User.id)).scalar() or 0
+        total_cameras = db.query(func.count(Camera.camera_id)).scalar() or 0
+        total_managed_videos = db.query(func.count(Video.video_id)).filter(Video.processed == True).scalar() or 0
+        total_queries = db.query(func.count(QueryHistory.query_id)).scalar() or 0
+        total_candidates = db.query(func.count(QueryCandidate.candidate_id)).scalar() or 0
+        try:
+            total_queue_videos = db.execute(text("SELECT COUNT(*) FROM queue_video_assets")).scalar() or 0
+        except Exception:
+            total_queue_videos = 0
+        try:
+            total_candidate_videos = db.execute(text("SELECT COUNT(*) FROM evidence_videos")).scalar() or 0
+        except Exception:
+            total_candidate_videos = 0
+    finally:
+        db.close()
+
+    return {
+        "metrics": {
+            "total_users": total_users,
+            "total_cameras": total_cameras,
+            "total_managed_videos": total_managed_videos,
+            "total_queries": total_queries,
+            "total_candidates": total_candidates,
+            "total_candidate_videos": total_candidate_videos,
+            "total_queue_videos": total_queue_videos,
+        }
+    }
 
 
 @app.get("/")

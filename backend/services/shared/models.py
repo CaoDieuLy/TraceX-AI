@@ -46,6 +46,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+try:
+    from pgvector.sqlalchemy import Vector as PgVector
+    _PGVECTOR_AVAILABLE = True
+except ImportError:
+    PgVector = None
+    _PGVECTOR_AVAILABLE = False
 
 
 class Base(DeclarativeBase):
@@ -211,6 +217,9 @@ class Video(Base):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     processed: Mapped[bool] = mapped_column(nullable=False, default=False)
+    recorded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -256,6 +265,12 @@ class Tracklet(Base):
     # Quality
     quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     occlusion_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # Per-attribute confidence scores from SigLIP2 (null = not yet extracted)
+    gender_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    top_color_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shoes_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    accessory_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Appearance attributes
     gender: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
@@ -321,8 +336,14 @@ class TrackletEmbedding(Base):
         String(255), ForeignKey("tracklets.tracklet_id", ondelete="CASCADE"),
         nullable=False, unique=True,
     )
-    embedding_vector: Mapped[list] = mapped_column(JSON, nullable=False)  # [float, ...] 1024 dims
-    model_version: Mapped[str] = mapped_column(String(128), nullable=False, default="eva02_l14")
+    embedding_vector: Mapped[list] = mapped_column(JSON, nullable=False)       # DINOv2 JSON (backward compat)
+    embedding: Mapped[list | None] = mapped_column(
+        PgVector(1024) if _PGVECTOR_AVAILABLE else JSON, nullable=True,
+    )                                                                           # DINOv2 vector(1024)
+    siglip_embedding: Mapped[list | None] = mapped_column(
+        PgVector(1152) if _PGVECTOR_AVAILABLE else JSON, nullable=True,
+    )                                                                           # SigLIP2 vector(1152) — same space as text queries
+    model_version: Mapped[str] = mapped_column(String(128), nullable=False, default="dinov2_vitl14")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -389,6 +410,7 @@ class QueryHistory(Base):
         String(36), nullable=True,
     )
     ai_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    query_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
