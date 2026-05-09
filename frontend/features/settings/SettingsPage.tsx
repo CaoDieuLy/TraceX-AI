@@ -68,7 +68,7 @@ export function SettingsPage() {
       setMe(mePayload);
 
       // Overview is optional for settings UX; don't block page on downstream AI auth failures.
-      const overviewRes = await authFetch("/overview");
+      const overviewRes = await authFetch("/search/overview");
       if (overviewRes.ok) {
         const overviewPayload = await parseJsonOrThrow<OverviewResponse>(overviewRes);
         setOverview(overviewPayload);
