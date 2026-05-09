@@ -59,7 +59,7 @@ export function UsersPage() {
   async function loadUsers() {
     setLoading(true);
     try {
-      const response = await authFetch("/v1/users");
+      const response = await authFetch("/users");
       if (response.status === 401) {
         showToast("Phien dang nhap het han. Vui long dang nhap lai.", "error");
         router.replace("/login");
@@ -114,7 +114,7 @@ export function UsersPage() {
 
   async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const response = await authFetch("/v1/users", {
+    const response = await authFetch("/users", {
       method: "POST",
       body: JSON.stringify({ email, full_name: fullName, password, role, is_active: isActive }),
     });
