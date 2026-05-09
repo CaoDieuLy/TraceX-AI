@@ -17,10 +17,22 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+
+class SearchRequest(BaseModel):
+    query: str = ""
+    text: str | None = None  # alias
+    top_k: int = 20
+    offset: int = 0
+    camera_ids: list[str] | None = None
+    time_from: str | None = None
+    time_to: str | None = None
+
 from shared.database import SessionLocal
-from shared.models import PersonCandidate, QueryCandidate, QueryHistory
+from shared.models import PersonCandidate, QueryCandidate, QueryHistory, Tracklet
 from app.services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
 from sqlalchemy import func, or_, select
 
@@ -111,101 +123,82 @@ def _local_prefilter(
     time_from: str | None = None,
     time_to: str | None = None,
     limit: int = 200,
-) -> list[dict]:
-    """Pre-filter candidates using text matching before GPU re-ranking."""
-    cleaned_query = (query_text or "").strip()
+) -> list[Tracklet]:
+    """Pre-filter tracklets using text matching against appearance_summary."""
+    cleaned_query = (query_text or "").strip().lower()
 
-    statement = select(PersonCandidate).order_by(
-        PersonCandidate.updated_at.desc(), PersonCandidate.id.desc()
-    )
+    statement = select(Tracklet).order_by(Tracklet.created_at.desc(), Tracklet.id.desc())
 
     if camera_ids:
         cam_lower = [c.lower().strip() for c in camera_ids if c.strip()]
         if cam_lower:
-            statement = statement.where(func.lower(PersonCandidate.camera_id).in_(cam_lower))
+            statement = statement.where(func.lower(Tracklet.camera_id).in_(cam_lower))
 
     rows = session.scalars(statement).all()
     if not rows:
         return []
 
-    # Token-based text scoring
-    query_tokens = set((cleaned_query or "").lower().split())
-    scored: list[tuple[float, int, PersonCandidate]] = []
+    if not cleaned_query:
+        return list(rows[:limit])
+
+    # Token-based scoring against appearance_summary + color fields
+    query_tokens = set(cleaned_query.split())
+    scored: list[tuple[float, int, Tracklet]] = []
 
     for row in rows:
-        score = 0.0
-        search_text = str(row.search_text or "").lower()
+        search_text = " ".join([
+            row.appearance_summary or "",
+            row.gender or "",
+            row.top_color or "",
+            row.bottom_color or "",
+            row.shoes_color or "",
+            row.age_range or "",
+        ]).lower()
 
-        if cleaned_query:
-            if cleaned_query.lower() in search_text:
-                score += 0.5
-            row_tokens = set(search_text.split())
-            overlap = len(query_tokens & row_tokens)
-            if overlap:
-                score += min(overlap * 0.05, 0.3)
-        else:
-            score = 0.1  # No query = return all
+        score = 0.0
+        if cleaned_query in search_text:
+            score += 0.5
+        row_tokens = set(search_text.split())
+        overlap = len(query_tokens & row_tokens)
+        if overlap:
+            score += min(overlap * 0.1, 0.5)
 
         scored.append((score, row.id, row))
 
-    # Sort: positive scores first, then by recency
     scored.sort(key=lambda x: (-x[0], -x[1]))
-
-    positive = [row for score, _, row in scored if score > 0]
-    if not positive:
-        positive = list(rows)  # fallback: return all
-
-    return positive[:limit]
+    positive = [row for s, _, row in scored if s > 0]
+    return (positive if positive else list(rows))[:limit]
 
 
-def _candidate_to_payload(row: PersonCandidate) -> dict:
-    """Convert DB row to candidate payload for trace-service."""
-    raw = row.raw_metadata or {}
+def _candidate_to_payload(row: Tracklet) -> dict:
+    """Convert Tracklet DB row to candidate payload."""
+    appearance = " ".join(filter(None, [
+        row.gender, row.top_color, "shirt" if row.top_color else "",
+        row.bottom_color, "pants" if row.bottom_color else "",
+    ])).strip()
     return {
-        "candidate_id": row.candidate_id,
-        "camera_id": row.primary_camera_id,
+        "candidate_id": row.tracklet_id,
+        "camera_id": row.camera_id,
         "video_id": row.video_id,
         "track_id": row.track_id,
-        "human_key": row.human_key,
-        "frame_idx": row.frame_idx,
-        "search_text": row.search_text,
-        "metadata_path": row.metadata_path,
-        "attribute_summary": raw.get("attribute_summary"),
-        "appearance_summary": raw.get("appearance_summary"),
-        "semantic_attributes": raw.get("semantic_attributes") or [],
-        "embedding_vector": raw.get("embedding_vector") or [],
-        "attribute_embedding_vector": raw.get("attribute_embedding_vector") or [],
-        "appearance_embedding_vector": raw.get("appearance_embedding_vector") or [],
-        "visibility_scores": raw.get("visibility_scores") or {},
-        "timeline": raw.get("timeline") or [],
-        "matched_segments": raw.get("matched_segments") or [],
-        "score": raw.get("score"),
+        "appearance_summary": row.appearance_summary or appearance,
+        "gender": row.gender,
+        "top_color": row.top_color,
+        "bottom_color": row.bottom_color,
+        "score": float(row.quality_score),
     }
 
 
 @router.post("")
-def search_candidates(
-    query: str = "",
-    top_k: int = 20,
-    offset: int = 0,
-    camera_ids: list[str] | None = None,
-    time_from: str | None = None,
-    time_to: str | None = None,
-) -> dict[str, Any]:
-    """
-    Search candidates with GPU re-ranking.
+def search_candidates(body: SearchRequest) -> dict[str, Any]:
+    """Search candidates with GPU re-ranking. Accepts JSON body."""
+    query = body.query or body.text or ""
+    top_k = body.top_k
+    offset = body.offset
+    camera_ids = body.camera_ids
+    time_from = body.time_from
+    time_to = body.time_to
 
-    Args:
-        query: Search text (Vietnamese or English)
-        top_k: Number of results
-        offset: Pagination offset
-        camera_ids: Filter by cameras
-        time_from: Time range start
-        time_to: Time range end
-
-    Returns:
-        {"results": [{"id": ..., "thumbnail_url": ..., "description": ...}]}
-    """
     db = SessionLocal()
     try:
         # Translate if Vietnamese
@@ -221,6 +214,7 @@ def search_candidates(
             status="searching",
         )
         db.add(qh)
+        db.flush()  # FK constraint: query_candidates.query_id → query_history.query_id
 
         # Local pre-filter
         shortlist = _local_prefilter(
@@ -258,22 +252,22 @@ def search_candidates(
         else:
             ranked_items = ranked.get("items") or []
 
-        # ── Luồng 20.5: Create QueryCandidate records for DB ──────────
+        # Save QueryCandidate records — ON CONFLICT DO NOTHING (same tracklet can appear in multiple queries)
         all_items = ranked_items if ranked_items else candidates_payload[:top_k]
         for rank_idx, item in enumerate(all_items):
-            qc = QueryCandidate(
+            stmt = pg_insert(QueryCandidate).values(
                 query_id=qid,
-                candidate_id=item.get("candidate_id") or item.get("human_key") or str(uuid.uuid4()),
+                candidate_id=item.get("candidate_id") or str(uuid.uuid4()),
                 fusion_score=float(item.get("_fusion_score") or item.get("score") or 0.0),
                 vector_score=float(item.get("_fusion_score") or 0.0) if item.get("_fusion_score") else None,
                 rank_position=rank_idx + 1,
                 primary_camera_id=item.get("camera_id") or "",
-                appearance_summary=item.get("appearance_summary") or item.get("attribute_summary") or "",
+                appearance_summary=item.get("appearance_summary") or "",
                 gender=item.get("gender") or "unknown",
                 top_color=item.get("top_color") or "unknown",
                 bottom_color=item.get("bottom_color") or "unknown",
-            )
-            db.add(qc)
+            ).on_conflict_do_nothing(index_elements=["candidate_id"])
+            db.execute(stmt)
 
         # Apply offset
         ranked_items = ranked_items[offset:offset + top_k]
@@ -291,7 +285,7 @@ def search_candidates(
             if score is not None:
                 description = f"[{score:.3f}] {description}" if description else f"Score: {score:.3f}"
 
-            thumbnail_url = "/api/v1/candidates/{}/preview".format(item["candidate_id"])
+            thumbnail_url = "/candidates/{}/preview".format(item["candidate_id"])
             results.append({
                 "id": item["candidate_id"],
                 "thumbnail_url": thumbnail_url,

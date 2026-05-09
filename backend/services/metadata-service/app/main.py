@@ -20,6 +20,7 @@ os.environ.setdefault("HF_TOKEN", os.environ.get("HF_TOKEN", ""))
 os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
 from .api.routers import auth, search, users, videos, ingest
+from .api.routers.candidates import router as candidates_router
 from .api.routers.finetune import router as finetune_router
 from .api.routers.video_process import router as video_process_router
 from .config import settings
@@ -84,6 +85,7 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
     ],
+    allow_origin_regex=r"https://.*\.cloudspaces\.litng\.ai",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,6 +94,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
 app.include_router(search.router, prefix="/api/v1/search", tags=["search"])
+app.include_router(candidates_router, prefix="/api/v1/candidates", tags=["candidates"])
 app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(video_process_router, prefix="/api/v1/video", tags=["video"])
 app.include_router(ingest.router, prefix="/api/v1/ingest", tags=["ingest"])

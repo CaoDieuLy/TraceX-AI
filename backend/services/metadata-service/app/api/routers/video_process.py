@@ -139,8 +139,69 @@ def _detect_persons(frame: np.ndarray, threshold: float = 0.3) -> list[dict]:
     return detections
 
 
+def _detect_persons_rtdetr(
+    frames: list[np.ndarray],
+    threshold: float = 0.4,
+    batch_size: int = 64,
+) -> list[list[dict]] | None:
+    """RT-DETR R50 person detection — primary detector when loaded.
+    Returns None if not available (caller falls back to GDINO).
+    batch_size=64 is safe on A100 80GB (256 causes OOM).
+    """
+    model = get_model("rtdetr")
+    processor = get_model("rtdetr_processor")
+    if model is None or processor is None:
+        return None
+
+    person_ids: set = get_model("rtdetr_person_ids") or {0, 1}
+    device = _get_device()
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+
+    all_dets: list[list[dict]] = []
+
+    for i in range(0, len(frames), batch_size):
+        batch = frames[i: i + batch_size]
+        sizes = [(f.shape[0], f.shape[1]) for f in batch]
+        pil_imgs = [Image.fromarray(f[:, :, ::-1]) for f in batch]  # BGR→RGB
+
+        inputs = processor(images=pil_imgs, return_tensors="pt")
+        inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
+                  for k, v in inputs.items()}
+
+        try:
+            with torch.no_grad():
+                outputs = model(**inputs)
+            results = processor.post_process_object_detection(
+                outputs, threshold=threshold,
+                target_sizes=torch.tensor(sizes, device=device),
+            )
+        except Exception as exc:
+            logger.warning("[rtdetr] batch failed: %s", exc)
+            all_dets.extend([[] for _ in batch])
+            continue
+
+        for res in results:
+            dets = []
+            for score, label, box in zip(res["scores"], res["labels"], res["boxes"]):
+                if label.item() not in person_ids:
+                    continue
+                x1, y1, x2, y2 = box.tolist()
+                dets.append({"bbox": [float(x1), float(y1), float(x2), float(y2)],
+                             "score": float(score), "label": "person"})
+            all_dets.append(dets)
+
+    return all_dets
+
+
 def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.25) -> list[list[dict]]:
-    """Batched Grounding DINO detection with CPU prefetch overlapping GPU compute."""
+    """Person detection: RT-DETR primary (fast), GDINO fallback."""
+    rtdetr_result = _detect_persons_rtdetr(frames, threshold=max(threshold, 0.4))
+    if rtdetr_result is not None:
+        n_dets = sum(len(d) for d in rtdetr_result)
+        logger.debug("[detect] RT-DETR: %d frames → %d detections", len(frames), n_dets)
+        return rtdetr_result
+
+    # GDINO fallback
     model = get_model("gdino16")
     processor = get_model("gdino16_processor")
     if model is None or processor is None:
@@ -1076,10 +1137,11 @@ def _process_video_sync(
 
     logger.warning("[pipeline] %s: %d frames sampled at 4fps", video_id, len(sampled_frames))
 
-    # Stage 2: Batch detect with Grounding DINO — full video in one _detect_persons_batch call
+    # Stage 2: Batch detect — RF-DETR primary, GDINO fallback
     from .tracking_pipeline import _crop_from_bbox as _tcrop
     t_det_start = time.time()
-    logger.warning("[pipeline] %s: running GDINO detection on %d frames (batch=256)...", video_id, len(sampled_frames))
+    detector = "RF-DETR" if get_model("rfdetr") is not None else "GDINO"
+    logger.info("[pipeline] %s: running %s detection on %d frames...", video_id, detector, len(sampled_frames))
     all_batch_dets = _detect_persons_batch([sf.image for sf in sampled_frames], threshold=0.25)
     logger.warning("[pipeline] %s: GDINO done in %.1fs", video_id, time.time() - t_det_start)
 

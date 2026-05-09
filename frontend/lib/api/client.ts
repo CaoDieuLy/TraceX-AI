@@ -29,7 +29,7 @@ export type SearchFilters = {
 function isLikelyImageUrl(url: string): boolean {
   const value = url.toLowerCase();
   if (!value) return false;
-  if (value.includes("/api/v1/candidates/") && value.endsWith("/preview")) {
+  if (value.includes("/candidates/") && value.endsWith("/preview")) {
     return true;
   }
   return /\.(png|jpg|jpeg|webp|gif|avif)(\?.*)?$/.test(value);

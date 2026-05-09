@@ -90,7 +90,13 @@ def list_videos(session: Session, user: "User") -> list[dict]:
 
 
 def get_video_by_public_id(session: Session, user: "User", video_id: str) -> Video | None:
-    return session.scalar(select(Video).where(Video.video_id == video_id, Video.user_id == user.id))
+    # Videos ingested via pipeline have no user_id — accessible to all authenticated users
+    return session.scalar(
+        select(Video).where(
+            Video.video_id == video_id,
+            (Video.user_id == user.id) | (Video.user_id.is_(None)),
+        )
+    )
 
 
 def create_video_query(session: Session, user: "User", video: Video, query_text: str) -> VideoQuery:

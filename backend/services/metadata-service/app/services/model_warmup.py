@@ -55,6 +55,7 @@ async def warmup_models() -> None:
     logger.info("=== metadata-service SOTA 2026 warmup starting ===")
     device = get_device()
 
+    _load_rtdetr(device)
     _load_dinov2(device)
     _load_grounding_dino_16(device)
     _load_siglip2(device)
@@ -180,6 +181,52 @@ def _load_siglip2(device: torch.device) -> None:
         logger.warning("SigLIP 2 load failed (non-fatal): %s", exc)
 
 
+def _load_rtdetr(device: torch.device) -> None:
+    """Load RT-DETR R50 for fast person detection (primary detector).
+
+    Loads fine-tuned weights from /workspace/models/weights/rtdetr_person/ if available
+    (host: ./storage/model-weights/rtdetr_person/), otherwise base PekingU/rtdetr_r50vd.
+    Fine-tune with: python scripts/finetune_rtdetr.py
+    """
+    logger.info("Loading RT-DETR R50 (person detector)...")
+    try:
+        from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+        from pathlib import Path
+
+        torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
+
+        finetuned = Path("/workspace/models/weights/rtdetr_person")
+        model_id = str(finetuned) if finetuned.exists() else "PekingU/rtdetr_r50vd"
+        source = "fine-tuned" if finetuned.exists() else "base"
+
+        processor = RTDetrImageProcessor.from_pretrained(model_id)
+        model = RTDetrForObjectDetection.from_pretrained(model_id, torch_dtype=torch_dtype)
+        model = model.to(device)
+        model.eval()
+
+        import numpy as np
+        from PIL import Image
+        dummy = Image.fromarray(np.zeros((640, 640, 3), dtype=np.uint8))
+        inputs = processor(images=[dummy], return_tensors="pt")
+        inputs = {k: v.to(device=device, dtype=torch_dtype) if v.is_floating_point() else v.to(device)
+                  for k, v in inputs.items()}
+        with torch.no_grad():
+            out = model(**inputs)
+        logger.info("  RT-DETR logits dim: %d", out.logits.shape[-1])
+
+        id2label = model.config.id2label
+        person_ids = [k for k, v in id2label.items() if "person" in str(v).lower()]
+        logger.info("  Person class IDs: %s", person_ids)
+
+        _MODELS["rtdetr"] = model
+        _MODELS["rtdetr_processor"] = processor
+        _MODELS["rtdetr_person_ids"] = set(person_ids)
+        logger.info("  RT-DETR R50 loaded OK (%s, model: %s)", source, model_id)
+
+    except Exception as exc:
+        logger.warning("RT-DETR load failed (non-fatal): %s", exc)
+
+
 def _load_videomae_v2(device: torch.device) -> None:
     """Load VideoMAE V2 fine-tuned on Kinetics-400 for temporal action recognition."""
     logger.info("Loading VideoMAE V2 (Kinetics-400 fine-tuned)...")
@@ -236,4 +283,4 @@ def get_warmup_error() -> Optional[str]:
 
 
 def get_loaded_models() -> list[str]:
-    return [k for k in _MODELS if not k.endswith(("_processor", "_transform", "_model_id"))]
+    return [k for k in _MODELS if not k.endswith(("_processor", "_transform", "_model_id", "_person_ids", "_classes"))]

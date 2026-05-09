@@ -5,6 +5,7 @@ import { Suspense, type ReactNode } from "react";
 import { SearchBar } from "@/components/search/SearchBar";
 import { TopKSelect } from "@/components/search/TopKSelect";
 import { useSearch } from "@/features/search/SearchContext";
+import { SearchResultsPanel } from "@/features/search/SearchResultsPanel";
 
 import { AccountMenu } from "./AccountMenu";
 import { Sidebar } from "./Sidebar";
@@ -45,7 +46,9 @@ export function MainShell({ children }: { children: ReactNode }) {
             </div>
           </div>
         </header>
-        <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-6 py-8">{children}</main>
+        <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-6 py-8">
+          {hasSearched ? <SearchResultsPanel /> : children}
+        </main>
       </div>
     </div>
   );

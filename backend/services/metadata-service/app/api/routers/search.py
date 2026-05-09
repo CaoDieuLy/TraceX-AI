@@ -10,6 +10,17 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+
+class SearchRequest(BaseModel):
+    query: str | None = None
+    text: str | None = None  # alias for query (FE may send either)
+    top_k: int = 20
+    offset: int = 0
+    camera_ids: list[str] | None = None
+    time_from: str | None = None
+    time_to: str | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -58,39 +69,23 @@ def _post_to_query_service(path: str, payload: dict[str, Any], timeout: float = 
 
 
 @router.post("")
-def search_candidates(
-    query: str | None = None,
-    top_k: int = 20,
-    offset: int = 0,
-    camera_ids: list[str] | None = None,
-    time_from: str | None = None,
-    time_to: str | None = None,
-) -> dict[str, Any]:
+def search_candidates(body: SearchRequest) -> dict[str, Any]:
     """
     Search candidates — forwarded to query-service for GPU ranking.
-
-    Args:
-        query: Search text (Vietnamese or English)
-        top_k: Number of results to return
-        offset: Pagination offset
-        camera_ids: Filter by camera IDs
-        time_from: Filter by start time (ISO format)
-        time_to: Filter by end time (ISO format)
-
-    Returns:
-        {"results": [{"id": ..., "thumbnail_url": ..., "description": ...}]}
+    Accepts JSON body with: query (or text), top_k, offset, camera_ids, time_from, time_to.
     """
-    payload = {
-        "query": query or "",
-        "top_k": top_k,
-        "offset": offset,
+    query_text = body.query or body.text or ""
+    payload: dict[str, Any] = {
+        "query": query_text,
+        "top_k": body.top_k,
+        "offset": body.offset,
     }
-    if camera_ids:
-        payload["camera_ids"] = camera_ids
-    if time_from:
-        payload["time_from"] = time_from
-    if time_to:
-        payload["time_to"] = time_to
+    if body.camera_ids:
+        payload["camera_ids"] = body.camera_ids
+    if body.time_from:
+        payload["time_from"] = body.time_from
+    if body.time_to:
+        payload["time_to"] = body.time_to
 
     try:
         result = _post_to_query_service("/search", payload)
