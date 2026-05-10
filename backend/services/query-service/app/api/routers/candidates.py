@@ -9,15 +9,15 @@ Flow:
 
 from __future__ import annotations
 
-import json
+import heapq
 import logging
 import math
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -34,7 +34,7 @@ class SearchRequest(BaseModel):
     query_image_url: str | None = None  # URL of uploaded query image (for history display)
 
 from shared.database import SessionLocal
-from shared.models import PersonCandidate, QueryCandidate, QueryCandidateTracklet, QueryHistory, Tracklet, Video
+from shared.models import QueryCandidate, QueryCandidateTracklet, QueryHistory, Tracklet, Video
 from app.services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import contains_eager, joinedload
@@ -67,24 +67,6 @@ def _expand_camera_range(camera_ids: list[str], radius: int = _CAM_NEIGHBOR_RADI
         for i in range(max(1, num - radius), num + radius + 1):
             expanded.add(f"{prefix}{i:0{width}d}")
     return list(expanded)
-
-_LOG_PATH = "/teamspace/studios/this_studio/TraceX-AI/.cursor/debug-a94b91.log"
-
-def _debug_log(hypothesis_id: str, run_id: str, location: str, message: str, data: dict):
-    try:
-        with open(_LOG_PATH, "a") as f:
-            f.write(json.dumps({
-                "sessionId": "a94b91",
-                "id": f"log_{int(datetime.now().timestamp() * 1000)}",
-                "timestamp": int(datetime.now().timestamp() * 1000),
-                "location": location,
-                "message": message,
-                "data": data,
-                "runId": run_id,
-                "hypothesisId": hypothesis_id,
-            }) + "\n")
-    except Exception:
-        pass
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +111,61 @@ def _parse_dt(value: str | None):
         return None
 
 
+def _build_search_text(row: Tracklet) -> str:
+    return " ".join([
+        row.appearance_summary or "",
+        row.gender or "",
+        row.top_color or "",
+        row.bottom_color or "",
+        row.shoes_color or "",
+        row.age_range or "",
+        getattr(row, "hat_color", "") or "",
+        getattr(row, "bag_type", "") or "",
+        getattr(row, "is_wearing_mask", "") or "",
+        getattr(row, "hair_style", "") or "",
+        getattr(row, "hair_color", "") or "",
+    ]).lower()
+
+
+def _score_search_text(search_text: str, cleaned_query: str, query_tokens: set[str]) -> float:
+    score = 0.0
+    if cleaned_query in search_text:
+        score += 0.5
+    row_tokens = set(search_text.split())
+    overlap = len(query_tokens & row_tokens)
+    if overlap:
+        score += min(overlap * 0.1, 0.5)
+    return score
+
+
+def _search_text_expr():
+    return func.lower(
+        func.concat_ws(
+            " ",
+            func.coalesce(Tracklet.appearance_summary, ""),
+            func.coalesce(Tracklet.gender, ""),
+            func.coalesce(Tracklet.top_color, ""),
+            func.coalesce(Tracklet.bottom_color, ""),
+            func.coalesce(Tracklet.shoes_color, ""),
+            func.coalesce(Tracklet.age_range, ""),
+            func.coalesce(Tracklet.hat_color, ""),
+            func.coalesce(Tracklet.bag_type, ""),
+            func.coalesce(Tracklet.is_wearing_mask, ""),
+            func.coalesce(Tracklet.hair_style, ""),
+            func.coalesce(Tracklet.hair_color, ""),
+        )
+    )
+
+
+def _ilike_contains(expr, value: str):
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return expr.ilike(f"%{escaped}%", escape="\\")
+
+
 def _local_prefilter(
     session: Session,
     query_text: str,
@@ -136,12 +173,12 @@ def _local_prefilter(
     time_from: str | None = None,
     time_to: str | None = None,
     limit: int = 200,
-) -> list[Tracklet]:
+) -> tuple[list[Tracklet], dict[str, float]]:
     """Pre-filter tracklets using camera, time range, and text matching."""
     cleaned_query = (query_text or "").strip().lower()
 
     # Join Video so we can filter by absolute recording timestamp.
-    # Absolute tracklet time = video.created_at + start_time (seconds).
+    # Absolute tracklet time = video.recorded_at + start/end_time (seconds).
     statement = (
         select(Tracklet)
         .join(Video, Tracklet.video_id == Video.video_id)
@@ -174,52 +211,50 @@ def _local_prefilter(
             .bindparams(tt=tt)
         )
 
-    rows = session.scalars(statement).all()
-    if not rows:
-        return []
-
     if not cleaned_query:
-        return list(rows[:limit])
+        rows = session.scalars(statement.limit(limit)).all()
+        return rows, {row.tracklet_id: 0.0 for row in rows}
 
-    # Token-based scoring against appearance_summary + color fields
-    query_tokens = set(cleaned_query.split())
-    scored: list[tuple[float, int, Tracklet]] = []
+    query_tokens = {token for token in cleaned_query.split() if token}
+    text_expr = _search_text_expr()
+    broad_terms = [cleaned_query, *sorted(query_tokens)]
+    broad_clauses = [_ilike_contains(text_expr, term) for term in broad_terms if term]
+    prefilter_statement = statement.where(or_(*broad_clauses))
 
-    for row in rows:
-        search_text = " ".join([
-            row.appearance_summary or "",
-            row.gender or "",
-            row.top_color or "",
-            row.bottom_color or "",
-            row.shoes_color or "",
-            row.age_range or "",
-            getattr(row, "hat_color", "") or "",
-            getattr(row, "bag_type", "") or "",
-            getattr(row, "is_wearing_mask", "") or "",
-            getattr(row, "hair_style", "") or "",
-            getattr(row, "hair_color", "") or "",
-        ]).lower()
+    stream = session.execute(
+        prefilter_statement.execution_options(stream_results=True, yield_per=256)
+    ).scalars()
 
-        score = 0.0
-        if cleaned_query in search_text:
-            score += 0.5
-        row_tokens = set(search_text.split())
-        overlap = len(query_tokens & row_tokens)
-        if overlap:
-            score += min(overlap * 0.1, 0.5)
+    top_matches: list[tuple[float, int, Tracklet]] = []
+    for row in stream:
+        search_text = _build_search_text(row)
+        score = _score_search_text(search_text, cleaned_query, query_tokens)
+        if score <= 0:
+            continue
 
-        scored.append((score, row.id, row))
+        heap_item = (score, row.id, row)
+        if len(top_matches) < limit:
+            heapq.heappush(top_matches, heap_item)
+            continue
 
-    scored.sort(key=lambda x: (-x[0], -x[1]))
-    positive = [row for s, _, row in scored if s > 0]
-    return (positive if positive else list(rows))[:limit]
+        if (score, row.id) > (top_matches[0][0], top_matches[0][1]):
+            heapq.heapreplace(top_matches, heap_item)
+
+    if top_matches:
+        top_matches.sort(key=lambda item: (-item[0], -item[1]))
+        shortlist = [row for _, _, row in top_matches]
+        score_map = {row.tracklet_id: score for score, _, row in top_matches}
+        return shortlist, score_map
+
+    rows = session.scalars(statement.limit(limit)).all()
+    return rows, {row.tracklet_id: 0.0 for row in rows}
 
 
 
 # ── Identity merge: cosine similarity + temporal/camera guards + union-find ───
 
 _MERGE_THRESHOLD = 0.85       # SigLIP2 cosine similarity to consider same identity
-_MERGE_MAX_GAP_S = 7200.0    # max 2-hour gap between tracklets of the same person
+_MERGE_MAX_GAP_S = 86400.0   # max 24-hour gap — matches trace window
 _CONF_THRESHOLD = 0.70        # fallback: below this = uncertain → don't block merge
 
 # Per-attribute confidence thresholds: both sides must exceed to block merge.
@@ -337,9 +372,6 @@ def _can_merge(t1: Tracklet, t2: Tracklet) -> bool:
     # Check metadata first — cheapest way to reject obviously different people
     if not _metadata_matches(t1, t2):
         return False
-    # Same video: tracker already separated them into distinct track_ids → different people
-    if t1.video_id == t2.video_id:
-        return False
     s1, e1 = _tracklet_abs_window(t1)
     s2, e2 = _tracklet_abs_window(t2)
     # Time gap between end of one and start of the other
@@ -427,7 +459,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         db.flush()  # FK constraint: query_candidates.query_id → query_history.query_id
 
         # Local pre-filter
-        shortlist = _local_prefilter(
+        shortlist, text_score_map = _local_prefilter(
             db, search_query, camera_ids, time_from, time_to, limit=200
         )
 
@@ -441,29 +473,29 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         # Merge tracklets that belong to the same person identity
         groups = _merge_by_similarity(shortlist)
 
-        # Build intermediate list (avoids candidate_id scope leak between save + format loops)
+        # Build candidates first, then persist in final ranked order.
         merged: list[dict] = []
-        rep_embs: dict[str, list[float]] = {}
-
-        for rank_idx, group in enumerate(groups):
+        for group in groups:
             rep = group[0]
             candidate_id = rep.tracklet_id if len(group) == 1 else str(uuid.uuid4())
-            fusion_score = float(rep.quality_score or 0.0)
             rep_emb = _tracklet_embedding(rep)
-            rep_embs[candidate_id] = rep_emb
+            text_score = float(text_score_map.get(rep.tracklet_id, 0.0))
+            quality_score = float(rep.quality_score or 0.0)
+            vector_score: float | None = None
+            if len(group) > 1:
+                member_scores = []
+                for member in group:
+                    if member.tracklet_id == rep.tracklet_id:
+                        continue
+                    member_emb = _tracklet_embedding(member)
+                    if rep_emb and member_emb:
+                        member_scores.append(_cosine_sim(rep_emb, member_emb))
+                vector_score = max(member_scores) if member_scores else 0.0
+                fusion_score = round((0.5 * text_score) + (0.3 * quality_score) + (0.2 * vector_score), 4)
+            else:
+                fusion_score = round((0.7 * text_score) + (0.3 * quality_score), 4)
 
-            db.execute(pg_insert(QueryCandidate).values(
-                query_id=qid,
-                candidate_id=candidate_id,
-                fusion_score=fusion_score,
-                rank_position=rank_idx + 1,
-                primary_camera_id=rep.camera_id or "",
-                appearance_summary=rep.appearance_summary or "",
-                gender=rep.gender or "unknown",
-                top_color=rep.top_color or "unknown",
-                bottom_color=rep.bottom_color or "unknown",
-            ).on_conflict_do_nothing(index_elements=["candidate_id"]))  # uq_query_candidates_candidate_id
-
+            member_links = []
             for member in group:
                 if member.tracklet_id == rep.tracklet_id:
                     match_score = 1.0
@@ -474,14 +506,47 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                         if rep_emb and member_emb
                         else float(member.quality_score or 0.0)
                     )
+                member_links.append({
+                    "tracklet_id": member.tracklet_id,
+                    "match_score": match_score,
+                })
+
+            merged.append({
+                "candidate_id": candidate_id,
+                "group": group,
+                "rep": rep,
+                "fusion_score": fusion_score,
+                "text_score": text_score,
+                "vector_score": vector_score,
+                "member_links": member_links,
+            })
+
+        merged.sort(key=lambda item: (-item["fusion_score"], -item["rep"].id))
+
+        for rank_idx, item in enumerate(merged, start=1):
+            rep = item["rep"]
+            candidate_id = item["candidate_id"]
+            db.execute(pg_insert(QueryCandidate).values(
+                query_id=qid,
+                candidate_id=candidate_id,
+                fusion_score=item["fusion_score"],
+                vector_score=item["vector_score"],
+                text_score=item["text_score"],
+                rank_position=rank_idx,
+                primary_camera_id=rep.camera_id or "",
+                appearance_summary=rep.appearance_summary or "",
+                gender=rep.gender or "unknown",
+                top_color=rep.top_color or "unknown",
+                bottom_color=rep.bottom_color or "unknown",
+            ).on_conflict_do_nothing(index_elements=["candidate_id"]))
+
+            for link in item["member_links"]:
                 db.execute(pg_insert(QueryCandidateTracklet).values(
                     candidate_id=candidate_id,
-                    tracklet_id=member.tracklet_id,
-                    match_score=match_score,
+                    tracklet_id=link["tracklet_id"],
+                    match_score=link["match_score"],
                     match_type="vector",
-                ).on_conflict_do_nothing(index_elements=["candidate_id", "tracklet_id"]))  # uq_query_candidate_tracklets_pair
-
-            merged.append({"candidate_id": candidate_id, "group": group, "rep": rep, "fusion_score": fusion_score})
+                ).on_conflict_do_nothing(index_elements=["candidate_id", "tracklet_id"]))
 
         paged = merged[offset:offset + top_k]
         qh.status = "candidates_found"
@@ -509,11 +574,10 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 "query_id": qid,
             })
 
-        _debug_log("C", "post-merge",
-            "candidates.py:search",
-            "search completed with identity merge",
-            {"query_id": qid, "query": query, "raw_tracklets": len(shortlist),
-             "merged_candidates": len(merged), "result_count": len(results)})
+        logger.debug(
+            "search completed: query_id=%s raw_tracklets=%d merged_candidates=%d results=%d",
+            qid, len(shortlist), len(merged), len(results),
+        )
         return {"results": results, "query_id": qid}
 
     finally:

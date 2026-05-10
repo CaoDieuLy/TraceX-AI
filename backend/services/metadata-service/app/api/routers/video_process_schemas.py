@@ -95,6 +95,7 @@ class TrackletResult(BaseModel):
     embedding_vector: list[float] = Field(default_factory=list)
     action: str = "standing"
     action_confidence: float = 0.0
+    kinetics_label: str = ""
     occlusion_score: float = 0.0
     hat_color: str = "unknown"
     bag_type: str = "unknown"

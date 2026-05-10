@@ -209,6 +209,12 @@ def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.25) -> 
     model = get_model("gdino16")
     processor = get_model("gdino16_processor")
     if model is None or processor is None:
+        logger.error(
+            "[detect] RT-DETR unavailable AND GDINO not loaded — "
+            "returning 0 detections for %d frames. "
+            "Check GPU OOM or model warmup logs.",
+            len(frames),
+        )
         return [[] for _ in frames]
 
     device = _get_device()
@@ -1354,12 +1360,12 @@ def _batch_extract_features(
             for idx, conf in zip(top_idx, top_conf):
                 label = id2label.get(idx, "")
                 action = _map_kinetics_to_tracex_action(label) if label else "unknown"
-                all_actions.append((action, float(conf)))
+                all_actions.append((action, float(conf), label))
         except Exception as exc:
             logger.warning("[pipeline] VideoMAE true-batch failed: %s — fallback", exc)
-            all_actions = [(_run_videomae_actions(t[3], t[2]), 0.0) for t in t_data]
+            all_actions = [(_run_videomae_actions(t[3], t[2]), 0.0, "") for t in t_data]
     else:
-        all_actions = [("unknown", 0.0)] * len(t_data)
+        all_actions = [("unknown", 0.0, "")] * len(t_data)
 
     # Capture SigLIP2 image embeddings (already computed above as img_feats)
     # These are in the same embedding space as SigLIP2 text queries → usable for text search
@@ -1506,7 +1512,7 @@ def _process_video_sync(
         if any(len(e) > 0 for e in all_siglip_embeddings)
         else all_embeddings
     )
-    _merger = TrackletFragmentMerger(similarity_threshold=0.85, max_gap_seconds=30.0)
+    _merger = TrackletFragmentMerger(similarity_threshold=0.85, max_gap_seconds=60.0)
     _orig_accepted = list(accepted)
     accepted, _groups = _merger.merge(list(accepted), _merge_embs)
 
@@ -1546,6 +1552,11 @@ def _process_video_sync(
         )
         t_data.append((mt, new_idx, rep_bbox_float, t_frames))
 
+    # Project representative bboxes to BEV coordinates
+    cal_path = os.getenv("CAMERA_CALIBRATION_PATH")
+    _bev_inputs = [{"bbox": rep_bbox_float} for _, _, rep_bbox_float, _ in t_data]
+    _bev_inputs = _project_to_bev_single(_bev_inputs, camera_id, cal_path)
+
     _CROPS_DIR = Path("/workspace/storage/crops")
     _CROPS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1556,8 +1567,12 @@ def _process_video_sync(
         embedding = all_embeddings[t_idx]
         siglip_emb = all_siglip_embeddings[t_idx] if t_idx < len(all_siglip_embeddings) else []
         action_tuple = all_actions[t_idx]
-        action = action_tuple[0] if isinstance(action_tuple, tuple) else str(action_tuple)
-        action_conf = float(action_tuple[1]) if isinstance(action_tuple, tuple) else 0.0
+        if isinstance(action_tuple, tuple) and len(action_tuple) >= 3:
+            action, action_conf, kinetics_raw = str(action_tuple[0]), float(action_tuple[1]), str(action_tuple[2])
+        elif isinstance(action_tuple, tuple):
+            action, action_conf, kinetics_raw = str(action_tuple[0]), float(action_tuple[1]), ""
+        else:
+            action, action_conf, kinetics_raw = str(action_tuple), 0.0, ""
         summary = _build_appearance_summary(attributes)
         attr_conf = all_attr_confs[t_idx]
 
@@ -1611,12 +1626,13 @@ def _process_video_sync(
             hat_desc=attributes.get("hat_desc"),
             hat_conf=attributes.get("hat_conf"),
             representative_bbox=[int(x) for x in rep_bbox_float],
-            bev_x=0.0,
-            bev_y=0.0,
+            bev_x=_bev_inputs[t_idx].get("bev_x", 0.0),
+            bev_y=_bev_inputs[t_idx].get("bev_y", 0.0),
             embedding_vector=embedding or [],
             siglip_embedding=siglip_emb or [],
             action=action,
             action_confidence=action_conf,
+            kinetics_label=kinetics_raw,
             occlusion_score=0.0,
             gender_conf=attr_conf.get("gender_conf"),
             top_color_conf=attr_conf.get("top_color_conf"),

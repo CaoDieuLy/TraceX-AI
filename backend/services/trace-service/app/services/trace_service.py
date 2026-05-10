@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -35,23 +35,7 @@ def _neighbor_cameras(primary_cam: str, radius: int = _CAM_NEIGHBOR_RADIUS) -> l
         for i in range(max(1, num - radius), num + radius + 1)
     ]
 
-_LOG_PATH = "/teamspace/studios/this_studio/TraceX-AI/.cursor/debug-a94b91.log"
-
-def _debug_log(hypothesis_id: str, run_id: str, location: str, message: str, data: dict):
-    try:
-        with open(_LOG_PATH, "a") as f:
-            f.write(json.dumps({
-                "sessionId": "a94b91",
-                "id": f"log_{int(datetime.now().timestamp() * 1000)}",
-                "timestamp": int(datetime.now().timestamp() * 1000),
-                "location": location,
-                "message": message,
-                "data": data,
-                "runId": run_id,
-                "hypothesisId": hypothesis_id,
-            }) + "\n")
-    except Exception:
-        pass
+logger = logging.getLogger(__name__)
 
 from ..config import settings
 from ..core.models import (
@@ -127,6 +111,33 @@ class TraceService:
                 .all()
             )
 
+            # Soft metadata filter — loại người rõ ràng khác identity
+            # Tracklets có metadata "unknown"/None sẽ pass qua (không bị loại sai)
+            _gender = candidate.gender
+            _top    = candidate.top_color
+            _bottom = candidate.bottom_color
+            _UNKNOWN = {"unknown", "", None}
+
+            def _meta_ok(t: Tracklet) -> bool:
+                if _gender not in _UNKNOWN and t.gender not in _UNKNOWN:
+                    if t.gender != _gender:
+                        return False
+                if _top not in _UNKNOWN and t.top_color not in _UNKNOWN:
+                    if t.top_color != _top:
+                        return False
+                if _bottom not in _UNKNOWN and t.bottom_color not in _UNKNOWN:
+                    if t.bottom_color != _bottom:
+                        return False
+                return True
+
+            before = len(tracklets)
+            tracklets = [t for t in tracklets if _meta_ok(t)]
+            logger.warning(
+                "Trace fallback (no QCT rows): %d → %d tracklets after metadata filter "
+                "(gender=%s top=%s bottom=%s)",
+                before, len(tracklets), _gender, _top, _bottom,
+            )
+
         # ── Time-window filter ─────────────────────────────────────────────
         # Use recorded_at (actual recording time from filename) when available,
         # fall back to created_at (ingest time).
@@ -173,8 +184,9 @@ class TraceService:
             time_start = None
             time_end = None
             if video:
-                time_start = video.created_at
-                time_end = video.created_at
+                base_dt = video.recorded_at or video.created_at
+                time_start = base_dt + timedelta(seconds=tracklet.start_time or 0)
+                time_end   = base_dt + timedelta(seconds=tracklet.end_time   or 0)
 
             segment = {
                 "segment_order": idx + 1,
@@ -292,12 +304,10 @@ class TraceService:
             )
             self.session.add(evidence_tracklet)
 
-        _debug_log("A", "pre-fix",
-            "trace_service.py:251",
-            "create_evidence_video result",
-            {"evidence_id": evidence.id, "query_id": str(query_id),
-             "candidate_id": str(candidate_id), "segment_count": len(segments),
-             "tracklet_count": sum(1 for s in segments if s.get("tracklet_id"))})
+        logger.debug(
+            "create_evidence_video: evidence_id=%s query_id=%s candidate_id=%s segments=%d",
+            evidence.id, query_id, candidate_id, len(segments),
+        )
         return evidence
 
     def get_trace_segments(self, evidence_id: UUID) -> list[dict[str, Any]]:
