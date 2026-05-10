@@ -40,8 +40,8 @@ class FineTuneRequest(BaseModel):
     segment_ids: Optional[list[int]] = Field(None, description="Segment IDs to process. None = all segments")
     batch_size: int = Field(8, description="Batch size for inference")
     models_to_finetune: list[str] = Field(
-        default=["grounding_dino", "eva02"],
-        description="Models to fine-tune: grounding_dino, eva02"
+        default=["rtdetr", "dinov2"],
+        description="Models to fine-tune: rtdetr (detector), dinov2 (Re-ID embedding)"
     )
     num_samples: Optional[int] = Field(None, description="Max samples to process. None = all")
 
@@ -57,15 +57,15 @@ class FineTuneResponse(BaseModel):
     detection_f1: float
     reid_accuracy: float
     embedding_similarity: float
-    grounding_dino_loss: float
-    eva02_loss: float
+    rtdetr_loss: float
+    dinov2_loss: float
 
 
 class BatchFineTuneRequest(BaseModel):
     """Request to batch fine-tune multiple scenes."""
     scenes: list[str] = Field(..., description="List of scene names")
     models_to_finetune: list[str] = Field(
-        default=["grounding_dino", "eva02"],
+        default=["rtdetr", "dinov2"],
         description="Models to fine-tune"
     )
     num_samples: Optional[int] = Field(None, description="Max samples per scene")
@@ -84,8 +84,8 @@ async def run_finetune(request: FineTuneRequest) -> FineTuneResponse:
     Run fine-tuning on a scene using MTMC ground truth.
     
     Fine-tuning objectives:
-    1. Grounding DINO: learn better person detection from GT bboxes
-    2. EVA-02: learn better Re-ID embeddings from cross-camera pairs
+    1. RT-DETR: learn better person detection from GT bboxes
+    2. DINOv2: learn better Re-ID embeddings from cross-camera pairs
     """
     logger.info(
         f"Fine-tuning request: scene={request.scene_name}, "
@@ -139,8 +139,8 @@ async def run_finetune(request: FineTuneRequest) -> FineTuneResponse:
             detection_f1=metrics.detection_f1,
             reid_accuracy=metrics.reid_accuracy,
             embedding_similarity=metrics.embedding_similarity,
-            grounding_dino_loss=metrics.grounding_dino_loss,
-            eva02_loss=metrics.eva02_loss,
+            rtdetr_loss=metrics.rtdetr_loss,
+            dinov2_loss=metrics.dinov2_loss,
         )
         
     except ValueError as exc:

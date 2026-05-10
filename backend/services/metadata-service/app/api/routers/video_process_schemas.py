@@ -55,8 +55,8 @@ class BatchProcessRequest(BaseModel):
       1. Load frames + detect persons in each video independently
       2. Project all detections to BEV
       3. MCBLT Hungarian cross-camera association (ONE call across all cameras)
-      4. EVA-02 appearance embeddings + SigLIP 2 attributes + VideoMAE V2 actions
-         per unified cross-camera tracklet
+      4. DINOv2 Re-ID embeddings + Qwen2-VL metadata + VideoMAE V2 actions
+         per unified cross-camera tracklet (SigLIP2 image encoder for text-image search)
       5. Return unified tracklets (global tracklet IDs across cameras)
 
     Usage:
@@ -101,7 +101,7 @@ class TrackletResult(BaseModel):
     is_wearing_mask: str = "unknown"
     hair_style: str = "unknown"
     hair_color: str = "unknown"
-    # Per-attribute SigLIP2 confidence scores [0, 1] (None = not yet extracted)
+    # Per-attribute confidence scores [0, 1] (None = not yet extracted)
     gender_conf: Optional[float] = None
     top_color_conf: Optional[float] = None
     bottom_color_conf: Optional[float] = None
@@ -113,6 +113,26 @@ class TrackletResult(BaseModel):
     mask_conf: Optional[float] = None
     hair_style_conf: Optional[float] = None
     hair_color_conf: Optional[float] = None
+    # Open-vocabulary VLM metadata (Qwen2-VL-7B-Instruct)
+    upper_clothing_desc: Optional[str] = None
+    upper_clothing_color: Optional[str] = None
+    upper_clothing_type: Optional[str] = None
+    upper_clothing_conf: Optional[float] = None
+    lower_clothing_desc: Optional[str] = None
+    lower_clothing_color: Optional[str] = None
+    lower_clothing_type: Optional[str] = None
+    lower_clothing_conf: Optional[float] = None
+    shoes_desc: Optional[str] = None
+    shoes_type: Optional[str] = None
+    bag_desc: Optional[str] = None
+    bag_presence: Optional[str] = None
+    bag_conf: Optional[float] = None
+    hat_desc: Optional[str] = None
+    hat_presence: Optional[str] = None
+    hat_type: Optional[str] = None
+    hat_conf: Optional[float] = None
+    # SigLIP2 image embedding for text-image search (1152-dim)
+    siglip_embedding: list[float] = Field(default_factory=list)
     # Cross-camera: which cameras/frames contributed to this tracklet
     contributing_cameras: list[str] = Field(default_factory=list)
     contributing_video_ids: list[str] = Field(default_factory=list)

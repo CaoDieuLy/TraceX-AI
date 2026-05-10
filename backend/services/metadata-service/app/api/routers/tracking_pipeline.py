@@ -1,25 +1,34 @@
 """
-Tracking pipeline adapted from production HeadBoxTracker.
-Replaces simple MCBLT grouping with ByteTrack-style head-box tracker.
+Tracking pipeline: BodyPartAdaptiveTracker + post-hoc TrackletFragmentMerger.
+
+BodyPartAdaptiveTracker uses head-dominant or foot-dominant cost depending on
+whether the head region is estimated to be visible in each detection bbox.
+TrackletFragmentMerger re-joins fragments of the same person after feature
+extraction using SigLIP2 / DINOv2 cosine similarity.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from pathlib import Path
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Optional
 
 import cv2
 import numpy as np
 
 
-# ── Vectorized geometry helpers (module-level, used by HeadBoxTracker) ────────
+# ── Vectorized geometry helpers ───────────────────────────────────────────────
 
 def _head_bbox_arr(bboxes: np.ndarray, head_ratio: float, shrink_x: float) -> np.ndarray:
     """Vectorized head bbox for [N, 4] array → [N, 4]."""
     x1, y1, x2, y2 = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
     w = x2 - x1
     return np.stack([x1 + w * shrink_x, y1, x2 - w * shrink_x, y1 + (y2 - y1) * head_ratio], axis=1)
+
+
+def _foot_points_arr(bboxes: np.ndarray) -> np.ndarray:
+    """Bottom-center points for [N, 4] array → [N, 2]."""
+    return np.stack([(bboxes[:, 0] + bboxes[:, 2]) / 2.0, bboxes[:, 3]], axis=1)
 
 
 def _batch_iou_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -84,7 +93,7 @@ class TrackletQualityResult:
     rejection_reason: Optional[str]
 
 
-# ── Geometry helpers ──────────────────────────────────────────────────────────
+# ── Scalar geometry helpers ───────────────────────────────────────────────────
 
 def _bbox_iou(a: tuple, b: tuple) -> float:
     ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
@@ -124,6 +133,24 @@ def _head_bbox(bbox: tuple, head_ratio: float = 0.35, shrink_x: float = 0.08) ->
         int(x2 - w * shrink_x),
         int(y1 + h * head_ratio),
     )
+
+
+def _foot_point(bbox: tuple) -> tuple[float, float]:
+    """Bottom-center of bbox — stable anchor when head is occluded."""
+    return ((bbox[0] + bbox[2]) / 2.0, float(bbox[3]))
+
+
+def _head_visible(bbox: tuple, min_aspect: float = 1.1, min_height: int = 30) -> bool:
+    """
+    Heuristic: head is likely visible when bbox is taller than wide (aspect ≥ min_aspect)
+    and the bbox is tall enough to contain a head region.
+
+    Fails gracefully for partial-body detections (torso-only, legs-only) where
+    the 35%-top-of-bbox head estimate would be meaningless.
+    """
+    bw = max(bbox[2] - bbox[0], 1)
+    bh = max(bbox[3] - bbox[1], 1)
+    return (bh / bw) >= min_aspect and bh >= min_height
 
 
 # ── VideoFrameSampler ─────────────────────────────────────────────────────────
@@ -172,12 +199,26 @@ class VideoFrameSampler:
         return tuple(frames)
 
 
-# ── HeadBoxTracker ────────────────────────────────────────────────────────────
+# ── BodyPartAdaptiveTracker ───────────────────────────────────────────────────
 
-class HeadBoxTracker:
+class BodyPartAdaptiveTracker:
     """
-    ByteTrack-style tracker using head-box + center distance + velocity + IoU.
-    Adapted from production tracking service.
+    ByteTrack-style tracker with adaptive cost based on head visibility.
+
+    When both the tracked person and the incoming detection have visible heads
+    (bbox aspect ≥ min_head_aspect and height ≥ min_head_height), the matcher
+    uses a head-dominant cost formula:
+
+        cost = 0.35 * head_center + 0.25 * full_bbox_IoU + 0.25 * foot_point + 0.15 * velocity
+
+    When the head is estimated to be occluded (short / partial bbox), the
+    matcher switches to a foot-dominant formula:
+
+        cost = 0.40 * foot_point + 0.35 * full_bbox_IoU + 0.25 * velocity
+
+    Spatial gating blocks pairs only when BOTH the head-center distance AND the
+    foot-point distance exceed their respective thresholds, so a track is never
+    dropped solely because the head left the expected region.
     """
 
     def __init__(
@@ -188,14 +229,14 @@ class HeadBoxTracker:
         max_match_cost: float = 0.80,
         max_buffer_match_cost: float = 0.90,
         max_head_center_distance: float = 120.0,
+        max_foot_distance: float = 150.0,
         max_predicted_distance: float = 180.0,
-        iou_weight: float = 0.20,
-        distance_weight: float = 0.55,
-        velocity_weight: float = 0.25,
         track_buffer: int = 20,
         max_buffer_frames: int = 300,
         head_ratio: float = 0.35,
         shrink_x: float = 0.08,
+        min_head_aspect: float = 1.1,
+        min_head_height: int = 30,
         min_track_frames: int = 3,
         min_track_density: float = 0.05,
     ):
@@ -205,14 +246,14 @@ class HeadBoxTracker:
         self.max_match_cost = max_match_cost
         self.max_buffer_match_cost = max_buffer_match_cost
         self.max_head_center_distance = max_head_center_distance
+        self.max_foot_distance = max_foot_distance
         self.max_predicted_distance = max_predicted_distance
-        self.iou_weight = iou_weight
-        self.distance_weight = distance_weight
-        self.velocity_weight = velocity_weight
         self.track_buffer = track_buffer
         self.max_buffer_frames = max_buffer_frames
         self.head_ratio = head_ratio
         self.shrink_x = shrink_x
+        self.min_head_aspect = min_head_aspect
+        self.min_head_height = min_head_height
         self.min_track_frames = min_track_frames
         self.min_track_density = min_track_density
         self._reset()
@@ -230,36 +271,26 @@ class HeadBoxTracker:
         return _head_bbox(bbox, self.head_ratio, self.shrink_x)
 
     def _build_state(self, obs: list[TrackletObservation], last_bbox: tuple, target_fk: int):
+        """
+        Returns (hbox, head_center, predicted_center, full_bbox, foot_point, head_visible).
+        Velocity is computed on head center for consistency with head-mode cost.
+        """
         hbox = self._hbox(last_bbox)
-        lc = _center(hbox)
+        hc   = _center(hbox)
+        fc   = _foot_point(last_bbox)
+        hv   = _head_visible(last_bbox, self.min_head_aspect, self.min_head_height)
+
         if len(obs) < 2:
-            return hbox, lc, lc
+            return hbox, hc, hc, last_bbox, fc, hv
+
         prev_hbox = self._hbox(obs[-2].bbox)
         pc = _center(prev_hbox)
         delta = max(obs[-1].frame_index - obs[-2].frame_index, 1)
-        vx = (lc[0] - pc[0]) / delta
-        vy = (lc[1] - pc[1]) / delta
+        vx = (hc[0] - pc[0]) / delta
+        vy = (hc[1] - pc[1]) / delta
         steps = min(max(target_fk - obs[-1].frame_index, 0), self.track_buffer * 2)
-        pred = (lc[0] + vx * steps, lc[1] + vy * steps)
-        return hbox, lc, pred
-
-    def _match(self, det_bbox: tuple, states: dict, candidates: set, max_cost: float) -> tuple[Optional[str], float]:
-        det_hbox = self._hbox(det_bbox)
-        dc = _center(det_hbox)
-        best_tid, best_cost, best_iou = None, max_cost + 1.0, -1.0
-        for tid in candidates:
-            hbox, lc, pred = states[tid]
-            cd = _dist(lc, dc)
-            pd = _dist(pred, dc)
-            if cd > self.max_head_center_distance and pd > self.max_predicted_distance:
-                continue
-            cc = min(cd / max(self.max_head_center_distance, 1e-6), 1.0)
-            pc_cost = min(pd / max(self.max_predicted_distance, 1e-6), 1.0)
-            iou = _bbox_iou(hbox, det_hbox)
-            cost = self.distance_weight * cc + self.velocity_weight * pc_cost + self.iou_weight * (1.0 - iou)
-            if cost < best_cost or (abs(cost - best_cost) < 1e-6 and iou > best_iou):
-                best_cost, best_iou, best_tid = cost, iou, tid
-        return best_tid, best_cost
+        pred = (hc[0] + vx * steps, hc[1] + vy * steps)
+        return hbox, hc, pred, last_bbox, fc, hv
 
     def _match_frame_greedy(
         self,
@@ -268,29 +299,53 @@ class HeadBoxTracker:
         candidates: set,
         max_cost: float,
     ) -> list[Optional[tuple[str, float]]]:
-        """Vectorized greedy matching: numpy cost matrix, same greedy semantics as _match()."""
+        """Vectorized adaptive greedy matching."""
         if not candidates or not det_bboxes:
             return [None] * len(det_bboxes)
 
         track_ids = list(candidates)
-        N, M = len(track_ids), len(det_bboxes)
+        M = len(det_bboxes)
+
+        det_arr  = np.array(det_bboxes, dtype=np.float32)                              # [M, 4]
 
         t_hboxes = np.array([states[tid][0] for tid in track_ids], dtype=np.float32)  # [N, 4]
-        t_lcs    = np.array([states[tid][1] for tid in track_ids], dtype=np.float32)  # [N, 2]
+        t_hcs    = np.array([states[tid][1] for tid in track_ids], dtype=np.float32)  # [N, 2]
         t_preds  = np.array([states[tid][2] for tid in track_ids], dtype=np.float32)  # [N, 2]
-        d_hboxes = _head_bbox_arr(
-            np.array(det_bboxes, dtype=np.float32), self.head_ratio, self.shrink_x
-        )                                                                               # [M, 4]
-        d_centers = (d_hboxes[:, :2] + d_hboxes[:, 2:]) / 2                           # [M, 2]
+        t_fbboxes= np.array([states[tid][3] for tid in track_ids], dtype=np.float32)  # [N, 4]
+        t_fcs    = np.array([states[tid][4] for tid in track_ids], dtype=np.float32)  # [N, 2]
+        t_hv     = np.array([states[tid][5] for tid in track_ids], dtype=bool)        # [N]
 
-        cd = np.linalg.norm(d_centers[:, None, :] - t_lcs[None, :, :], axis=-1)       # [M, N]
-        pd = np.linalg.norm(d_centers[:, None, :] - t_preds[None, :, :], axis=-1)     # [M, N]
-        iou = _batch_iou_np(d_hboxes, t_hboxes)                                        # [M, N]
+        d_hboxes = _head_bbox_arr(det_arr, self.head_ratio, self.shrink_x)             # [M, 4]
+        d_hcs    = (d_hboxes[:, :2] + d_hboxes[:, 2:]) / 2                            # [M, 2]
+        d_fcs    = _foot_points_arr(det_arr)                                            # [M, 2]
+        d_hv     = np.array(
+            [_head_visible(tuple(int(x) for x in b), self.min_head_aspect, self.min_head_height)
+             for b in det_bboxes], dtype=bool,
+        )                                                                               # [M]
 
-        cost = (self.distance_weight * np.minimum(cd / max(self.max_head_center_distance, 1e-6), 1.0) +
-                self.velocity_weight * np.minimum(pd / max(self.max_predicted_distance, 1e-6), 1.0) +
-                self.iou_weight * (1.0 - iou))
-        cost = np.where((cd > self.max_head_center_distance) & (pd > self.max_predicted_distance), 1e9, cost)
+        # Distance matrices [M, N]
+        hcd = np.linalg.norm(d_hcs[:, None] - t_hcs[None], axis=-1)
+        prd = np.linalg.norm(d_hcs[:, None] - t_preds[None], axis=-1)
+        fcd = np.linalg.norm(d_fcs[:, None] - t_fcs[None], axis=-1)
+
+        # Full-bbox IoU [M, N]
+        iou_full = _batch_iou_np(det_arr, t_fbboxes)
+
+        # Normalized individual costs
+        hcd_n = np.minimum(hcd / max(self.max_head_center_distance, 1e-6), 1.0)
+        prd_n = np.minimum(prd / max(self.max_predicted_distance,    1e-6), 1.0)
+        fcd_n = np.minimum(fcd / max(self.max_foot_distance,         1e-6), 1.0)
+        iou_c = 1.0 - iou_full
+
+        # Adaptive blend: head-dominant when both bbox have visible head
+        both_head = d_hv[:, None] & t_hv[None]                                         # [M, N]
+        cost_head = 0.35 * hcd_n + 0.25 * iou_c + 0.25 * fcd_n + 0.15 * prd_n
+        cost_foot = 0.40 * fcd_n + 0.35 * iou_c + 0.25 * prd_n
+        cost = np.where(both_head, cost_head, cost_foot)
+
+        # Spatial gating: suppress only when BOTH primary signals exceed max distance
+        too_far = (hcd > self.max_head_center_distance) & (fcd > self.max_foot_distance * 1.2)
+        cost = np.where(too_far, 1e9, cost)
 
         results: list[Optional[tuple[str, float]]] = [None] * M
         used: list[int] = []
@@ -332,10 +387,11 @@ class HeadBoxTracker:
 
         for fk in sorted(detections_by_frame):
             dets = list(detections_by_frame.get(fk) or [])
-            ts = dets[0].timestamp_second if dets else 0.0
+            ts   = dets[0].timestamp_second if dets else 0.0
 
             # Move stale active → buffer
-            stale = [tid for tid in self.active if fk - self.active_last_frame.get(tid, fk) > self.track_buffer]
+            stale = [tid for tid in self.active
+                     if fk - self.active_last_frame.get(tid, fk) > self.track_buffer]
             for tid in stale:
                 self.buffer[tid] = self.active.pop(tid)
                 self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
@@ -343,7 +399,8 @@ class HeadBoxTracker:
                 self.active_last_frame.pop(tid, None)
 
             # Expire old buffer tracks
-            expired = [tid for tid in self.buffer if fk - self.buffer_entry_frame.get(tid, fk) > self.max_buffer_frames]
+            expired = [tid for tid in self.buffer
+                       if fk - self.buffer_entry_frame.get(tid, fk) > self.max_buffer_frames]
             for tid in expired:
                 obs = self.buffer.pop(tid, [])
                 if obs and self._should_keep(obs):
@@ -356,13 +413,17 @@ class HeadBoxTracker:
 
             high = [d for d in dets if d.confidence >= self.track_thresh]
             low  = [d for d in dets if self.low_thresh <= d.confidence < self.track_thresh]
+
             active_unmatched = set(self.active.keys())
-            states = {tid: self._build_state(self.active[tid], self.active_last_bbox[tid], fk) for tid in active_unmatched}
+            states = {
+                tid: self._build_state(self.active[tid], self.active_last_bbox[tid], fk)
+                for tid in active_unmatched
+            }
 
             unmatched_high: list[FrameDetection] = []
             if high and active_unmatched:
                 matches = self._match_frame_greedy(
-                    [d.bbox for d in high], states, active_unmatched, self.max_match_cost
+                    [d.bbox for d in high], states, active_unmatched, self.max_match_cost,
                 )
                 for det, m in zip(high, matches):
                     if m:
@@ -379,7 +440,7 @@ class HeadBoxTracker:
 
             if low and active_unmatched:
                 matches = self._match_frame_greedy(
-                    [d.bbox for d in low], states, active_unmatched, self.max_match_cost
+                    [d.bbox for d in low], states, active_unmatched, self.max_match_cost,
                 )
                 for det, m in zip(low, matches):
                     if m:
@@ -392,7 +453,8 @@ class HeadBoxTracker:
 
             for det in unmatched_high:
                 if det.confidence >= self.new_track_threshold:
-                    tid = str(self.next_id); self.next_id += 1
+                    tid = str(self.next_id)
+                    self.next_id += 1
                     self.active[tid] = [self._make_obs(det, ts)]
                     self.active_last_bbox[tid] = det.bbox
                     self.active_last_frame[tid] = fk
@@ -403,6 +465,10 @@ class HeadBoxTracker:
                 completed.append(LocalTracklet(video_id, camera_id, tid, tuple(obs)))
         self._reset()
         return tuple(completed)
+
+
+# Backward-compatible alias — existing code importing HeadBoxTracker still works.
+HeadBoxTracker = BodyPartAdaptiveTracker
 
 
 # ── TrackletQualityScorer ─────────────────────────────────────────────────────
@@ -430,10 +496,10 @@ class TrackletQualityScorer:
         confs = [o.confidence for o in obs]
         laps  = [o.laplacian_score for o in obs]
         avg_conf = sum(confs) / len(confs)
-        avg_lap  = sum(laps) / len(laps)
-        n = len(obs)
+        avg_lap  = sum(laps)  / len(laps)
+        n    = len(obs)
         span = max(obs[-1].frame_index - obs[0].frame_index + 1, 1)
-        density = n / span
+        density  = n / span
         duration = max(obs[-1].timestamp_second - obs[0].timestamp_second, 0.0) if n >= 2 else 0.0
 
         if n < self.min_frames:
@@ -447,3 +513,141 @@ class TrackletQualityScorer:
         if avg_lap < self.min_laplacian:
             return TrackletQualityResult(False, avg_conf, avg_lap, n, density, duration, "blurry_tracklet")
         return TrackletQualityResult(True, avg_conf, avg_lap, n, density, duration, None)
+
+
+# ── TrackletFragmentMerger ────────────────────────────────────────────────────
+
+def _cosine_sim_matrix(embeddings: list[list[float]]) -> np.ndarray:
+    """Pairwise cosine similarity for N embeddings → [N, N] float32."""
+    n = len(embeddings)
+    if n == 0 or not embeddings[0]:
+        return np.zeros((n, n), dtype=np.float32)
+    arr = np.array(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-8)
+    normed = arr / norms
+    return (normed @ normed.T).astype(np.float32)
+
+
+class TrackletFragmentMerger:
+    """
+    Post-hoc fragment merging using SigLIP2 or DINOv2 cosine similarity.
+
+    Fragments of the same person caused by occlusion are re-joined when:
+      1. They are temporally ordered (tj starts after ti ends, overlap ≤ 1 s).
+      2. The temporal gap is within max_gap_seconds / max_gap_frames.
+      3. Their appearance embeddings have cosine similarity ≥ similarity_threshold.
+
+    Union-Find handles transitive chains (A~B and B~C → A merged into C).
+
+    Returns the merged LocalTracklet list and a groups list so the caller can
+    pool the corresponding feature arrays (embeddings, attributes, actions).
+    """
+
+    def __init__(
+        self,
+        similarity_threshold: float = 0.85,
+        max_gap_seconds: float = 30.0,
+        max_gap_frames: int = 120,
+    ):
+        self.sim_thresh     = similarity_threshold
+        self.max_gap_s      = max_gap_seconds
+        self.max_gap_frames = max_gap_frames
+
+    def merge(
+        self,
+        tracklets: list[LocalTracklet],
+        embeddings: list[list[float]],
+    ) -> tuple[list[LocalTracklet], list[list[int]]]:
+        """
+        Parameters
+        ----------
+        tracklets   : accepted tracklets from the tracker (any order)
+        embeddings  : one embedding vector per tracklet (same index)
+
+        Returns
+        -------
+        merged_tracklets : new list, length ≤ len(tracklets)
+        groups           : groups[i] = list of original indices merged into
+                           merged_tracklets[i]; primary (earliest) is groups[i][0]
+        """
+        n = len(tracklets)
+        if n == 0:
+            return [], []
+
+        # Work in start-frame order for the gap-break optimisation
+        order = sorted(range(n), key=lambda i: tracklets[i].observations[0].frame_index)
+        sim   = _cosine_sim_matrix([embeddings[i] for i in order])  # [n, n]
+
+        # ── Union-Find ────────────────────────────────────────────────────────
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x: int, y: int) -> None:
+            px, py = find(x), find(y)
+            if px != py:
+                parent[py] = px  # px is the earlier-start member (x < y in sorted order)
+
+        for i in range(n):
+            ti        = tracklets[order[i]]
+            ti_end_f  = ti.observations[-1].frame_index
+            ti_end_t  = ti.observations[-1].timestamp_second
+
+            for j in range(i + 1, n):
+                tj         = tracklets[order[j]]
+                tj_start_f = tj.observations[0].frame_index
+                tj_start_t = tj.observations[0].timestamp_second
+
+                gap_f = tj_start_f - ti_end_f
+                if gap_f > self.max_gap_frames:
+                    break  # sorted → all future j will also exceed frame gap
+
+                gap_t = tj_start_t - ti_end_t
+                if gap_t < -1.0:   # overlap > 1 s → concurrent, different people
+                    continue
+                if gap_t > self.max_gap_s:
+                    continue
+
+                if sim[i, j] >= self.sim_thresh:
+                    union(i, j)
+
+        # ── Build merged tracklets ────────────────────────────────────────────
+        root_to_members: dict[int, list[int]] = defaultdict(list)
+        for i in range(n):
+            root_to_members[find(i)].append(i)  # sorted indices (into order[])
+
+        merged_tracklets: list[LocalTracklet] = []
+        groups: list[list[int]] = []
+
+        for root in sorted(root_to_members):
+            sorted_members = root_to_members[root]
+            orig_idxs      = [order[m] for m in sorted_members]  # original indices
+
+            if len(orig_idxs) == 1:
+                merged_tracklets.append(tracklets[orig_idxs[0]])
+                groups.append(orig_idxs)
+                continue
+
+            # Combine observations from all fragments in temporal order
+            all_obs: list[TrackletObservation] = []
+            for idx in orig_idxs:
+                all_obs.extend(tracklets[idx].observations)
+            all_obs.sort(key=lambda o: o.frame_index)
+
+            # Primary = earliest start (orig_idxs[0] due to sorted order)
+            primary = tracklets[orig_idxs[0]]
+            merged  = LocalTracklet(
+                video_id=primary.video_id,
+                camera_id=primary.camera_id,
+                track_id=primary.track_id,   # kept so quality_results lookup still works
+                observations=tuple(all_obs),
+            )
+            merged_tracklets.append(merged)
+            groups.append(orig_idxs)
+
+        return merged_tracklets, groups

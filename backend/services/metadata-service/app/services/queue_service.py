@@ -751,7 +751,7 @@ def _upsert_person_candidates(session: Session, people: list[dict], metadata_pat
                 session.add(TrackletEmbedding(
                     tracklet_id=tracklet_id,
                     embedding_vector=embedding_vec,
-                    model_version="eva02_l14",
+                    model_version="dinov2_vitl14+siglip2",
                 ))
 
     session.flush()

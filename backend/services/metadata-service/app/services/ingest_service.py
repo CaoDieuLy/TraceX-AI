@@ -333,8 +333,9 @@ def _save_tracklets_from_gpu_result(
             occlusion_score=float(t.get("occlusion_score") or 0.0),
             gender=str(t.get("gender") or "unknown"),
             age_range=str(t.get("age_range") or "unknown"),
-            top_color=str(t.get("top_color") or "unknown"),
-            bottom_color=str(t.get("bottom_color") or "unknown"),
+            # backward compat — populated from VLM upper/lower clothing color
+            top_color=str(t.get("top_color") or t.get("upper_clothing_color") or "unknown"),
+            bottom_color=str(t.get("bottom_color") or t.get("lower_clothing_color") or "unknown"),
             shoes_color=str(t.get("shoes_color") or "unknown"),
             hat_color=str(t.get("hat_color") or "unknown"),
             bag_type=str(t.get("bag_type") or "unknown"),
@@ -342,6 +343,24 @@ def _save_tracklets_from_gpu_result(
             hair_style=str(t.get("hair_style") or "unknown"),
             hair_color=str(t.get("hair_color") or "unknown"),
             appearance_summary=str(t.get("appearance_summary") or ""),
+            # open-vocabulary VLM metadata
+            upper_clothing_desc=t.get("upper_clothing_desc"),
+            upper_clothing_color=t.get("upper_clothing_color"),
+            upper_clothing_type=t.get("upper_clothing_type"),
+            upper_clothing_conf=_opt_float(t.get("upper_clothing_conf")),
+            lower_clothing_desc=t.get("lower_clothing_desc"),
+            lower_clothing_color=t.get("lower_clothing_color"),
+            lower_clothing_type=t.get("lower_clothing_type"),
+            lower_clothing_conf=_opt_float(t.get("lower_clothing_conf")),
+            shoes_desc=t.get("shoes_desc"),
+            shoes_type=t.get("shoes_type"),
+            bag_desc=t.get("bag_desc"),
+            bag_presence=t.get("bag_presence"),
+            bag_conf=_opt_float(t.get("bag_conf")),
+            hat_desc=t.get("hat_desc"),
+            hat_presence=t.get("hat_presence"),
+            hat_type=t.get("hat_type"),
+            hat_conf=_opt_float(t.get("hat_conf")),
             bev_x=float(t.get("bev_x") or 0.0),
             bev_y=float(t.get("bev_y") or 0.0),
             crop_url=str(t.get("crop_url") or ""),
@@ -349,20 +368,20 @@ def _save_tracklets_from_gpu_result(
             contributing_cameras=t.get("contributing_cameras") or [],
             contributing_video_ids=t.get("contributing_video_ids") or [],
             gender_conf=_opt_float(t.get("gender_conf")),
-            top_color_conf=_opt_float(t.get("top_color_conf")),
-            bottom_color_conf=_opt_float(t.get("bottom_color_conf")),
+            top_color_conf=_opt_float(t.get("top_color_conf") or t.get("upper_clothing_conf")),
+            bottom_color_conf=_opt_float(t.get("bottom_color_conf") or t.get("lower_clothing_conf")),
             shoes_conf=_opt_float(t.get("shoes_conf")),
             accessory_conf=_opt_float(t.get("accessory_conf")),
             age_range_conf=_opt_float(t.get("age_range_conf")),
-            hat_color_conf=_opt_float(t.get("hat_color_conf")),
-            bag_type_conf=_opt_float(t.get("bag_type_conf")),
+            hat_color_conf=_opt_float(t.get("hat_color_conf") or t.get("hat_conf")),
+            bag_type_conf=_opt_float(t.get("bag_type_conf") or t.get("bag_conf")),
             mask_conf=_opt_float(t.get("mask_conf")),
-            hair_style_conf=_opt_float(t.get("hair_style_conf")),
-            hair_color_conf=_opt_float(t.get("hair_color_conf")),
+            hair_style_conf=_opt_float(t.get("hair_style_conf") or t.get("hair_conf")),
+            hair_color_conf=_opt_float(t.get("hair_color_conf") or t.get("hair_conf")),
         )
         session.add(tracklet)
 
-        # Embedding (EVA-02 1024-dim)
+        # Embedding (DINOv2 1024-dim + SigLIP2 1152-dim)
         embedding_vec = t.get("embedding_vector") or []
         siglip_vec = t.get("siglip_embedding") or []
         if embedding_vec or siglip_vec:

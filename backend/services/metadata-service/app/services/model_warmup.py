@@ -1,15 +1,18 @@
 """GPU model warmup for metadata-service — SOTA 2026 AI pipeline.
 
 Loads all models into VRAM once at startup via FastAPI lifespan.
-VRAM budget (metadata-service share ~50GB of A100 80GB):
+VRAM budget (metadata-service, A100 80GB):
+  - RT-DETR R50 (person detection):                    ~3GB fp16
   - DINOv2 ViT-L/14 (appearance embedding, 1024-dim):  ~5GB fp16
-  - Grounding DINO 1.6 (person detection):             ~4GB fp16
-  - SigLIP 2-So400m (attribute tagging, zero-shot):    ~3GB fp16
-  - VideoMAE V2-Large (action recognition):             ~3GB fp16
-  - SeamlessM4T v2-large (Vietnamese translation):     ~5GB fp16
+  - SigLIP 2-So400m (image encoder for text search):   ~3GB fp16
+  - VideoMAE V2 (action recognition):                  ~3GB fp16
+  - Qwen2-VL-7B-Instruct (open-vocabulary metadata):  ~14GB fp16
+  Runtime overhead (KV cache, activations):            ~3GB
+  Total metadata-service:                              ~31GB / 80GB
 
-Forbidden: YOLO (any version), ByteTrack.
-Required:  Grounding DINO 1.6, MCBLT 3D association, DINOv2, SigLIP 2, VideoMAE V2.
+Pre-download models: python scripts/download_models.py --models qwen2vl siglip2 videomae
+
+Forbidden: YOLO (any version), ByteTrack, Grounding DINO (replaced by RT-DETR).
 """
 
 from __future__ import annotations
@@ -55,11 +58,21 @@ async def warmup_models() -> None:
     logger.info("=== metadata-service SOTA 2026 warmup starting ===")
     device = get_device()
 
+    if device.type == "cuda":
+        # A100 Tensor Cores support TF32 — free ~10 % matmul speedup
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32       = True
+        # cuDNN picks the fastest kernel for each fixed input shape
+        torch.backends.cudnn.benchmark        = True
+        # Prefer TF32 over FP32 for internal matmul precision
+        torch.set_float32_matmul_precision("high")
+        logger.info("A100 flags: TF32=on  cuDNN.benchmark=on  matmul_precision=high")
+
     _load_rtdetr(device)
     _load_dinov2(device)
-    _load_grounding_dino_16(device)
     _load_siglip2(device)
     _load_videomae_v2(device)
+    _load_qwen2vl(device)
 
     _warmup_done = True
     if device.type == "cuda":
@@ -107,45 +120,9 @@ def _load_dinov2(device: torch.device) -> None:
         logger.warning("DINOv2 load failed (non-fatal): %s", exc)
 
 
-def _load_grounding_dino_16(device: torch.device) -> None:
-    """Load Grounding DINO 1.6 for open-vocabulary person detection."""
-    logger.info("Loading Grounding DINO 1.6...")
-    try:
-        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-
-        torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
-        model_id = "IDEA-Research/grounding-dino-1.6-pro"
-        try:
-            processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, torch_dtype=torch_dtype)
-        except Exception:
-            model_id = "IDEA-Research/grounding-dino-base"
-            processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, torch_dtype=torch_dtype)
-
-        model = model.to(device)
-        model.eval()
-
-        import numpy as np
-        from PIL import Image
-        dummy_img = Image.fromarray(np.zeros((640, 640, 3), dtype=np.uint8))
-        inputs = processor(images=dummy_img, text="person.", return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        autocast_ctx = torch.autocast(device_type=device.type, dtype=torch_dtype) if device.type == "cuda" else torch.no_grad()
-        with torch.no_grad(), autocast_ctx:
-            _ = model(**inputs)
-
-        _MODELS["gdino16"] = model
-        _MODELS["gdino16_processor"] = processor
-        _MODELS["gdino16_model_id"] = model_id
-        logger.info("  Grounding DINO 1.6 loaded OK (model: %s)", model_id)
-
-    except Exception as exc:
-        logger.warning("Grounding DINO 1.6 load failed (non-fatal): %s", exc)
-
 
 def _load_siglip2(device: torch.device) -> None:
-    """Load SigLIP 2-So400m for zero-shot attribute labeling."""
+    """Load SigLIP 2-So400m image encoder for text-image search embeddings (1152-dim)."""
     logger.info("Loading SigLIP 2-So400m...")
     try:
         from transformers import AutoProcessor, AutoModel
@@ -272,6 +249,49 @@ def _load_videomae_v2(device: torch.device) -> None:
 
     except Exception as exc:
         logger.warning("VideoMAE V2 load failed (non-fatal): %s", exc)
+
+
+def _load_qwen2vl(device: torch.device) -> None:
+    """Load Qwen2-VL-7B-Instruct for open-vocabulary appearance captioning.
+
+    Loads from /workspace/models/weights/qwen2vl/ if pre-downloaded
+    (host: ./storage/model-weights/qwen2vl/), otherwise downloads from HuggingFace.
+    Pre-download with: python scripts/download_models.py --models qwen2vl
+    """
+    logger.info("Loading Qwen2-VL-7B-Instruct...")
+    try:
+        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+        from pathlib import Path
+        import numpy as np
+        from PIL import Image
+
+        local = Path("/workspace/models/weights/qwen2vl")
+        model_id = str(local) if local.exists() and any(local.iterdir()) else "Qwen/Qwen2-VL-7B-Instruct"
+        source = "local" if local.exists() and any(local.iterdir()) else "HuggingFace"
+        logger.info("  Qwen2-VL source: %s (%s)", model_id, source)
+
+        processor = AutoProcessor.from_pretrained(model_id)
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=torch.float16, device_map="auto"
+        )
+        model.eval()
+
+        dummy = Image.fromarray(np.zeros((384, 384, 3), dtype=np.uint8))
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": dummy},
+            {"type": "text", "text": "Describe this person briefly."},
+        ]}]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=[text], images=[dummy], return_tensors="pt").to(device)
+        with torch.no_grad():
+            _ = model.generate(**inputs, max_new_tokens=16)
+
+        _MODELS["qwen2vl"] = model
+        _MODELS["qwen2vl_processor"] = processor
+        logger.info("  Qwen2-VL-7B-Instruct loaded OK")
+
+    except Exception as exc:
+        logger.warning("Qwen2-VL-7B-Instruct load failed (non-fatal): %s", exc)
 
 
 def is_warmup_done() -> bool:

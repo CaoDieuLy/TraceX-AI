@@ -85,7 +85,7 @@ async def full_pipeline(
     Phase 1 — Fine-tune models trên MTMC GT data:
       - Auto-detect tất cả scenes có sẵn trong /workspace/storage/dataset/MTMC_Tracking_2024/train/
       - Chạy MTMCFineTuningPipeline cho từng scene (num_samples=100 để nhanh)
-      - Cải thiện độ chính xác Grounding DINO + EVA-02 cho môi trường VinUni
+      - Cải thiện độ chính xác RT-DETR + DINOv2 cho môi trường VinUni
 
     Phase 2 — Ingest 50 video:
       - Move Temp → Storage (Google Drive)
@@ -116,7 +116,7 @@ async def full_pipeline(
                 )
                 metrics = await pipeline.run(
                     num_samples=100,
-                    models_to_finetune=["grounding_dino", "eva02"],
+                    models_to_finetune=["rtdetr", "dinov2"],
                 )
                 finetune_summary["scenes_processed"] += 1
                 logger.info(

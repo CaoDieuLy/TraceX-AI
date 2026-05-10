@@ -248,6 +248,12 @@ class Tracklet(Base):
         Index("ix_tracklets_video_id", "video_id"),
         Index("ix_tracklets_camera_id", "camera_id"),
         Index("ix_tracklets_bev_xy", "bev_x", "bev_y"),
+        Index("ix_tracklets_upper_color",  "upper_clothing_color"),
+        Index("ix_tracklets_upper_type",   "upper_clothing_type"),
+        Index("ix_tracklets_lower_color",  "lower_clothing_color"),
+        Index("ix_tracklets_lower_type",   "lower_clothing_type"),
+        Index("ix_tracklets_bag_presence", "bag_presence"),
+        Index("ix_tracklets_hat_presence", "hat_presence"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True,)
@@ -291,6 +297,29 @@ class Tracklet(Base):
     hair_style: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     hair_color: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     appearance_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    # Open-vocabulary clothing metadata (Qwen2-VL-7B-Instruct)
+    upper_clothing_desc:  Mapped[str | None] = mapped_column(Text, nullable=True)
+    upper_clothing_color: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    upper_clothing_type:  Mapped[str | None] = mapped_column(String(128), nullable=True)
+    upper_clothing_conf:  Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    lower_clothing_desc:  Mapped[str | None] = mapped_column(Text, nullable=True)
+    lower_clothing_color: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lower_clothing_type:  Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lower_clothing_conf:  Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    shoes_desc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shoes_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    bag_desc:     Mapped[str | None] = mapped_column(Text, nullable=True)
+    bag_presence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    bag_conf:     Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    hat_desc:     Mapped[str | None] = mapped_column(Text, nullable=True)
+    hat_presence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    hat_type:     Mapped[str | None] = mapped_column(String(128), nullable=True)
+    hat_conf:     Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Spatial (BEV)
     bev_x: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

@@ -36,6 +36,14 @@ WORKSPACE = _DOCKER_PATH if _DOCKER_PATH.exists() or _DOCKER_PATH.parent.exists(
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 MODEL_DEFINITIONS = {
+    # Qwen2-VL-7B-Instruct — open-vocabulary appearance captioning
+    "qwen2vl": {
+        "repo_id": "Qwen/Qwen2-VL-7B-Instruct",
+        "local_dir": "qwen2vl",
+        "size_mb": 15000,
+        "description": "Qwen2-VL-7B-Instruct (open-vocabulary appearance metadata)",
+        "files": [],
+    },
     # Grounding DINO 1.6 — open-vocabulary person detection
     "grounding_dino": {
         "repo_id": "IDEA-Research/grounding-dino-1.6-base",
@@ -348,3 +356,7 @@ def main() -> None:
         logger.info("No action specified. Use --all, --models <list>, or --check")
         logger.info("Available models: %s", list(MODEL_DEFINITIONS.keys()))
         check_installed(workspace)
+
+
+if __name__ == "__main__":
+    main()

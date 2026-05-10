@@ -646,8 +646,8 @@ class FineTuningMetrics:
     reid_accuracy: float = 0.0
     
     # Per-model losses
-    grounding_dino_loss: float = 0.0
-    eva02_loss: float = 0.0
+    rtdetr_loss: float = 0.0       # was grounding_dino_loss
+    dinov2_loss: float = 0.0       # was eva02_loss
     siglip_loss: float = 0.0
     
     # Training progress
@@ -661,9 +661,9 @@ class MTMCFineTuningPipeline:
     Fine-tuning pipeline using MTMC ground truth.
     
     Fine-tuning objectives:
-    1. Grounding DINO: Detection fine-tuning with GT bboxes
-    2. EVA-02: Re-ID embedding fine-tuning with cross-camera pairs
-    3. SigLIP: Attribute recognition (future)
+    1. RT-DETR: Detection fine-tuning with GT bboxes
+    2. DINOv2: Re-ID embedding fine-tuning with cross-camera pairs
+    3. SigLIP: Image encoder alignment (future)
     
     Data flow:
     1. Load GT detections for scene/segment
@@ -719,11 +719,11 @@ class MTMCFineTuningPipeline:
         Args:
             camera: Specific VinUni camera (e.g., "cam_01") or None for all
             segment_ids: List of segment IDs to process (None = all)
-            models_to_finetune: Models to fine-tune ["grounding_dino", "eva02"]
+            models_to_finetune: Models to fine-tune ["rtdetr", "dinov2"]
             num_samples: Max number of samples (None = all)
         """
         if models_to_finetune is None:
-            models_to_finetune = ["grounding_dino", "eva02"]
+            models_to_finetune = ["rtdetr", "dinov2"]
         
         metrics = FineTuningMetrics()
         
@@ -765,15 +765,15 @@ class MTMCFineTuningPipeline:
         for model_name in models_to_finetune:
             logger.info(f"Fine-tuning {model_name}...")
             
-            if model_name == "grounding_dino":
+            if model_name in ("rtdetr", "grounding_dino"):
                 model_metrics = await self._finetune_grounding_dino(all_detections)
-                metrics.grounding_dino_loss = model_metrics.get("loss", 0)
+                metrics.rtdetr_loss = model_metrics.get("loss", 0)
                 metrics.avg_detection_iou = model_metrics.get("avg_iou", 0)
                 metrics.detection_f1 = model_metrics.get("f1", 0)
-            
-            elif model_name == "eva02":
+
+            elif model_name in ("dinov2", "eva02"):
                 model_metrics = await self._finetune_eva02(all_detections)
-                metrics.eva02_loss = model_metrics.get("loss", 0)
+                metrics.dinov2_loss = model_metrics.get("loss", 0)
                 metrics.reid_accuracy = model_metrics.get("accuracy", 0)
                 metrics.embedding_similarity = model_metrics.get("similarity", 0)
         
@@ -787,18 +787,17 @@ class MTMCFineTuningPipeline:
         detections: list[GTDetection],
     ) -> dict:
         """
-        Fine-tune / evaluate Grounding DINO for person detection.
-        
-        Uses GT bboxes as supervision.
+        Evaluate RT-DETR for person detection using GT bboxes as supervision.
+        (Legacy name kept; internally uses rtdetr model key, falls back to gdino16.)
         Loss = L1(gt_bbox, pred_bbox) + GIoU(gt_bbox, pred_bbox)
         """
         try:
-            model = self._get_model("gdino16")
-            processor = self._get_processor("gdino16")
+            model = self._get_model("rtdetr") or self._get_model("gdino16")
+            processor = self._get_processor("rtdetr_processor") or self._get_processor("gdino16")
         except Exception as exc:
-            logger.warning(f"Grounding DINO not available: {exc}")
+            logger.warning(f"Detector not available: {exc}")
             return {"loss": 0, "avg_iou": 0, "f1": 0}
-        
+
         if model is None:
             return {"loss": 0, "avg_iou": 0, "f1": 0}
         
@@ -850,23 +849,23 @@ class MTMCFineTuningPipeline:
         detections: list[GTDetection],
     ) -> dict:
         """
-        Fine-tune EVA-02 for Re-ID embedding.
-        
+        Evaluate DINOv2 Re-ID embedding using cross-camera pairs.
+
         Uses cross-camera pairs as positive/negative examples.
         - Positive: same track_id in different cameras
         - Negative: different track_ids in same/different cameras
         """
         try:
-            model = self._get_model("eva02")
-            transform = self._get_processor("eva02")
+            model = self._get_model("dinov2") or self._get_model("eva02")
+            transform = self._get_processor("dinov2_processor") or self._get_processor("eva02")
         except Exception as exc:
-            logger.warning(f"EVA-02 not available: {exc}")
+            logger.warning(f"Re-ID model not available: {exc}")
             return {"loss": 0, "accuracy": 0, "similarity": 0}
-        
+
         if model is None:
             return {"loss": 0, "accuracy": 0, "similarity": 0}
-        
-        logger.info(f"  EVA-02: evaluating {len(detections)} detections")
+
+        logger.info(f"  DINOv2: evaluating {len(detections)} detections")
         
         # Group by track_id to get cross-camera pairs
         track_groups: dict[int, list[GTDetection]] = {}

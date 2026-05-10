@@ -212,7 +212,7 @@ def _save_candidates_from_batch(
     Writes to:
       - QueryHistory  : one record per batch (query_id links all candidates)
       - Tracklet      : one row per unified person (all cameras combined)
-      - TrackletEmbedding : EVA-02 1024-dim vector per tracklet
+      - TrackletEmbedding : DINOv2 1024-dim + SigLIP2 1152-dim vectors per tracklet
       - TrackletAction    : VideoMAE action classification per tracklet
     """
     from shared.models import QueryHistory, Tracklet, TrackletEmbedding, TrackletAction
@@ -299,7 +299,7 @@ def _save_candidates_from_batch(
             session.add(row)
             imported += 1
 
-        # Upsert TrackletEmbedding (EVA-02 1024-dim)
+        # Upsert TrackletEmbedding (DINOv2 1024-dim)
         embedding_vec = tracklet.get("embedding_vector") or []
         if embedding_vec and len(embedding_vec) > 0:
             emb_existing = session.scalar(
@@ -311,7 +311,7 @@ def _save_candidates_from_batch(
                 emb_row = TrackletEmbedding(
                     tracklet_id=tracklet_id,
                     embedding_vector=embedding_vec,
-                    model_version="eva02_l14",
+                    model_version="dinov2_vitl14+siglip2",
                 )
                 session.add(emb_row)
 

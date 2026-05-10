@@ -220,7 +220,26 @@ def _local_prefilter(
 
 _MERGE_THRESHOLD = 0.85       # SigLIP2 cosine similarity to consider same identity
 _MERGE_MAX_GAP_S = 7200.0    # max 2-hour gap between tracklets of the same person
-_CONF_THRESHOLD = 0.5         # below this = uncertain → don't block merge on attribute mismatch
+_CONF_THRESHOLD = 0.70        # fallback: below this = uncertain → don't block merge
+
+# Per-attribute confidence thresholds: both sides must exceed to block merge.
+# Free-text fields (upper_clothing_type, *_desc) are NOT in this list — exact
+# string match would incorrectly treat "blazer" vs "suit jacket" as a conflict.
+_CONF_THRESHOLDS: dict[str, float] = {
+    "gender":               0.70,
+    "is_wearing_mask":      0.70,
+    "bag_presence":         0.75,
+    "hat_presence":         0.75,
+    "age_range":            0.75,
+    "upper_clothing_color": 0.82,
+    "lower_clothing_color": 0.82,
+    "shoes_color":          0.82,
+    "hat_color":            0.82,
+    "hair_color":           0.82,
+    # backward compat (old SigLIP columns)
+    "top_color":            0.82,
+    "bottom_color":         0.82,
+}
 
 # "none" is a meaningful value (model confirmed absence) for these fields
 _NONE_IS_VALID = frozenset({"hat_color", "bag_type", "is_wearing_mask"})
@@ -246,16 +265,24 @@ def _metadata_matches(t1: Tracklet, t2: Tracklet) -> bool:
     Missing confidence (None) is treated as 0.0 (uncertain) — does not block merge.
     """
     checks = [
-        ("gender",          "gender_conf"),
-        ("age_range",       "age_range_conf"),
-        ("top_color",       "top_color_conf"),
-        ("bottom_color",    "bottom_color_conf"),
-        ("shoes_color",     "shoes_conf"),
-        ("hat_color",       "hat_color_conf"),
-        ("bag_type",        "bag_type_conf"),
-        ("is_wearing_mask", "mask_conf"),
-        ("hair_style",      "hair_style_conf"),
-        ("hair_color",      "hair_color_conf"),
+        # binary / presence fields — most reliable conflict signal
+        ("gender",               "gender_conf"),
+        ("is_wearing_mask",      "mask_conf"),
+        ("bag_presence",         "bag_conf"),
+        ("hat_presence",         "hat_conf"),
+        # color fields — VLM self-reported confidence
+        ("upper_clothing_color", "upper_clothing_conf"),
+        ("lower_clothing_color", "lower_clothing_conf"),
+        ("shoes_color",          "shoes_conf"),
+        ("hat_color",            "hat_conf"),
+        ("hair_color",           "hair_conf"),
+        # backward compat (old SigLIP columns, populated for existing rows)
+        ("top_color",            "top_color_conf"),
+        ("bottom_color",         "bottom_color_conf"),
+        ("age_range",            "age_range_conf"),
+        # NOTE: upper_clothing_type, lower_clothing_type, *_desc intentionally
+        # excluded — free-text from VLM; "blazer" ≠ "suit jacket" in string
+        # comparison but may refer to the same garment.
     ]
     for attr, conf_field in checks:
         v1 = _norm_meta(attr, getattr(t1, attr, None))
@@ -267,7 +294,8 @@ def _metadata_matches(t1: Tracklet, t2: Tracklet) -> bool:
         # Values differ → check confidence; missing conf → treat as uncertain
         c1 = getattr(t1, conf_field, None) or 0.0
         c2 = getattr(t2, conf_field, None) or 0.0
-        if c1 >= _CONF_THRESHOLD and c2 >= _CONF_THRESHOLD:
+        threshold = _CONF_THRESHOLDS.get(attr, _CONF_THRESHOLD)
+        if c1 >= threshold and c2 >= threshold:
             return False  # both sides confident about conflicting values
     return True
 
