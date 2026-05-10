@@ -440,6 +440,44 @@ def _generate_dinov2_embeddings(
 # Stage 6: SigLIP 2 Attribute Tagging
 # ---------------------------------------------------------------------------
 
+_AGE_RANGE_MAP: dict[str, str] = {
+    "child person":       "child",
+    "teenage person":     "teenager",
+    "young adult person": "young_adult",
+    "middle-aged person": "middle_aged",
+    "elderly person":     "elderly",
+}
+_BAG_TYPE_MAP: dict[str, str] = {
+    "person with backpack":     "backpack",
+    "person with handbag":      "handbag",
+    "person with shoulder bag": "shoulder_bag",
+    "person with suitcase":     "suitcase",
+    "person without bag":       "none",
+}
+_HAT_COLOR_MAP: dict[str, str] = {
+    "person with red hat":    "red",
+    "person with blue hat":   "blue",
+    "person with black hat":  "black",
+    "person with white hat":  "white",
+    "person with gray hat":   "gray",
+    "person with yellow hat": "yellow",
+    "person without hat":     "none",
+}
+_HAIR_STYLE_MAP: dict[str, str] = {
+    "person with short hair": "short",
+    "person with long hair":  "long",
+    "person with ponytail":   "ponytail",
+    "person with tied hair":  "tied",
+    "bald person":            "bald",
+}
+_HAIR_COLOR_MAP: dict[str, str] = {
+    "person with black hair":  "black",
+    "person with brown hair":  "brown",
+    "person with blonde hair": "blonde",
+    "person with gray hair":   "gray",
+    "person with white hair":  "white",
+}
+
 def _run_siglip2_attributes(
     frames: list[np.ndarray],
     bbox: list[float],
@@ -486,6 +524,12 @@ def _run_siglip2_attributes(
         "gender": ["man", "woman"],
         "bag": ["person carrying a bag", "person not carrying a bag"],
         "hat": ["person wearing a hat", "person not wearing a hat"],
+        "age_range":      list(_AGE_RANGE_MAP.keys()),
+        "hat_color":      list(_HAT_COLOR_MAP.keys()),
+        "bag_type":       list(_BAG_TYPE_MAP.keys()),
+        "is_wearing_mask": ["person wearing face mask", "person not wearing face mask"],
+        "hair_style":     list(_HAIR_STYLE_MAP.keys()),
+        "hair_color":     list(_HAIR_COLOR_MAP.keys()),
     }
 
     attributes: dict[str, str] = {}
@@ -517,11 +561,24 @@ def _run_siglip2_attributes(
                 attributes["bag"] = "carrying_bag" if "not" not in best_label else "no_bag"
             elif attr_type == "hat":
                 attributes["hat"] = "wearing_hat" if "not" not in best_label else "no_hat"
+            elif attr_type == "age_range":
+                attributes["age_range"] = _AGE_RANGE_MAP.get(best_label, "unknown")
+            elif attr_type == "hat_color":
+                attributes["hat_color"] = _HAT_COLOR_MAP.get(best_label, "unknown")
+            elif attr_type == "bag_type":
+                attributes["bag_type"] = _BAG_TYPE_MAP.get(best_label, "unknown")
+            elif attr_type == "is_wearing_mask":
+                attributes["is_wearing_mask"] = "yes" if best_label == "person wearing face mask" else "no"
+            elif attr_type == "hair_style":
+                attributes["hair_style"] = _HAIR_STYLE_MAP.get(best_label, "unknown")
+            elif attr_type == "hair_color":
+                attributes["hair_color"] = _HAIR_COLOR_MAP.get(best_label, "unknown")
 
         except Exception as exc:
             logger.warning("SigLIP2 attribute failed for %s: %s", attr_type, exc)
 
-    for key in ["top_color", "bottom_color", "gender", "bag", "hat"]:
+    for key in ["top_color", "bottom_color", "gender", "bag", "hat",
+                "age_range", "hat_color", "bag_type", "is_wearing_mask", "hair_style", "hair_color"]:
         if key not in attributes:
             attributes[key] = "unknown"
 
@@ -1010,6 +1067,12 @@ def _batch_extract_features(
                                  "gray shoes", "blue shoes", "red shoes"],
                 "bag": ["person carrying bag", "person without bag"],
                 "hat": ["person wearing hat", "person without hat"],
+                "age_range":      list(_AGE_RANGE_MAP.keys()),
+                "hat_color":      list(_HAT_COLOR_MAP.keys()),
+                "bag_type":       list(_BAG_TYPE_MAP.keys()),
+                "is_wearing_mask": ["person wearing face mask", "person not wearing face mask"],
+                "hair_style":     list(_HAIR_STYLE_MAP.keys()),
+                "hair_color":     list(_HAIR_COLOR_MAP.keys()),
             }
 
             # Encode ALL crop images once using the pre-built 384px crops
@@ -1043,6 +1106,18 @@ def _batch_extract_features(
                         val = "no_bag" if "without" in lbl else "carrying_bag"
                     elif attr_name == "hat":
                         val = "no_hat" if "without" in lbl else "wearing_hat"
+                    elif attr_name == "age_range":
+                        val = _AGE_RANGE_MAP.get(lbl, "unknown")
+                    elif attr_name == "hat_color":
+                        val = _HAT_COLOR_MAP.get(lbl, "unknown")
+                    elif attr_name == "bag_type":
+                        val = _BAG_TYPE_MAP.get(lbl, "unknown")
+                    elif attr_name == "is_wearing_mask":
+                        val = "yes" if lbl == "person wearing face mask" else "no"
+                    elif attr_name == "hair_style":
+                        val = _HAIR_STYLE_MAP.get(lbl, "unknown")
+                    elif attr_name == "hair_color":
+                        val = _HAIR_COLOR_MAP.get(lbl, "unknown")
                     else:
                         val = lbl.split()[0]
                     attr_votes[i_t][attr_name] = val
@@ -1050,21 +1125,34 @@ def _batch_extract_features(
 
             for i_t, av in enumerate(attr_votes):
                 all_attributes.append({
-                    "gender": av.get("gender", "unknown"),
-                    "top_color": av.get("top_color", "unknown"),
-                    "bottom_color": av.get("bottom_color", "unknown"),
-                    "shoes_color": av.get("shoes_color", "unknown"),
-                    "bag": av.get("bag", "unknown"),
-                    "hat": av.get("hat", "unknown"),
+                    "gender":         av.get("gender", "unknown"),
+                    "top_color":      av.get("top_color", "unknown"),
+                    "bottom_color":   av.get("bottom_color", "unknown"),
+                    "shoes_color":    av.get("shoes_color", "unknown"),
+                    "bag":            av.get("bag", "unknown"),
+                    "hat":            av.get("hat", "unknown"),
+                    "age_range":      av.get("age_range", "unknown"),
+                    "hat_color":      av.get("hat_color", "unknown"),
+                    "bag_type":       av.get("bag_type", "unknown"),
+                    "is_wearing_mask": av.get("is_wearing_mask", "unknown"),
+                    "hair_style":     av.get("hair_style", "unknown"),
+                    "hair_color":     av.get("hair_color", "unknown"),
                 })
                 rc = attr_raw_confs[i_t]
                 bag_conf = rc.get("bag", 0.0)
                 hat_conf = rc.get("hat", 0.0)
                 all_attr_confs[i_t] = {
-                    "gender_conf": rc.get("gender"),
-                    "top_color_conf": rc.get("top_color"),
-                    "shoes_conf": rc.get("shoes_color"),
-                    "accessory_conf": float(max(bag_conf, hat_conf)) if (bag_conf or hat_conf) else None,
+                    "gender_conf":      rc.get("gender"),
+                    "top_color_conf":   rc.get("top_color"),
+                    "bottom_color_conf": rc.get("bottom_color"),
+                    "shoes_conf":       rc.get("shoes_color"),
+                    "accessory_conf":   float(max(bag_conf, hat_conf)) if (bag_conf or hat_conf) else None,
+                    "age_range_conf":   rc.get("age_range"),
+                    "hat_color_conf":   rc.get("hat_color"),
+                    "bag_type_conf":    rc.get("bag_type"),
+                    "mask_conf":        rc.get("is_wearing_mask"),
+                    "hair_style_conf":  rc.get("hair_style"),
+                    "hair_color_conf":  rc.get("hair_color"),
                 }
         except Exception as exc:
             logger.warning("[pipeline] SigLIP true-batch failed: %s — fallback", exc)
@@ -1293,9 +1381,15 @@ def _process_video_sync(
             end_time=obs[-1].timestamp_second,
             quality_score=quality.average_confidence,
             gender=attributes.get("gender", "unknown"),
+            age_range=attributes.get("age_range", "unknown"),
             top_color=attributes.get("top_color", "unknown"),
             bottom_color=attributes.get("bottom_color", "unknown"),
             shoes_color=attributes.get("shoes_color", "unknown"),
+            hat_color=attributes.get("hat_color", "unknown"),
+            bag_type=attributes.get("bag_type", "unknown"),
+            is_wearing_mask=attributes.get("is_wearing_mask", "unknown"),
+            hair_style=attributes.get("hair_style", "unknown"),
+            hair_color=attributes.get("hair_color", "unknown"),
             appearance_summary=summary,
             crop_url=crop_url,
             representative_bbox=[int(x) for x in rep_bbox_float],
@@ -1308,8 +1402,15 @@ def _process_video_sync(
             occlusion_score=0.0,
             gender_conf=attr_conf.get("gender_conf"),
             top_color_conf=attr_conf.get("top_color_conf"),
+            bottom_color_conf=attr_conf.get("bottom_color_conf"),
             shoes_conf=attr_conf.get("shoes_conf"),
             accessory_conf=attr_conf.get("accessory_conf"),
+            age_range_conf=attr_conf.get("age_range_conf"),
+            hat_color_conf=attr_conf.get("hat_color_conf"),
+            bag_type_conf=attr_conf.get("bag_type_conf"),
+            mask_conf=attr_conf.get("mask_conf"),
+            hair_style_conf=attr_conf.get("hair_style_conf"),
+            hair_color_conf=attr_conf.get("hair_color_conf"),
             contributing_cameras=[camera_id],
             contributing_video_ids=[video_id],
         ))
@@ -1496,9 +1597,15 @@ def process_batch(req: BatchProcessRequest) -> BatchProcessResponse:
             end_time=end_time,
             quality_score=float(rep_det.get("score", 0.5)),
             gender=attributes.get("gender", "unknown"),
+            age_range=attributes.get("age_range", "unknown"),
             top_color=attributes.get("top_color", "unknown"),
             bottom_color=attributes.get("bottom_color", "unknown"),
             shoes_color="unknown",
+            hat_color=attributes.get("hat_color", "unknown"),
+            bag_type=attributes.get("bag_type", "unknown"),
+            is_wearing_mask=attributes.get("is_wearing_mask", "unknown"),
+            hair_style=attributes.get("hair_style", "unknown"),
+            hair_color=attributes.get("hair_color", "unknown"),
             appearance_summary=summary,
             representative_bbox=[int(x) for x in rep_bbox],
             bev_x=rep_bev_x,

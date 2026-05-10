@@ -336,6 +336,11 @@ def _save_tracklets_from_gpu_result(
             top_color=str(t.get("top_color") or "unknown"),
             bottom_color=str(t.get("bottom_color") or "unknown"),
             shoes_color=str(t.get("shoes_color") or "unknown"),
+            hat_color=str(t.get("hat_color") or "unknown"),
+            bag_type=str(t.get("bag_type") or "unknown"),
+            is_wearing_mask=str(t.get("is_wearing_mask") or "unknown"),
+            hair_style=str(t.get("hair_style") or "unknown"),
+            hair_color=str(t.get("hair_color") or "unknown"),
             appearance_summary=str(t.get("appearance_summary") or ""),
             bev_x=float(t.get("bev_x") or 0.0),
             bev_y=float(t.get("bev_y") or 0.0),
@@ -345,8 +350,15 @@ def _save_tracklets_from_gpu_result(
             contributing_video_ids=t.get("contributing_video_ids") or [],
             gender_conf=_opt_float(t.get("gender_conf")),
             top_color_conf=_opt_float(t.get("top_color_conf")),
+            bottom_color_conf=_opt_float(t.get("bottom_color_conf")),
             shoes_conf=_opt_float(t.get("shoes_conf")),
             accessory_conf=_opt_float(t.get("accessory_conf")),
+            age_range_conf=_opt_float(t.get("age_range_conf")),
+            hat_color_conf=_opt_float(t.get("hat_color_conf")),
+            bag_type_conf=_opt_float(t.get("bag_type_conf")),
+            mask_conf=_opt_float(t.get("mask_conf")),
+            hair_style_conf=_opt_float(t.get("hair_style_conf")),
+            hair_color_conf=_opt_float(t.get("hair_color_conf")),
         )
         session.add(tracklet)
 

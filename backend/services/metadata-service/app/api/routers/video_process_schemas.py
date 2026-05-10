@@ -96,11 +96,23 @@ class TrackletResult(BaseModel):
     action: str = "standing"
     action_confidence: float = 0.0
     occlusion_score: float = 0.0
+    hat_color: str = "unknown"
+    bag_type: str = "unknown"
+    is_wearing_mask: str = "unknown"
+    hair_style: str = "unknown"
+    hair_color: str = "unknown"
     # Per-attribute SigLIP2 confidence scores [0, 1] (None = not yet extracted)
     gender_conf: Optional[float] = None
     top_color_conf: Optional[float] = None
+    bottom_color_conf: Optional[float] = None
     shoes_conf: Optional[float] = None
     accessory_conf: Optional[float] = None
+    age_range_conf: Optional[float] = None
+    hat_color_conf: Optional[float] = None
+    bag_type_conf: Optional[float] = None
+    mask_conf: Optional[float] = None
+    hair_style_conf: Optional[float] = None
+    hair_color_conf: Optional[float] = None
     # Cross-camera: which cameras/frames contributed to this tracklet
     contributing_cameras: list[str] = Field(default_factory=list)
     contributing_video_ids: list[str] = Field(default_factory=list)

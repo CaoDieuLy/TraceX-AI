@@ -269,8 +269,15 @@ class Tracklet(Base):
     # Per-attribute confidence scores from SigLIP2 (null = not yet extracted)
     gender_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
     top_color_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bottom_color_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
     shoes_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
     accessory_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    age_range_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hat_color_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bag_type_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mask_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hair_style_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hair_color_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Appearance attributes
     gender: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
@@ -278,6 +285,11 @@ class Tracklet(Base):
     top_color: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     bottom_color: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     shoes_color: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    hat_color: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    bag_type: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    is_wearing_mask: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    hair_style: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    hair_color: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     appearance_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
     # Spatial (BEV)
