@@ -819,8 +819,19 @@ def _default_attributes() -> dict[str, Any]:
 
 
 _VLM_PROMPT = """You are analyzing a person crop from a surveillance camera.
-Describe this person's visible appearance accurately.
-Do NOT choose from a fixed label list — use free text for clothing descriptions.
+Describe this person's visible appearance accurately using ALL visible cues.
+
+GENDER INFERENCE RULES (important):
+- Infer gender from ANY combination of: clothing style (dress/skirt → woman), hair length, body silhouette, accessories, overall appearance
+- Use "man" or "woman" whenever you can make a reasonable inference — do NOT default to "unknown" if there are visible cues
+- Only use "unknown" if the person is completely obscured, facing away with no distinguishing features, or truly ambiguous
+- A person in a dress/skirt: "woman". A person in a suit/tie: likely "man". Long hair + feminine clothing: "woman". Etc.
+
+AGE INFERENCE RULES:
+- Estimate from body size, posture, hair color, clothing style
+- Use "young_adult" (18-35), "middle_aged" (35-55), "elderly" (55+), "teenager" (13-17), "child" (<13)
+- Prefer a guess with lower confidence over "unknown"
+
 Return ONLY a valid JSON object with these exact fields:
 
 {
@@ -853,16 +864,19 @@ Return ONLY a valid JSON object with these exact fields:
   "hair_style": "short or long or ponytail or tied or bald or unknown",
   "hair_color": "color or unknown",
   "hair_conf": 0.0,
-  "appearance_summary": "one concise sentence"
+  "appearance_summary": "one concise sentence describing the person"
 }
 
-Use "unknown" for anything not clearly visible.
-Do not infer gender or age from clothing alone.
+Use "unknown" ONLY when truly impossible to determine — prefer a best-guess with lower confidence.
 Replace all 0.0 placeholders with your actual confidence (0.0–1.0)."""
 
 _VLM_BATCH_PROMPT_TEMPLATE = """You are analyzing {n} person crops from surveillance cameras.
 The images above show persons labeled (1) to ({n}) in order.
-Describe each person's visible appearance accurately. Use free text for clothing descriptions.
+Describe each person's visible appearance using ALL visible cues. Use free text for clothing descriptions.
+
+GENDER: infer from clothing style (dress/skirt→woman), hair, body silhouette — do NOT default to "unknown" if cues are visible.
+AGE: estimate from body, posture, hair — prefer a guess with low confidence over "unknown".
+
 Return ONLY a valid JSON array with exactly {n} objects in order (index 0 = person 1).
 Each object must have the same fields as below:
 
@@ -896,11 +910,11 @@ Each object must have the same fields as below:
   "hair_style": "short or long or ponytail or tied or bald or unknown",
   "hair_color": "color or unknown",
   "hair_conf": 0.0,
-  "appearance_summary": "one concise sentence"
+  "appearance_summary": "one concise sentence describing the person"
 }}
 
-Use "unknown" for anything not clearly visible. Replace 0.0 with actual confidence (0.0–1.0).
-Return only the JSON array, no surrounding text."""
+Use "unknown" ONLY when truly impossible — prefer best-guess with lower confidence.
+Replace 0.0 with actual confidence (0.0–1.0). Return only the JSON array, no surrounding text."""
 
 
 _GENDER_NORM   = {"male": "man", "man": "man", "female": "woman", "woman": "woman"}
@@ -1630,18 +1644,29 @@ def _process_video_sync(
     # Stage 8: Post-hoc fragment merging via embedding cosine similarity.
     import numpy as _np
 
-    _merge_embs = (
-        all_siglip_embeddings
-        if any(len(e) > 0 for e in all_siglip_embeddings)
-        else all_embeddings
+    _use_siglip = any(len(e) > 0 for e in all_siglip_embeddings)
+    _merge_embs = all_siglip_embeddings if _use_siglip else all_embeddings
+    _n_raw = len(accepted)
+    logger.info(
+        "[merge] %s: %s  0/%d — merging fragments (emb=%s, threshold=0.85, max_gap=60s)",
+        video_id, _vlm_progress_bar(0, _n_raw), _n_raw, "SigLIP" if _use_siglip else "DINOv2",
     )
+
     _merger = TrackletFragmentMerger(similarity_threshold=0.85, max_gap_seconds=60.0)
     _orig_accepted = list(accepted)
+    _t_merge = time.perf_counter()
     accepted, _groups = _merger.merge(list(accepted), _merge_embs)
+    _merge_elapsed = time.perf_counter() - _t_merge
 
     _n_merged = sum(len(g) - 1 for g in _groups if len(g) > 1)
-    logger.info("[pipeline] %s: fragment merge → %d tracklets (%d fragments joined)",
-                video_id, len(accepted), _n_merged)
+    _multi_groups = [g for g in _groups if len(g) > 1]
+    logger.info(
+        "[merge] %s: %s  %d/%d → %d tracklets (%d fragments joined, %d groups, %.2fs)",
+        video_id, _vlm_progress_bar(_n_raw, _n_raw), _n_raw, _n_raw,
+        len(accepted), _n_merged, len(_multi_groups), _merge_elapsed,
+    )
+    for _gi, _g in enumerate(_multi_groups):
+        logger.info("[merge] %s:   group %d: %d fragments → 1", video_id, _gi + 1, len(_g))
 
     def _pool_avg(vecs: list) -> list:
         valid = [v for v in vecs if v]

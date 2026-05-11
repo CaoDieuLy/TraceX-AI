@@ -322,6 +322,11 @@ def _save_tracklets_from_gpu_result(
         def _opt_float(val) -> float | None:
             return float(val) if val is not None else None
 
+        def _s(val, max_len: int, fallback: str = "unknown") -> str:
+            """str-coerce, fallback on empty, hard-truncate to column max_len."""
+            v = str(val).strip() if val is not None else ""
+            return (v or fallback)[:max_len]
+
         tracklet = Tracklet(
             tracklet_id=tracklet_id,
             video_id=video_id,
@@ -331,17 +336,17 @@ def _save_tracklets_from_gpu_result(
             end_time=float(t.get("end_time") or 0.0),
             quality_score=float(t.get("quality_score") or 0.0),
             occlusion_score=float(t.get("occlusion_score") or 0.0),
-            gender=str(t.get("gender") or "unknown"),
-            age_range=str(t.get("age_range") or "unknown"),
+            gender=_s(t.get("gender"), 32),
+            age_range=_s(t.get("age_range"), 32),
             # backward compat — populated from VLM upper/lower clothing color
-            top_color=str(t.get("top_color") or t.get("upper_clothing_color") or "unknown"),
-            bottom_color=str(t.get("bottom_color") or t.get("lower_clothing_color") or "unknown"),
-            shoes_color=str(t.get("shoes_color") or "unknown"),
-            hat_color=str(t.get("hat_color") or "unknown"),
-            bag_type=str(t.get("bag_type") or "unknown"),
-            is_wearing_mask=str(t.get("is_wearing_mask") or "unknown"),
-            hair_style=str(t.get("hair_style") or "unknown"),
-            hair_color=str(t.get("hair_color") or "unknown"),
+            top_color=_s(t.get("top_color") or t.get("upper_clothing_color"), 64),
+            bottom_color=_s(t.get("bottom_color") or t.get("lower_clothing_color"), 64),
+            shoes_color=_s(t.get("shoes_color"), 64),
+            hat_color=_s(t.get("hat_color"), 64),
+            bag_type=_s(t.get("bag_type"), 64),
+            is_wearing_mask=_s(t.get("is_wearing_mask"), 16),
+            hair_style=_s(t.get("hair_style"), 64),
+            hair_color=_s(t.get("hair_color"), 64),
             appearance_summary=str(t.get("appearance_summary") or ""),
             # open-vocabulary VLM metadata
             upper_clothing_desc=t.get("upper_clothing_desc"),
@@ -355,11 +360,11 @@ def _save_tracklets_from_gpu_result(
             shoes_desc=t.get("shoes_desc"),
             shoes_type=t.get("shoes_type"),
             bag_desc=t.get("bag_desc"),
-            bag_presence=t.get("bag_presence"),
+            bag_presence=_s(t.get("bag_presence"), 16, "unknown") if t.get("bag_presence") else None,
             bag_conf=_opt_float(t.get("bag_conf")),
             hat_desc=t.get("hat_desc"),
-            hat_presence=t.get("hat_presence"),
-            hat_type=t.get("hat_type"),
+            hat_presence=_s(t.get("hat_presence"), 16, "unknown") if t.get("hat_presence") else None,
+            hat_type=_s(t.get("hat_type"), 128) if t.get("hat_type") else None,
             hat_conf=_opt_float(t.get("hat_conf")),
             bev_x=float(t.get("bev_x") or 0.0),
             bev_y=float(t.get("bev_y") or 0.0),
