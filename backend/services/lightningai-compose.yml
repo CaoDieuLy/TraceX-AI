@@ -92,6 +92,9 @@ services:
       - HF_HOME=/workspace/models/huggingface
       - TORCH_HOME=/workspace/models/torch
       - TRANSFORMERS_OFFLINE=1
+      - QWEN2VL_MODEL_ID=${QWEN2VL_MODEL_ID:-}
+      - VLM_BATCH_SIZE=${VLM_BATCH_SIZE:-1}
+      - VLM_BATCH_MAX_NEW_TOKENS_PER_CROP=${VLM_BATCH_MAX_NEW_TOKENS_PER_CROP:-512}
       - MAX_VIDEO_FRAMES=500
       # Public base URL for metadata-service (used for generating storage URLs)
       - NEXT_PUBLIC_API_GATEWAY_URL=${COOLIFY_PUBLIC_URL:-}
@@ -111,9 +114,9 @@ services:
               options:
                 NVIDIA_VISIBLE_DEVICES: "0"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=20).read()"]
       interval: 30s
-      timeout: 10s
+      timeout: 30s
       retries: 5
       start_period: 120s
     networks:

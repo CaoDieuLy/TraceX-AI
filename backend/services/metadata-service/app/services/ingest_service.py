@@ -582,8 +582,8 @@ def ingest_move_and_process(
                               title=f["name"], source_filename=f["name"],
                               drive_file_id=f["id"],
                               recorded_at=_parse_recorded_at(f["name"]))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("[db] Failed to register video %s: %s", f.get("name"), exc)
         session.commit()
 
         # Stage A: download 4 videos in parallel

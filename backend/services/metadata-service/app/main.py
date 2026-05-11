@@ -111,7 +111,7 @@ _CROPS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static/crops", StaticFiles(directory=str(_CROPS_DIR)), name="crops")
 
 @app.get("/health")
-def health_check():
+async def health_check():
     from .services.model_warmup import get_loaded_models, is_warmup_done
     return {
         "status": "healthy",

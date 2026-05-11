@@ -32,6 +32,7 @@ class SearchRequest(BaseModel):
     time_from: str | None = None
     time_to: str | None = None
     query_image_url: str | None = None  # URL of uploaded query image (for history display)
+    user_id: int = 1  # injected by metadata-service from JWT; fallback=1 for direct calls
 
 from shared.database import SessionLocal
 from shared.models import QueryCandidate, QueryCandidateTracklet, QueryHistory, Tracklet, Video
@@ -446,11 +447,10 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         search_query = _translate_query(query) if query else ""
 
         # ── Luồng 20.5: Create QueryHistory record ──────────────────────
-        # Default user_id=1 (anonymous) — auth from metadata-service injects real user
         qid = str(uuid.uuid4())
         qh = QueryHistory(
             query_id=qid,
-            user_id=1,
+            user_id=body.user_id,
             query_text=query or "",
             status="searching",
             query_image_url=body.query_image_url or None,

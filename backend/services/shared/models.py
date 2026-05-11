@@ -200,7 +200,7 @@ class Video(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     video_id: Mapped[str] = mapped_column(
-        String(36), default=lambda: str(uuid.uuid4()), nullable=False,
+        String(255), default=lambda: str(uuid.uuid4()), nullable=False,
     )
     camera_id: Mapped[str | None] = mapped_column(String(50), nullable=True,)
     user_id: Mapped[int | None] = mapped_column(
@@ -259,7 +259,7 @@ class Tracklet(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True,)
     tracklet_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True,)
     video_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("videos.video_id", ondelete="CASCADE"), nullable=False,
+        String(255), ForeignKey("videos.video_id", ondelete="CASCADE"), nullable=False,
     )
     camera_id: Mapped[str] = mapped_column(String(50), nullable=False,)
     track_id: Mapped[str] = mapped_column(String(50), nullable=False)  # ID within the video
@@ -272,7 +272,7 @@ class Tracklet(Base):
     quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     occlusion_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    # Per-attribute confidence scores from SigLIP2 (null = not yet extracted)
+    # Per-attribute confidence scores from Qwen2-VL-2B-Instruct (null = not yet extracted)
     gender_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
     top_color_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
     bottom_color_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -298,7 +298,7 @@ class Tracklet(Base):
     hair_color: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     appearance_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
-    # Open-vocabulary clothing metadata (Qwen2-VL-7B-Instruct)
+    # Open-vocabulary clothing metadata (Qwen2-VL-2B-Instruct)
     upper_clothing_desc:  Mapped[str | None] = mapped_column(Text, nullable=True)
     upper_clothing_color: Mapped[str | None] = mapped_column(String(64), nullable=True)
     upper_clothing_type:  Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -363,9 +363,10 @@ class Tracklet(Base):
 
 
 class TrackletEmbedding(Base):
-    """EVA-02 ViT-L/14 appearance embedding per tracklet (Section 20.2 row 8).
+    """DINOv2 ViT-L/14 Re-ID embedding + SigLIP 2-So400m search embedding per tracklet.
 
-    1024-dimensional vector for vector similarity search.
+    embedding: 1024-dim (DINOv2 ViT-L/14) — cosine Re-ID similarity
+    siglip_embedding: 1152-dim (SigLIP 2-So400m image encoder) — text-image search
     """
     __tablename__ = "tracklets_embeddings"
     __table_args__ = (
@@ -439,7 +440,7 @@ class QueryHistory(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
     )
     video_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("videos.video_id", ondelete="SET NULL"), nullable=True,
+        String(255), ForeignKey("videos.video_id", ondelete="SET NULL"), nullable=True,
     )
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(

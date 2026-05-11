@@ -9,8 +9,11 @@ import logging
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+from ...core.dependencies import get_current_user
+from shared.models import User
 
 
 class SearchRequest(BaseModel):
@@ -70,7 +73,10 @@ def _post_to_query_service(path: str, payload: dict[str, Any], timeout: float = 
 
 
 @router.post("")
-def search_candidates(body: SearchRequest) -> dict[str, Any]:
+def search_candidates(
+    body: SearchRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     """
     Search candidates — forwarded to query-service for GPU ranking.
     Accepts JSON body with: query (or text), top_k, offset, camera_ids, time_from, time_to.
@@ -80,6 +86,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         "query": query_text,
         "top_k": body.top_k,
         "offset": body.offset,
+        "user_id": current_user.id,
     }
     if body.camera_ids:
         payload["camera_ids"] = body.camera_ids

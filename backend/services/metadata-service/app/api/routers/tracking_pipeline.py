@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
@@ -170,7 +171,8 @@ class VideoFrameSampler:
         if source_fps <= 0:
             source_fps = float(self.sample_fps)
 
-        frames: list[SampledFrame] = []
+        # Collect sampled frames first (sequential — codec requires in-order reads)
+        raw: list[tuple[int, float, np.ndarray]] = []
         next_emit = 0.0
         src_idx = 0
         sampled_idx = 0
@@ -182,19 +184,28 @@ class VideoFrameSampler:
                     break
                 ts = src_idx / source_fps
                 if ts + 1e-9 >= next_emit:
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                    frames.append(SampledFrame(
-                        frame_index=sampled_idx,
-                        timestamp_second=round(ts, 6),
-                        image=frame,
-                        laplacian_score=round(lap, 6),
-                    ))
+                    raw.append((sampled_idx, round(ts, 6), frame.copy()))
                     sampled_idx += 1
                     next_emit += 1.0 / self.sample_fps
                 src_idx += 1
         finally:
             cap.release()
+
+        # Compute Laplacian in parallel — cv2 releases GIL so threads run truly concurrently
+        def _laplacian(item: tuple[int, float, np.ndarray]) -> SampledFrame:
+            idx, ts, f = item
+            gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+            lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            return SampledFrame(
+                frame_index=idx,
+                timestamp_second=ts,
+                image=f,
+                laplacian_score=round(lap, 6),
+            )
+
+        workers = min(8, len(raw) or 1)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            frames = list(ex.map(_laplacian, raw))
 
         return tuple(frames)
 

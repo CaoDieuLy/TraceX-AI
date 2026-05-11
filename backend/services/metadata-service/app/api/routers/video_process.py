@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,10 +52,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["video"])
 
+
+def _get_positive_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %d", name, raw, default)
+        return default
+
+
 DEFAULT_SAMPLE_INTERVAL = 15
 DEFAULT_MIN_BBOX_AREA = 400
 DEFAULT_BEV_MAX_DIST = 1.5
 MAX_WORKERS = int(os.getenv("BATCH_MAX_WORKERS", "8"))
+VLM_BATCH_SIZE = _get_positive_env_int("VLM_BATCH_SIZE", 1)
+VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
+    "VLM_BATCH_MAX_NEW_TOKENS_PER_CROP", 512
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +79,7 @@ MAX_WORKERS = int(os.getenv("BATCH_MAX_WORKERS", "8"))
 # ---------------------------------------------------------------------------
 
 def _get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda:0")
-    return torch.device("cpu")
+    return torch.device("cuda")
 
 
 def _video_to_frames(video_path: str, max_frames: int = 500) -> tuple[list[np.ndarray], float]:
@@ -105,12 +121,12 @@ def _detect_persons(frame: np.ndarray, threshold: float = 0.3) -> list[dict]:
         return []
 
     device = _get_device()
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    dtype = torch.float16
     pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     inputs = processor(images=pil_img, text="person.", return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    autocast_ctx = torch.autocast(device_type=device.type, dtype=dtype) if device.type == "cuda" else torch.no_grad()
+    autocast_ctx = torch.autocast("cuda", dtype=dtype)
     with torch.no_grad(), autocast_ctx:
         outputs = model(**inputs)
 
@@ -142,12 +158,14 @@ def _detect_persons(frame: np.ndarray, threshold: float = 0.3) -> list[dict]:
 def _detect_persons_rtdetr(
     frames: list[np.ndarray],
     threshold: float = 0.4,
-    batch_size: int = 64,
+    batch_size: int = 128,
 ) -> list[list[dict]] | None:
     """RT-DETR R50 person detection — primary detector when loaded.
     Returns None if not available (caller falls back to GDINO).
-    batch_size=64 is safe on A100 80GB (256 causes OOM).
+    batch_size=128 on A100 80GB (256 causes OOM).
+    CPU preprocessing is pipelined with GPU inference via ThreadPoolExecutor.
     """
+    from concurrent.futures import ThreadPoolExecutor
     model = get_model("rtdetr")
     processor = get_model("rtdetr_processor")
     if model is None or processor is None:
@@ -155,44 +173,53 @@ def _detect_persons_rtdetr(
 
     person_ids: set = get_model("rtdetr_person_ids") or {0, 1}
     device = _get_device()
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    dtype = torch.float16
+
+    batches = [frames[i:i + batch_size] for i in range(0, len(frames), batch_size)]
+
+    def _preprocess(batch: list) -> tuple:
+        sizes = [(f.shape[0], f.shape[1]) for f in batch]
+        pil_imgs = [Image.fromarray(f[:, :, ::-1]) for f in batch]
+        inputs = processor(images=pil_imgs, return_tensors="pt")
+        return inputs, sizes
 
     all_dets: list[list[dict]] = []
+    autocast_ctx = torch.autocast("cuda", dtype=dtype)
 
-    for i in range(0, len(frames), batch_size):
-        batch = frames[i: i + batch_size]
-        sizes = [(f.shape[0], f.shape[1]) for f in batch]
-        pil_imgs = [Image.fromarray(f[:, :, ::-1]) for f in batch]  # BGR→RGB
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        # Submit first batch preprocessing
+        futures = [ex.submit(_preprocess, b) for b in batches[:2]]
 
-        inputs = processor(images=pil_imgs, return_tensors="pt")
-        inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
-                  for k, v in inputs.items()}
+        for idx, batch in enumerate(batches):
+            # Prefetch next+1 batch while current is on GPU
+            if idx + 2 < len(batches):
+                futures.append(ex.submit(_preprocess, batches[idx + 2]))
 
-        try:
-            autocast_ctx = (
-                torch.autocast(device_type=device.type, dtype=dtype)
-                if device.type == "cuda" else torch.no_grad()
-            )
-            with torch.no_grad(), autocast_ctx:
-                outputs = model(**inputs)
-            results = processor.post_process_object_detection(
-                outputs, threshold=threshold,
-                target_sizes=torch.tensor(sizes, device=device),
-            )
-        except Exception as exc:
-            logger.warning("[rtdetr] batch failed: %s", exc)
-            all_dets.extend([[] for _ in batch])
-            continue
+            inputs_raw, sizes = futures[idx].result()
+            inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
+                      for k, v in inputs_raw.items()}
 
-        for res in results:
-            dets = []
-            for score, label, box in zip(res["scores"], res["labels"], res["boxes"]):
-                if label.item() not in person_ids:
-                    continue
-                x1, y1, x2, y2 = box.tolist()
-                dets.append({"bbox": [float(x1), float(y1), float(x2), float(y2)],
-                             "score": float(score), "label": "person"})
-            all_dets.append(dets)
+            try:
+                with torch.no_grad(), autocast_ctx:
+                    outputs = model(**inputs)
+                results = processor.post_process_object_detection(
+                    outputs, threshold=threshold,
+                    target_sizes=torch.tensor(sizes, device=device),
+                )
+            except Exception as exc:
+                logger.warning("[rtdetr] batch failed: %s", exc)
+                all_dets.extend([[] for _ in batch])
+                continue
+
+            for res in results:
+                dets = []
+                for score, label, box in zip(res["scores"], res["labels"], res["boxes"]):
+                    if label.item() not in person_ids:
+                        continue
+                    x1, y1, x2, y2 = box.tolist()
+                    dets.append({"bbox": [float(x1), float(y1), float(x2), float(y2)],
+                                 "score": float(score), "label": "person"})
+                all_dets.append(dets)
 
     return all_dets
 
@@ -218,8 +245,8 @@ def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.25) -> 
         return [[] for _ in frames]
 
     device = _get_device()
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
-    autocast_ctx = torch.autocast(device_type=device.type, dtype=dtype) if device.type == "cuda" else torch.no_grad()
+    dtype = torch.float16
+    autocast_ctx = torch.autocast("cuda", dtype=dtype)
 
     def _preprocess(batch_frames: list[np.ndarray]):
         pil_imgs = []
@@ -393,7 +420,7 @@ def _generate_dinov2_embeddings(
         return None
 
     device = _get_device()
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    dtype = torch.float16
 
     if not frames or not bboxes:
         return None
@@ -438,13 +465,13 @@ def _generate_dinov2_embeddings(
             k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
             for k, v in inputs.items()
         }
-        feats = model(**inputs).pooler_output.cpu().float()  # [N, 1024]
+        feats = model(**inputs).pooler_output.float()  # [N, 1024] — stays on GPU
 
-    avg = feats.mean(0).numpy()
-    norm = np.linalg.norm(avg)
+    avg = feats.mean(0)
+    norm = avg.norm()
     if norm > 0:
         avg = avg / norm
-    return avg.tolist()
+    return avg.cpu().tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +528,7 @@ def _legacy_run_siglip2_label_attributes(
         return _default_attributes()
 
     device = _get_device()
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    dtype = torch.float16
 
     x1, y1, x2, y2 = map(int, bbox)
     h, w = frames[0].shape[:2] if frames else (1080, 1920)
@@ -551,9 +578,9 @@ def _legacy_run_siglip2_label_attributes(
                 text=labels, images=pil_crop,
                 return_tensors="pt", padding=True
             )
-            siglip_dtype = torch.float16 if device.type == "cuda" else torch.float32
+            siglip_dtype = torch.float16
             inputs = {k: v.to(device, dtype=siglip_dtype) if v.is_floating_point() else v.to(device) for k, v in inputs.items()}
-            siglip_ctx = torch.autocast(device_type=device.type, dtype=siglip_dtype) if device.type == "cuda" else torch.no_grad()
+            siglip_ctx = torch.autocast("cuda", dtype=siglip_dtype)
             with torch.no_grad(), siglip_ctx:
                 outputs = model(**inputs)
             logits_per_image = outputs.logits_per_image
@@ -717,7 +744,7 @@ def _run_videomae_actions(
         return "standing"
 
     device = _get_device()
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    dtype = torch.float16
 
     if len(frames) < 2:
         return "standing"
@@ -742,7 +769,7 @@ def _run_videomae_actions(
     try:
         inputs = processor(crops, return_tensors="pt")
         inputs = {k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device) for k, v in inputs.items()}
-        vmae_ctx = torch.autocast(device_type=device.type, dtype=dtype) if device.type == "cuda" else torch.no_grad()
+        vmae_ctx = torch.autocast("cuda", dtype=dtype)
         with torch.no_grad(), vmae_ctx:
             outputs = model(**inputs)
         logits = outputs.logits
@@ -833,10 +860,160 @@ Use "unknown" for anything not clearly visible.
 Do not infer gender or age from clothing alone.
 Replace all 0.0 placeholders with your actual confidence (0.0–1.0)."""
 
+_VLM_BATCH_PROMPT_TEMPLATE = """You are analyzing {n} person crops from surveillance cameras.
+The images above show persons labeled (1) to ({n}) in order.
+Describe each person's visible appearance accurately. Use free text for clothing descriptions.
+Return ONLY a valid JSON array with exactly {n} objects in order (index 0 = person 1).
+Each object must have the same fields as below:
+
+{{
+  "gender": "man or woman or unknown",
+  "gender_conf": 0.0,
+  "age_range": "child or teenager or young_adult or middle_aged or elderly or unknown",
+  "age_range_conf": 0.0,
+  "upper_clothing_desc": "free text",
+  "upper_clothing_color": "dominant color or unknown",
+  "upper_clothing_type": "e.g. suit jacket or hoodie or t-shirt or unknown",
+  "upper_clothing_conf": 0.0,
+  "lower_clothing_desc": "free text",
+  "lower_clothing_color": "dominant color or unknown",
+  "lower_clothing_type": "e.g. jeans or formal trousers or shorts or unknown",
+  "lower_clothing_conf": 0.0,
+  "shoes_desc": "free text or unknown",
+  "shoes_color": "color or unknown",
+  "shoes_conf": 0.0,
+  "bag_presence": "yes or no or unknown",
+  "bag_type": "backpack or handbag or none or unknown",
+  "bag_desc": "free text or none",
+  "bag_conf": 0.0,
+  "hat_presence": "yes or no or unknown",
+  "hat_color": "color or none or unknown",
+  "hat_type": "cap or hat or helmet or none or unknown",
+  "hat_desc": "free text or none",
+  "hat_conf": 0.0,
+  "is_wearing_mask": "yes or no or unknown",
+  "mask_conf": 0.0,
+  "hair_style": "short or long or ponytail or tied or bald or unknown",
+  "hair_color": "color or unknown",
+  "hair_conf": 0.0,
+  "appearance_summary": "one concise sentence"
+}}
+
+Use "unknown" for anything not clearly visible. Replace 0.0 with actual confidence (0.0–1.0).
+Return only the JSON array, no surrounding text."""
+
+
+_GENDER_NORM   = {"male": "man", "man": "man", "female": "woman", "woman": "woman"}
+_AGE_NORM      = {
+    "young adult": "young_adult", "young_adult": "young_adult",
+    "middle aged": "middle_aged", "middle-aged": "middle_aged", "middle_aged": "middle_aged",
+    "teen": "teenager", "teenager": "teenager",
+    "elder": "elderly", "elderly": "elderly",
+    "child": "child",
+}
+_PRESENCE_NORM = {"yes": "yes", "no": "no", "true": "yes", "false": "no", "none": "no"}
+
+
+def _parse_vlm_attrs(parsed: dict) -> dict:
+    """Normalise a raw VLM JSON dict into the canonical attrs dict."""
+    def _s(key: str, fallback: str = "unknown") -> str:
+        v = parsed.get(key)
+        return str(v).strip().lower() if v not in (None, "", "null") else fallback
+
+    def _f(key: str) -> float | None:
+        try:
+            return float(parsed[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _norm(val: str, mapping: dict) -> str:
+        return mapping.get(val.lower().strip(), val) if val else "unknown"
+
+    bag_pres = _norm(_s("bag_presence"), _PRESENCE_NORM)
+    hat_pres = _norm(_s("hat_presence"), _PRESENCE_NORM)
+    return {
+        "gender":               _norm(_s("gender"), _GENDER_NORM),
+        "gender_conf":          _f("gender_conf"),
+        "age_range":            _norm(_s("age_range"), _AGE_NORM),
+        "age_range_conf":       _f("age_range_conf"),
+        "upper_clothing_desc":  parsed.get("upper_clothing_desc"),
+        "upper_clothing_color": _s("upper_clothing_color"),
+        "upper_clothing_type":  _s("upper_clothing_type"),
+        "upper_clothing_conf":  _f("upper_clothing_conf"),
+        "lower_clothing_desc":  parsed.get("lower_clothing_desc"),
+        "lower_clothing_color": _s("lower_clothing_color"),
+        "lower_clothing_type":  _s("lower_clothing_type"),
+        "lower_clothing_conf":  _f("lower_clothing_conf"),
+        "shoes_desc":           parsed.get("shoes_desc"),
+        "shoes_color":          _s("shoes_color"),
+        "shoes_conf":           _f("shoes_conf"),
+        "bag_presence":         bag_pres,
+        "bag_type":             _s("bag_type"),
+        "bag_desc":             parsed.get("bag_desc"),
+        "bag_conf":             _f("bag_conf"),
+        "hat_presence":         hat_pres,
+        "hat_color":            _s("hat_color"),
+        "hat_type":             _s("hat_type"),
+        "hat_desc":             parsed.get("hat_desc"),
+        "hat_conf":             _f("hat_conf"),
+        "is_wearing_mask":      _norm(_s("is_wearing_mask"), _PRESENCE_NORM),
+        "mask_conf":            _f("mask_conf"),
+        "hair_style":           _s("hair_style"),
+        "hair_color":           _s("hair_color"),
+        "hair_conf":            _f("hair_conf"),
+        "appearance_summary":   parsed.get("appearance_summary") or "person",
+        # backward compat
+        "top_color":    _s("upper_clothing_color"),
+        "bottom_color": _s("lower_clothing_color"),
+        "bag": "no_bag"      if bag_pres == "no"  else ("carrying_bag" if bag_pres == "yes" else "unknown"),
+        "hat": "no_hat"      if hat_pres == "no"  else ("wearing_hat"  if hat_pres == "yes" else "unknown"),
+    }
+
+
+def _extract_json_array(raw: str) -> list[dict]:
+    """Extract the first complete JSON array from model output."""
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, count=1, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned, count=1).strip()
+
+    start = cleaned.find("[")
+    if start == -1:
+        raise ValueError(f"JSON array not found: {cleaned[:200]}")
+
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for idx in range(start, len(cleaned)):
+        ch = cleaned[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                payload = cleaned[start:idx + 1]
+                parsed = json.loads(payload)
+                if not isinstance(parsed, list):
+                    raise ValueError(f"Expected JSON array, got {type(parsed).__name__}")
+                return parsed
+
+    raise ValueError(f"JSON array incomplete: {cleaned[:200]}")
+
 
 def _caption_crop_vlm(crop: "Image.Image") -> dict:
-    """Generate open-vocabulary appearance attributes via Qwen2-VL-7B-Instruct."""
-    import json, re
+    """Generate open-vocabulary appearance attributes via Qwen2-VL-7B-Instruct (single crop)."""
     model = get_model("qwen2vl")
     processor = get_model("qwen2vl_processor")
     if model is None or processor is None:
@@ -857,87 +1034,92 @@ def _caption_crop_vlm(crop: "Image.Image") -> dict:
                 do_sample=False,
                 temperature=None,
                 top_p=None,
+                top_k=None,
             )
-        # Decode only the newly generated tokens
         input_len = inputs["input_ids"].shape[1]
-        generated = output_ids[0][input_len:]
-        raw = processor.decode(generated, skip_special_tokens=True).strip()
+        raw = processor.decode(output_ids[0][input_len:], skip_special_tokens=True).strip()
 
-        # Extract JSON — handle cases where model adds surrounding text
         json_match = re.search(r'\{.*\}', raw, re.DOTALL)
         if not json_match:
             logger.warning("[vlm] JSON not found in output: %s", raw[:200])
             return _default_attributes()
 
-        parsed = json.loads(json_match.group())
-
-        def _s(key: str, fallback: str = "unknown") -> str:
-            v = parsed.get(key)
-            return str(v).strip().lower() if v not in (None, "", "null") else fallback
-
-        def _f(key: str) -> float | None:
-            try:
-                return float(parsed[key])
-            except (KeyError, TypeError, ValueError):
-                return None
-
-        _GENDER_NORM = {"male": "man", "man": "man", "female": "woman", "woman": "woman"}
-        _AGE_NORM = {
-            "young adult": "young_adult", "young_adult": "young_adult",
-            "middle aged": "middle_aged", "middle-aged": "middle_aged", "middle_aged": "middle_aged",
-            "teen": "teenager", "teenager": "teenager",
-            "elder": "elderly", "elderly": "elderly",
-            "child": "child",
-        }
-        _PRESENCE_NORM = {"yes": "yes", "no": "no", "true": "yes", "false": "no", "none": "no"}
-
-        def _norm(val: str, mapping: dict) -> str:
-            return mapping.get(val.lower().strip(), val) if val else "unknown"
-
-        attrs = {
-            "gender":               _norm(_s("gender"), _GENDER_NORM),
-            "gender_conf":          _f("gender_conf"),
-            "age_range":            _norm(_s("age_range"), _AGE_NORM),
-            "age_range_conf":       _f("age_range_conf"),
-            "upper_clothing_desc":  parsed.get("upper_clothing_desc"),
-            "upper_clothing_color": _s("upper_clothing_color"),
-            "upper_clothing_type":  _s("upper_clothing_type"),
-            "upper_clothing_conf":  _f("upper_clothing_conf"),
-            "lower_clothing_desc":  parsed.get("lower_clothing_desc"),
-            "lower_clothing_color": _s("lower_clothing_color"),
-            "lower_clothing_type":  _s("lower_clothing_type"),
-            "lower_clothing_conf":  _f("lower_clothing_conf"),
-            "shoes_desc":           parsed.get("shoes_desc"),
-            "shoes_color":          _s("shoes_color"),
-            "shoes_conf":           _f("shoes_conf"),
-            "bag_presence":         _norm(_s("bag_presence"), _PRESENCE_NORM),
-            "bag_type":             _s("bag_type"),
-            "bag_desc":             parsed.get("bag_desc"),
-            "bag_conf":             _f("bag_conf"),
-            "hat_presence":         _norm(_s("hat_presence"), _PRESENCE_NORM),
-            "hat_color":            _s("hat_color"),
-            "hat_type":             _s("hat_type"),
-            "hat_desc":             parsed.get("hat_desc"),
-            "hat_conf":             _f("hat_conf"),
-            "is_wearing_mask":      _norm(_s("is_wearing_mask"), _PRESENCE_NORM),
-            "mask_conf":            _f("mask_conf"),
-            "hair_style":           _s("hair_style"),
-            "hair_color":           _s("hair_color"),
-            "hair_conf":            _f("hair_conf"),
-            "appearance_summary":   parsed.get("appearance_summary") or "person",
-            # backward compat
-            "top_color":    _s("upper_clothing_color"),
-            "bottom_color": _s("lower_clothing_color"),
-            "bag":  "no_bag"      if _norm(_s("bag_presence"), _PRESENCE_NORM) == "no"
-                    else ("carrying_bag" if _norm(_s("bag_presence"), _PRESENCE_NORM) == "yes" else "unknown"),
-            "hat":  "no_hat"      if _norm(_s("hat_presence"), _PRESENCE_NORM) == "no"
-                    else ("wearing_hat"  if _norm(_s("hat_presence"), _PRESENCE_NORM) == "yes" else "unknown"),
-        }
-        return attrs
+        return _parse_vlm_attrs(json.loads(json_match.group()))
 
     except Exception as exc:
         logger.warning("[vlm] _caption_crop_vlm failed: %s", exc)
         return _default_attributes()
+
+
+def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE) -> list:
+    """Batch Qwen2-VL captioning — sends up to batch_size crops per call (~3-4x faster).
+
+    Retries failed batches with smaller sub-batches before falling back to singles.
+    """
+    model = get_model("qwen2vl")
+    processor = get_model("qwen2vl_processor")
+    if model is None or processor is None:
+        return [_default_attributes() for _ in crops]
+
+    batch_size = max(1, batch_size)
+    device = _get_device()
+    results: list = []
+
+    for i in range(0, len(crops), batch_size):
+        batch = crops[i:i + batch_size]
+        n = len(batch)
+
+        if n == 1:
+            results.append(_caption_crop_vlm(batch[0]))
+            continue
+
+        try:
+            prompt = _VLM_BATCH_PROMPT_TEMPLATE.format(n=n)
+            content = [{"type": "image", "image": c} for c in batch]
+            content.append({"type": "text", "text": prompt})
+
+            messages = [{"role": "user", "content": content}]
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = processor(text=[text], images=batch, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=VLM_BATCH_MAX_NEW_TOKENS_PER_CROP * n,
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
+                )
+
+            input_len = inputs["input_ids"].shape[1]
+            raw = processor.decode(output_ids[0][input_len:], skip_special_tokens=True).strip()
+
+            parsed_list = _extract_json_array(raw)
+            if not isinstance(parsed_list, list) or len(parsed_list) != n:
+                raise ValueError(f"Expected {n} objects, got {len(parsed_list) if isinstance(parsed_list, list) else type(parsed_list)}")
+
+            logger.debug("[vlm] batch(%d) OK at offset %d", n, i)
+            for obj in parsed_list:
+                results.append(_parse_vlm_attrs(obj))
+
+        except Exception as exc:
+            next_batch_size = min(max(1, batch_size // 2), max(1, (n + 1) // 2))
+            if n > 1 and next_batch_size < n:
+                logger.warning(
+                    "[vlm] batch(%d) failed: %s — retrying with smaller batches of %d",
+                    n,
+                    exc,
+                    next_batch_size,
+                )
+                results.extend(_caption_crops_vlm_batch(batch, batch_size=next_batch_size))
+                continue
+
+            logger.warning("[vlm] batch(%d) failed: %s — falling back to single crops", n, exc)
+            for crop in batch:
+                results.append(_caption_crop_vlm(crop))
+
+    return results
 
 
 def _build_appearance_summary(attrs: dict) -> str:
@@ -1206,7 +1388,7 @@ def _batch_extract_features(
     import torch.nn.functional as F
 
     device = _get_device()
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    dtype = torch.float16
 
     # ── Build crops for all tracklets ────────────────────────────────────────
     def _extract_crop(frame, bbox, size):
@@ -1262,7 +1444,7 @@ def _batch_extract_features(
                     for k, v in inputs.items()
                 }
                 with torch.no_grad():
-                    feats = model_dino(**inputs).pooler_output.cpu().float()  # [N, 1024]
+                    feats = model_dino(**inputs).pooler_output.float()  # [N, 1024]
 
                 for start, end in tracklet_slices:
                     if end > start:
@@ -1288,7 +1470,7 @@ def _batch_extract_features(
             img_inputs = proc_sip(images=all_rep_crops, return_tensors="pt", padding=True)
             img_inputs = {k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device)
                           for k, v in img_inputs.items()}
-            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=dtype):
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
                 img_feats = model_sip.get_image_features(**{k: v for k, v in img_inputs.items()
                                                              if k in ["pixel_values"]})
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)  # [N, D]
@@ -1297,12 +1479,18 @@ def _batch_extract_features(
             img_feats = None
 
     # ── Qwen2-VL-7B-Instruct: open-vocabulary attribute captioning ────────────
-    all_attributes: list[dict] = []
-    all_attr_confs: list[dict] = [{} for _ in t_data]
-    for i_t, crop in enumerate(all_rep_crops):
-        attrs = _caption_crop_vlm(crop)
-        all_attributes.append(attrs)
-        all_attr_confs[i_t] = {
+    logger.info(
+        "[vlm] captioning %d representative crops with batch_size=%d",
+        len(all_rep_crops),
+        VLM_BATCH_SIZE,
+    )
+    all_attributes: list[dict] = _caption_crops_vlm_batch(
+        all_rep_crops,
+        batch_size=VLM_BATCH_SIZE,
+    )
+    all_attr_confs: list[dict] = []
+    for attrs in all_attributes:
+        all_attr_confs.append({
             "gender_conf":       attrs.get("gender_conf"),
             "age_range_conf":    attrs.get("age_range_conf"),
             "top_color_conf":    attrs.get("upper_clothing_conf"),
@@ -1317,7 +1505,7 @@ def _batch_extract_features(
             "mask_conf":         attrs.get("mask_conf"),
             "hair_style_conf":   attrs.get("hair_conf"),
             "hair_color_conf":   attrs.get("hair_conf"),
-        }
+        })
 
     # ── VideoMAE TRUE BATCH: stack all tracklet clips → 1 forward pass ───────
     all_actions = []
@@ -1345,13 +1533,13 @@ def _batch_extract_features(
 
             # Batch all clips: proc_vmae expects list-of-frames per video
             # Stack into [N, 16, H, W, C] then process
-            vmae_dtype = torch.float16 if device.type == "cuda" else torch.float32
+            vmae_dtype = torch.float16
             inputs = proc_vmae(all_clips, return_tensors="pt")
             inputs = {k: v.to(device=device, dtype=vmae_dtype) if v.is_floating_point() else v.to(device)
                        for k, v in inputs.items()}
-            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=vmae_dtype):
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=vmae_dtype):
                 outputs = model_vmae(**inputs)
-            logits = outputs.logits.cpu().float()  # [N, num_classes]
+            logits = outputs.logits.float()  # [N, num_classes]
             probs = torch.softmax(logits, dim=-1)
             top_probs, top_indices = probs.topk(1, dim=-1)
             top_idx = top_indices.squeeze(1).tolist()

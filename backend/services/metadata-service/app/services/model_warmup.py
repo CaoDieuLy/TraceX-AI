@@ -18,6 +18,7 @@ Forbidden: YOLO (any version), ByteTrack, Grounding DINO (replaced by RT-DETR).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -28,6 +29,7 @@ _warmup_done = False
 _warmup_error: Optional[str] = None
 
 _MODELS: dict[str, Any] = {}
+DEFAULT_QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct"
 
 
 def get_model(name: str) -> Optional[Any]:
@@ -256,6 +258,7 @@ def _load_qwen2vl(device: torch.device) -> None:
 
     Loads from /workspace/models/weights/qwen2vl/ if pre-downloaded
     (host: ./storage/model-weights/qwen2vl/), otherwise downloads from HuggingFace.
+    QWEN2VL_MODEL_ID overrides both the local path and default HuggingFace repo.
     Pre-download with: python scripts/download_models.py --models qwen2vl
     """
     logger.info("Loading Qwen2-VL-7B-Instruct...")
@@ -266,8 +269,17 @@ def _load_qwen2vl(device: torch.device) -> None:
         from PIL import Image
 
         local = Path("/workspace/models/weights/qwen2vl")
-        model_id = str(local) if local.exists() and any(local.iterdir()) else "Qwen/Qwen2-VL-7B-Instruct"
-        source = "local" if local.exists() and any(local.iterdir()) else "HuggingFace"
+        env_override = os.getenv("QWEN2VL_MODEL_ID", "").strip()
+        local_available = local.exists() and any(local.iterdir())
+        if env_override:
+            model_id = env_override
+            source = "env_override"
+        elif local_available:
+            model_id = str(local)
+            source = "local"
+        else:
+            model_id = DEFAULT_QWEN2VL_MODEL_ID
+            source = "HuggingFace"
         logger.info("  Qwen2-VL source: %s (%s)", model_id, source)
 
         processor = AutoProcessor.from_pretrained(model_id)
@@ -288,7 +300,7 @@ def _load_qwen2vl(device: torch.device) -> None:
 
         _MODELS["qwen2vl"] = model
         _MODELS["qwen2vl_processor"] = processor
-        logger.info("  Qwen2-VL-7B-Instruct loaded OK")
+        logger.info("  Qwen2-VL-7B-Instruct loaded OK (%s, model: %s)", source, model_id)
 
     except Exception as exc:
         logger.warning("Qwen2-VL-7B-Instruct load failed (non-fatal): %s", exc)

@@ -43,7 +43,7 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-mcpt_user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./storage/pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -104,6 +104,9 @@ services:
       - TORCH_HOME=/workspace/models/torch
       - TRANSFORMERS_OFFLINE=0
       - HF_TOKEN=${HF_TOKEN:-}
+      - QWEN2VL_MODEL_ID=${QWEN2VL_MODEL_ID:-}
+      - VLM_BATCH_SIZE=${VLM_BATCH_SIZE:-1}
+      - VLM_BATCH_MAX_NEW_TOKENS_PER_CROP=${VLM_BATCH_MAX_NEW_TOKENS_PER_CROP:-512}
       # LightningAI public URL (để tạo download links)
       - NEXT_PUBLIC_API_GATEWAY_URL=${LIGHTNINGAI_PUBLIC_URL:-}
       - A20_ROOT=${A20_ROOT:-/workspace/a20-root}
@@ -121,9 +124,9 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=20).read()"]
       interval: 30s
-      timeout: 10s
+      timeout: 30s
       retries: 5
       start_period: 120s
     restart: unless-stopped
@@ -254,11 +257,8 @@ services:
 # ────────────────────────────────────────────────────────────────────────────
 # Volumes
 # ────────────────────────────────────────────────────────────────────────────
-volumes:
-  # postgres_data: Docker managed volume — persists giữa các container restart
-  # Các service khác dùng bind mounts trực tiếp vào /workspace/ của LightningAI
-  postgres_data:
-    driver: local
+# postgres_data đã chuyển sang bind mount /workspace/storage/pgdata
+# để persist qua LightningAI machine restart
 
 # ────────────────────────────────────────────────────────────────────────────
 # Networks
