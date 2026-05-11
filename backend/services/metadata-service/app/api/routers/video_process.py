@@ -1051,7 +1051,14 @@ def _caption_crop_vlm(crop: "Image.Image") -> dict:
         return _default_attributes()
 
 
-def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE) -> list:
+def _vlm_progress_bar(done: int, total: int, width: int = 25) -> str:
+    filled = int(width * done / total) if total else 0
+    bar = "█" * filled + "░" * (width - filled)
+    pct = int(100 * done / total) if total else 0
+    return f"[{bar}] {done}/{total} ({pct}%)"
+
+
+def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag: str = "") -> list:
     """Batch Qwen2-VL captioning — sends up to batch_size crops per call (~3-4x faster).
 
     Retries failed batches with smaller sub-batches before falling back to singles.
@@ -1064,13 +1071,22 @@ def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE) -> l
     batch_size = max(1, batch_size)
     device = _get_device()
     results: list = []
+    total = len(crops)
+    log_every = max(1, total // 20)  # log every ~5%
+    _vlm_t0 = time.perf_counter()
 
-    for i in range(0, len(crops), batch_size):
+    for i in range(0, total, batch_size):
         batch = crops[i:i + batch_size]
         n = len(batch)
 
         if n == 1:
             results.append(_caption_crop_vlm(batch[0]))
+            done = len(results)
+            if done == 1 or done % log_every == 0 or done == total:
+                elapsed = time.perf_counter() - _vlm_t0
+                eta = (elapsed / done * (total - done)) if done else 0
+                logger.info("[vlm] %s %s  %.0fs elapsed  ETA %.0fs",
+                            tag, _vlm_progress_bar(done, total), elapsed, eta)
             continue
 
         try:
@@ -1112,7 +1128,7 @@ def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE) -> l
                     exc,
                     next_batch_size,
                 )
-                results.extend(_caption_crops_vlm_batch(batch, batch_size=next_batch_size))
+                results.extend(_caption_crops_vlm_batch(batch, batch_size=next_batch_size, tag=tag))
                 continue
 
             logger.warning("[vlm] batch(%d) failed: %s — falling back to single crops", n, exc)
@@ -1370,20 +1386,13 @@ async def process_video_stream(
                 pass
 
 
-def _batch_extract_features(
+def _batch_embed_fast(
     t_data: list,
     video_id: str,
-) -> tuple[list, list, list, list, list, list]:
+) -> tuple[list, list, list]:
     """
-    TRUE batch GPU inference: 1 call per model for ALL tracklets combined.
-    DINOv2: stack all crops → 1 forward pass → split results.
-    SigLIP: stack all crops → 1 forward pass → also returns per-attribute confidence.
-    VideoMAE: stack all clips → 1 forward pass.
-    A100 80GB can handle 150+ tracklets × 5 crops in one shot.
-
-    Returns: (all_embeddings, all_attributes, all_attr_confs, all_actions, all_rep_crops)
-      all_attr_confs[i]: dict with keys gender_conf, top_color_conf, shoes_conf, accessory_conf
-      all_rep_crops[i]:  PIL Image (384×384) — representative crop for saving
+    Fast batch embedding: DINOv2 + SigLIP only. VLM + VideoMAE run AFTER fragment merge.
+    Returns: (all_embeddings, all_rep_crops, all_siglip_embeddings)
     """
     import torch.nn.functional as F
 
@@ -1424,6 +1433,8 @@ def _batch_extract_features(
     all_embeddings = []
     model_dino = get_model("dinov2")
     proc_dino = get_model("dinov2_processor")
+    logger.info("[pipeline] %s: DINOv2 embedding %d tracklets...", video_id, len(t_data))
+    _t0 = time.perf_counter()
     if model_dino and proc_dino:
         try:
             pil_crops, tracklet_slices = [], []
@@ -1460,8 +1471,11 @@ def _batch_extract_features(
             all_embeddings = [_generate_dinov2_embeddings(t[3], [t[2]] * len(t[3]), f"{video_id}_{t[1]}") for t in t_data]
     else:
         all_embeddings = [None] * len(t_data)
+    logger.info("[pipeline] %s: DINOv2 done in %.1fs", video_id, time.perf_counter() - _t0)
 
     # ── SigLIP image encoding — for text-image search embeddings only ────────
+    logger.info("[pipeline] %s: SigLIP image encoding %d crops...", video_id, len(all_rep_crops))
+    _t0 = time.perf_counter()
     img_feats = None
     model_sip = get_model("siglip2")
     proc_sip = get_model("siglip2_processor")
@@ -1477,86 +1491,9 @@ def _batch_extract_features(
         except Exception as exc:
             logger.warning("[pipeline] SigLIP image encoding failed: %s", exc)
             img_feats = None
+    logger.info("[pipeline] %s: SigLIP done in %.1fs", video_id, time.perf_counter() - _t0)
 
-    # ── Qwen2-VL-7B-Instruct: open-vocabulary attribute captioning ────────────
-    logger.info(
-        "[vlm] captioning %d representative crops with batch_size=%d",
-        len(all_rep_crops),
-        VLM_BATCH_SIZE,
-    )
-    all_attributes: list[dict] = _caption_crops_vlm_batch(
-        all_rep_crops,
-        batch_size=VLM_BATCH_SIZE,
-    )
-    all_attr_confs: list[dict] = []
-    for attrs in all_attributes:
-        all_attr_confs.append({
-            "gender_conf":       attrs.get("gender_conf"),
-            "age_range_conf":    attrs.get("age_range_conf"),
-            "top_color_conf":    attrs.get("upper_clothing_conf"),
-            "bottom_color_conf": attrs.get("lower_clothing_conf"),
-            "shoes_conf":        attrs.get("shoes_conf"),
-            "accessory_conf":    max(
-                attrs.get("bag_conf") or 0.0,
-                attrs.get("hat_conf") or 0.0,
-            ) or None,
-            "hat_color_conf":    attrs.get("hat_conf"),
-            "bag_type_conf":     attrs.get("bag_conf"),
-            "mask_conf":         attrs.get("mask_conf"),
-            "hair_style_conf":   attrs.get("hair_conf"),
-            "hair_color_conf":   attrs.get("hair_conf"),
-        })
-
-    # ── VideoMAE TRUE BATCH: stack all tracklet clips → 1 forward pass ───────
-    all_actions = []
-    model_vmae = get_model("videomae")
-    proc_vmae = get_model("videomae_processor")
-    if model_vmae and proc_vmae and t_data:
-        try:
-            # Build 16-frame clip for every tracklet
-            all_clips: list[list[np.ndarray]] = []
-            for lt, t_idx, rep_bbox, t_frames in t_data:
-                x1, y1, x2, y2 = (max(0, int(v)) for v in rep_bbox)
-                n_f = len(t_frames)
-                idx_list = np.linspace(0, n_f - 1, min(16, n_f), dtype=int)
-                frames_224 = []
-                for fi in idx_list:
-                    f = t_frames[fi]
-                    h, w = f.shape[:2]
-                    x2c, y2c = min(w, x2), min(h, y2)
-                    crop = f[y1:y2c, x1:x2c] if x2c > x1 and y2c > y1 else f
-                    frames_224.append(cv2.resize(crop if crop.size > 0 else f,
-                                                  (224, 224), interpolation=cv2.INTER_LINEAR))
-                while len(frames_224) < 16:
-                    frames_224.append(frames_224[-1] if frames_224 else np.zeros((224, 224, 3), dtype=np.uint8))
-                all_clips.append(frames_224[:16])
-
-            # Batch all clips: proc_vmae expects list-of-frames per video
-            # Stack into [N, 16, H, W, C] then process
-            vmae_dtype = torch.float16
-            inputs = proc_vmae(all_clips, return_tensors="pt")
-            inputs = {k: v.to(device=device, dtype=vmae_dtype) if v.is_floating_point() else v.to(device)
-                       for k, v in inputs.items()}
-            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=vmae_dtype):
-                outputs = model_vmae(**inputs)
-            logits = outputs.logits.float()  # [N, num_classes]
-            probs = torch.softmax(logits, dim=-1)
-            top_probs, top_indices = probs.topk(1, dim=-1)
-            top_idx = top_indices.squeeze(1).tolist()
-            top_conf = top_probs.squeeze(1).tolist()
-            id2label = getattr(model_vmae.config, "id2label", {})
-            for idx, conf in zip(top_idx, top_conf):
-                label = id2label.get(idx, "")
-                action = _map_kinetics_to_tracex_action(label) if label else "unknown"
-                all_actions.append((action, float(conf), label))
-        except Exception as exc:
-            logger.warning("[pipeline] VideoMAE true-batch failed: %s — fallback", exc)
-            all_actions = [(_run_videomae_actions(t[3], t[2]), 0.0, "") for t in t_data]
-    else:
-        all_actions = [("unknown", 0.0, "")] * len(t_data)
-
-    # Capture SigLIP2 image embeddings (already computed above as img_feats)
-    # These are in the same embedding space as SigLIP2 text queries → usable for text search
+    # Capture SigLIP2 image embeddings for fragment merge + text search
     all_siglip_embeddings: list[list[float]] = []
     try:
         if img_feats is not None:
@@ -1566,11 +1503,11 @@ def _batch_extract_features(
     except Exception:
         all_siglip_embeddings = [[]] * len(t_data)
 
-    logger.warning("[pipeline] batch features done: %d tracklets | DINOv2=%d | SigLIP=%d | VideoMAE=%d",
-                   len(t_data), sum(1 for e in all_embeddings if e),
-                   sum(1 for a in all_attributes if a.get("gender") != "unknown"),
-                   sum(1 for a in all_actions if a != "unknown"))
-    return all_embeddings, all_attributes, all_attr_confs, all_actions, all_rep_crops, all_siglip_embeddings
+    logger.info("[pipeline] %s: embed done — %d tracklets | DINOv2=%d | SigLIP=%d",
+                video_id, len(t_data),
+                sum(1 for e in all_embeddings if e),
+                sum(1 for e in all_siglip_embeddings if e))
+    return all_embeddings, all_rep_crops, all_siglip_embeddings
 
 
 def _process_video_sync(
@@ -1688,11 +1625,9 @@ def _process_video_sync(
         t_frames = [frame_lookup[o.frame_index] for o in obs if o.frame_index in frame_lookup] or [sampled_frames[0].image]
         t_data.append((lt, t_idx, rep_bbox_float, t_frames))
 
-    all_embeddings, all_attributes, all_attr_confs, all_actions, all_rep_crops, all_siglip_embeddings = _batch_extract_features(t_data, video_id)
+    all_embeddings, all_rep_crops, all_siglip_embeddings = _batch_embed_fast(t_data, video_id)
 
     # Stage 8: Post-hoc fragment merging via embedding cosine similarity.
-    # Short tracklets broken by occlusion are re-joined when appearance similarity
-    # is high and the temporal gap is within the threshold.
     import numpy as _np
 
     _merge_embs = (
@@ -1705,11 +1640,8 @@ def _process_video_sync(
     accepted, _groups = _merger.merge(list(accepted), _merge_embs)
 
     _n_merged = sum(len(g) - 1 for g in _groups if len(g) > 1)
-    if _n_merged > 0:
-        logger.warning(
-            "[pipeline] %s: fragment merger joined %d fragment(s) → %d tracklets",
-            video_id, _n_merged, len(accepted),
-        )
+    logger.info("[pipeline] %s: fragment merge → %d tracklets (%d fragments joined)",
+                video_id, len(accepted), _n_merged)
 
     def _pool_avg(vecs: list) -> list:
         valid = [v for v in vecs if v]
@@ -1718,17 +1650,13 @@ def _process_video_sync(
         return _np.array(valid, dtype=_np.float32).mean(axis=0).tolist()
 
     def _richest(g: list[int]) -> int:
-        """Return index of the fragment with most observations (best appearance data)."""
         return max(g, key=lambda i: len(_orig_accepted[i].observations))
 
     all_embeddings        = [_pool_avg([all_embeddings[i]        for i in g]) for g in _groups]
     all_siglip_embeddings = [_pool_avg([all_siglip_embeddings[i] for i in g]) for g in _groups]
-    all_attributes        = [all_attributes[_richest(g)]  for g in _groups]
-    all_attr_confs        = [all_attr_confs[_richest(g)]  for g in _groups]
-    all_actions           = [all_actions[_richest(g)]     for g in _groups]
-    all_rep_crops         = [all_rep_crops[_richest(g)]   for g in _groups]
+    all_rep_crops         = [all_rep_crops[_richest(g)]          for g in _groups]
 
-    # Rebuild t_data aligned to merged accepted list
+    # Rebuild t_data aligned to merged accepted list (~25 tracklets)
     t_data = []
     for new_idx, mt in enumerate(accepted):
         obs = mt.observations
@@ -1739,6 +1667,74 @@ def _process_video_sync(
             or [sampled_frames[0].image]
         )
         t_data.append((mt, new_idx, rep_bbox_float, t_frames))
+
+    # ── VLM: Qwen2-VL-7B trên ~25 merged tracklets ───────────────────────────
+    logger.info("[vlm] %s: captioning %d merged tracklets (batch_size=%d)",
+                video_id, len(all_rep_crops), VLM_BATCH_SIZE)
+    all_attributes: list[dict] = _caption_crops_vlm_batch(
+        all_rep_crops, batch_size=VLM_BATCH_SIZE, tag=video_id,
+    )
+    all_attr_confs: list[dict] = []
+    for attrs in all_attributes:
+        all_attr_confs.append({
+            "gender_conf":       attrs.get("gender_conf"),
+            "age_range_conf":    attrs.get("age_range_conf"),
+            "top_color_conf":    attrs.get("upper_clothing_conf"),
+            "bottom_color_conf": attrs.get("lower_clothing_conf"),
+            "shoes_conf":        attrs.get("shoes_conf"),
+            "accessory_conf":    max(
+                attrs.get("bag_conf") or 0.0,
+                attrs.get("hat_conf") or 0.0,
+            ) or None,
+            "hat_color_conf":    attrs.get("hat_conf"),
+            "bag_type_conf":     attrs.get("bag_conf"),
+            "mask_conf":         attrs.get("mask_conf"),
+            "hair_style_conf":   attrs.get("hair_conf"),
+            "hair_color_conf":   attrs.get("hair_conf"),
+        })
+
+    # ── VideoMAE true-batch trên ~25 merged tracklets ────────────────────────
+    device = _get_device()
+    all_actions: list = []
+    model_vmae = get_model("videomae")
+    proc_vmae  = get_model("videomae_processor")
+    if model_vmae and proc_vmae and t_data:
+        try:
+            all_clips: list[list[np.ndarray]] = []
+            for lt, t_idx, rep_bbox, t_frames in t_data:
+                x1, y1, x2, y2 = (max(0, int(v)) for v in rep_bbox)
+                n_f = len(t_frames)
+                idx_list = np.linspace(0, n_f - 1, min(16, n_f), dtype=int)
+                frames_224 = []
+                for fi in idx_list:
+                    f = t_frames[fi]
+                    h, w = f.shape[:2]
+                    x2c, y2c = min(w, x2), min(h, y2)
+                    crop = f[y1:y2c, x1:x2c] if x2c > x1 and y2c > y1 else f
+                    frames_224.append(cv2.resize(
+                        crop if crop.size > 0 else f, (224, 224), interpolation=cv2.INTER_LINEAR))
+                while len(frames_224) < 16:
+                    frames_224.append(frames_224[-1] if frames_224 else np.zeros((224, 224, 3), dtype=np.uint8))
+                all_clips.append(frames_224[:16])
+            inputs = proc_vmae(all_clips, return_tensors="pt")
+            inputs = {k: v.to(device=device, dtype=torch.float16) if v.is_floating_point() else v.to(device)
+                      for k, v in inputs.items()}
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16):
+                outputs = model_vmae(**inputs)
+            logits = outputs.logits.float()
+            probs = torch.softmax(logits, dim=-1)
+            top_probs, top_indices = probs.topk(1, dim=-1)
+            id2label = getattr(model_vmae.config, "id2label", {})
+            for idx, conf in zip(top_indices.squeeze(1).tolist(), top_probs.squeeze(1).tolist()):
+                label  = id2label.get(idx, "")
+                action = _map_kinetics_to_tracex_action(label) if label else "unknown"
+                all_actions.append((action, float(conf), label))
+            logger.info("[pipeline] %s: VideoMAE done — %d actions", video_id, len(all_actions))
+        except Exception as exc:
+            logger.warning("[pipeline] VideoMAE true-batch failed: %s — fallback", exc)
+            all_actions = [(_run_videomae_actions(t[3], t[2]), 0.0, "") for t in t_data]
+    else:
+        all_actions = [("unknown", 0.0, "")] * len(t_data)
 
     # Project representative bboxes to BEV coordinates
     cal_path = os.getenv("CAMERA_CALIBRATION_PATH")
