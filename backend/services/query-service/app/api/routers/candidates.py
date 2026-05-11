@@ -563,7 +563,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 description = f"[{tracklet_count} tracklets] {description}".strip()
             results.append({
                 "id": candidate_id,
-                "thumbnail_url": rep.crop_url if (rep.crop_url and rep.crop_url.strip()) else f"/api/v1/candidates/{rep.tracklet_id}/preview",
+                "thumbnail_url": f"/candidates/{rep.tracklet_id}/preview",
                 "description": description,
                 "_raw": {
                     "candidate_id": candidate_id,
