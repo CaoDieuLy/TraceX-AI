@@ -26,6 +26,7 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -1562,6 +1563,75 @@ def _batch_siglip_embeddings(
     proc_sip = get_model("siglip2_processor")
     _t0 = time.perf_counter()
 
+    siglip_init_batch = _get_positive_env_int("SIGLIP_BATCH_INIT", 128)
+    siglip_max_batch = _get_positive_env_int("SIGLIP_BATCH_MAX", 256)
+    siglip_batch_step = _get_positive_env_int("SIGLIP_BATCH_GROW_STEP", 16)
+
+    def _encode_siglip_images_adaptive(images: list[Image.Image], phase: str) -> torch.Tensor | None:
+        if not images or model_sip is None or proc_sip is None:
+            return None
+        batch = max(1, min(siglip_init_batch, siglip_max_batch, len(images)))
+        feats_chunks: list[torch.Tensor] = []
+        idx = 0
+        stable_windows = 0
+
+        while idx < len(images):
+            end = min(len(images), idx + batch)
+            window = images[idx:end]
+            try:
+                inputs = proc_sip(images=window, return_tensors="pt", padding=True)
+                inputs = {
+                    k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device)
+                    for k, v in inputs.items()
+                }
+                amp_ctx = (
+                    torch.autocast(device_type="cuda", dtype=dtype)
+                    if device.type == "cuda"
+                    else nullcontext()
+                )
+                with torch.no_grad(), amp_ctx:
+                    feats = model_sip.get_image_features(
+                        **{k: v for k, v in inputs.items() if k in ["pixel_values"]}
+                    )
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+                feats_chunks.append(feats.detach().cpu().float())
+                idx = end
+                stable_windows += 1
+
+                # Slowly increase after stable windows to keep speed for easy videos.
+                if stable_windows >= 3 and batch < siglip_max_batch:
+                    batch = min(siglip_max_batch, batch + siglip_batch_step, len(images) - idx or batch)
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                if "out of memory" in msg and batch > 1:
+                    new_batch = max(1, batch // 2)
+                    logger.warning(
+                        "[pipeline] %s: SigLIP %s OOM at %d/%d (batch=%d) -> retry batch=%d",
+                        video_id,
+                        phase,
+                        idx,
+                        len(images),
+                        batch,
+                        new_batch,
+                    )
+                    batch = new_batch
+                    stable_windows = 0
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
+                    continue
+                raise
+            finally:
+                try:
+                    del inputs
+                except Exception:
+                    pass
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+        if not feats_chunks:
+            return None
+        return torch.cat(feats_chunks, dim=0)
+
     # ── SigLIP2 multi-frame pool-avg — for fragment merge ────────────────────
     siglip_multi_feats = [[] for _ in t_data]
     if model_sip and proc_sip and t_data:
@@ -1578,17 +1648,12 @@ def _batch_siglip_embeddings(
                 siglip_slices.append((start, len(siglip_crops)))
 
             if siglip_crops:
-                inputs = proc_sip(images=siglip_crops, return_tensors="pt", padding=True)
-                inputs = {k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device)
-                          for k, v in inputs.items()}
-                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
-                    feats = model_sip.get_image_features(**{k: v for k, v in inputs.items()
-                                                             if k in ["pixel_values"]})
-                feats = feats / feats.norm(dim=-1, keepdim=True)
-                for t_i, (s, e) in enumerate(siglip_slices):
-                    if e > s:
-                        avg = feats[s:e].mean(0)
-                        siglip_multi_feats[t_i] = (avg / avg.norm()).cpu().float().tolist()
+                feats = _encode_siglip_images_adaptive(siglip_crops, phase="multi-frame")
+                if feats is not None:
+                    for t_i, (s, e) in enumerate(siglip_slices):
+                        if e > s:
+                            avg = feats[s:e].mean(0)
+                            siglip_multi_feats[t_i] = (avg / avg.norm()).cpu().float().tolist()
         except Exception as exc:
             logger.warning("[pipeline] SigLIP2 multi-frame encoding failed: %s", exc)
             siglip_multi_feats = [[] for _ in t_data]
@@ -1597,13 +1662,7 @@ def _batch_siglip_embeddings(
     img_feats = None
     if model_sip and proc_sip and t_data:
         try:
-            img_inputs = proc_sip(images=all_rep_crops, return_tensors="pt", padding=True)
-            img_inputs = {k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device)
-                          for k, v in img_inputs.items()}
-            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
-                img_feats = model_sip.get_image_features(**{k: v for k, v in img_inputs.items()
-                                                             if k in ["pixel_values"]})
-            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            img_feats = _encode_siglip_images_adaptive(all_rep_crops, phase="single-crop")
         except Exception as exc:
             logger.warning("[pipeline] SigLIP image encoding failed: %s", exc)
             img_feats = None
