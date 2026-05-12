@@ -64,6 +64,17 @@ def _get_positive_env_int(name: str, default: int) -> int:
         return default
 
 
+def _get_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %.3f", name, raw, default)
+        return default
+
+
 DEFAULT_SAMPLE_INTERVAL = 15
 DEFAULT_MIN_BBOX_AREA = 400
 DEFAULT_BEV_MAX_DIST = 1.5
@@ -72,6 +83,9 @@ VLM_BATCH_SIZE = _get_positive_env_int("VLM_BATCH_SIZE", 1)
 VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
     "VLM_BATCH_MAX_NEW_TOKENS_PER_CROP", 512
 )
+FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.85)
+FRAGMENT_MERGE_MAX_GAP_SECONDS = _get_env_float("FRAGMENT_MERGE_MAX_GAP_SECONDS", 60.0)
+FRAGMENT_MERGE_COMPONENT_MARGIN = _get_env_float("FRAGMENT_MERGE_COMPONENT_MARGIN", 0.03)
 
 
 # ---------------------------------------------------------------------------
@@ -251,20 +265,30 @@ def _sanitize_dets_inplace(
 
     Conservative: only removes clearly broken bboxes (out-of-frame or pixel-noise sized).
     No aspect-ratio or score-based filter — those risk dropping crouching/sitting persons.
+    Per-frame numpy vectorization keeps overhead negligible.
     """
     out: list[list[dict]] = []
     for dets, frame in zip(dets_per_frame, frames):
+        if not dets:
+            out.append(dets)
+            continue
         H, W = frame.shape[:2]
-        kept: list[dict] = []
-        for d in dets:
-            x1, y1, x2, y2 = d["bbox"]
-            x1 = max(0.0, min(float(x1), float(W - 1)))
-            x2 = max(0.0, min(float(x2), float(W)))
-            y1 = max(0.0, min(float(y1), float(H - 1)))
-            y2 = max(0.0, min(float(y2), float(H)))
-            if (x2 - x1) < min_w or (y2 - y1) < min_h:
+        arr = np.asarray([d["bbox"] for d in dets], dtype=np.float32)        # [N, 4]
+        arr[:, 0] = np.clip(arr[:, 0], 0.0, W - 1)
+        arr[:, 2] = np.clip(arr[:, 2], 0.0, W)
+        arr[:, 1] = np.clip(arr[:, 1], 0.0, H - 1)
+        arr[:, 3] = np.clip(arr[:, 3], 0.0, H)
+        keep = ((arr[:, 2] - arr[:, 0]) >= min_w) & ((arr[:, 3] - arr[:, 1]) >= min_h)
+        if bool(keep.all()):
+            for d, row in zip(dets, arr):
+                d["bbox"] = row.tolist()
+            out.append(dets)
+            continue
+        kept = []
+        for d, row, k in zip(dets, arr, keep):
+            if not k:
                 continue
-            d["bbox"] = [x1, y1, x2, y2]
+            d["bbox"] = row.tolist()
             kept.append(d)
         out.append(kept)
     return out
@@ -1721,11 +1745,16 @@ def _process_video_sync(
 
     _n_raw = len(accepted)
     logger.info(
-        "[merge] %s: %s  0/%d — merging fragments (emb=SigLIP2, threshold=0.85, max_gap=60s)",
+        "[merge] %s: %s  0/%d — merging fragments (emb=SigLIP2, threshold=%.2f, max_gap=%.0fs)",
         video_id, _vlm_progress_bar(0, _n_raw), _n_raw,
+        FRAGMENT_MERGE_SIM_THRESHOLD, FRAGMENT_MERGE_MAX_GAP_SECONDS,
     )
 
-    _merger = TrackletFragmentMerger(similarity_threshold=0.85, max_gap_seconds=60.0)
+    _merger = TrackletFragmentMerger(
+        similarity_threshold=FRAGMENT_MERGE_SIM_THRESHOLD,
+        max_gap_seconds=FRAGMENT_MERGE_MAX_GAP_SECONDS,
+        component_similarity_margin=FRAGMENT_MERGE_COMPONENT_MARGIN,
+    )
     _orig_accepted = list(accepted)
     _t_merge = time.perf_counter()
     accepted, _groups = _merger.merge(list(accepted), siglip_multi_feats)
