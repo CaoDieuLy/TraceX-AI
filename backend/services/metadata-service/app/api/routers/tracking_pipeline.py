@@ -303,20 +303,13 @@ class BodyPartAdaptiveTracker:
         pred = (hc[0] + vx * steps, hc[1] + vy * steps)
         return hbox, hc, pred, last_bbox, fc, hv
 
-    def _match_frame_greedy(
+    def _build_cost_matrix(
         self,
         det_bboxes: list[tuple],
         states: dict,
-        candidates: set,
-        max_cost: float,
-    ) -> list[Optional[tuple[str, float]]]:
-        """Vectorized adaptive greedy matching."""
-        if not candidates or not det_bboxes:
-            return [None] * len(det_bboxes)
-
-        track_ids = list(candidates)
-        M = len(det_bboxes)
-
+        track_ids: list[str],
+    ) -> np.ndarray:
+        """Adaptive cost matrix [M, N] with spatial gating applied (gated cells = 1e9)."""
         det_arr  = np.array(det_bboxes, dtype=np.float32)                              # [M, 4]
 
         t_hboxes = np.array([states[tid][0] for tid in track_ids], dtype=np.float32)  # [N, 4]
@@ -357,8 +350,38 @@ class BodyPartAdaptiveTracker:
         # Spatial gating: suppress only when BOTH primary signals exceed max distance
         too_far = (hcd > self.max_head_center_distance) & (fcd > self.max_foot_distance * 1.2)
         cost = np.where(too_far, 1e9, cost)
+        return cost
+
+    def _match_frame_greedy(
+        self,
+        det_bboxes: list[tuple],
+        states: dict,
+        candidates: set,
+        max_cost: float,
+    ) -> list[Optional[tuple[str, float]]]:
+        """Adaptive matching. Hungarian when M>=2 and N>=2 (avoids order-dependent
+        ID switches when persons cross); greedy otherwise (equivalent and cheaper)."""
+        if not candidates or not det_bboxes:
+            return [None] * len(det_bboxes)
+
+        track_ids = list(candidates)
+        M, N = len(det_bboxes), len(track_ids)
+        cost = self._build_cost_matrix(det_bboxes, states, track_ids)
 
         results: list[Optional[tuple[str, float]]] = [None] * M
+
+        if M >= 2 and N >= 2:
+            try:
+                from scipy.optimize import linear_sum_assignment
+                row_ind, col_ind = linear_sum_assignment(cost)
+                for r, c in zip(row_ind, col_ind):
+                    if cost[r, c] <= max_cost:
+                        results[r] = (track_ids[c], float(cost[r, c]))
+                return results
+            except Exception as exc:
+                # Fall through to greedy on any scipy issue — semantics preserved.
+                pass
+
         used: list[int] = []
         for m in range(M):
             row = cost[m].copy()
@@ -461,6 +484,44 @@ class BodyPartAdaptiveTracker:
                         self.active_last_frame[tid] = fk
                         active_unmatched.discard(tid)
                         states.pop(tid, None)
+
+            # Buffer reactivation: try to match still-unmatched high-confidence detections
+            # against tracks in the lost buffer. Restores the original track_id across
+            # short occlusions, reducing fragments that the post-hoc merger would have
+            # to rejoin via SigLIP embedding cost.
+            if unmatched_high and self.buffer:
+                buffer_states = {
+                    tid: self._build_state(self.buffer[tid], self.buffer_last_bbox[tid], fk)
+                    for tid in self.buffer
+                }
+                # Predicted center is stale for buffered tracks → relax the predicted-distance
+                # gate temporarily. Spatial gating on head/foot still applies.
+                saved_pred = self.max_predicted_distance
+                self.max_predicted_distance = saved_pred * 1.5
+                try:
+                    matches = self._match_frame_greedy(
+                        [d.bbox for d in unmatched_high],
+                        buffer_states,
+                        set(self.buffer.keys()),
+                        self.max_buffer_match_cost,
+                    )
+                finally:
+                    self.max_predicted_distance = saved_pred
+
+                still_unmatched: list[FrameDetection] = []
+                for det, m in zip(unmatched_high, matches):
+                    if m:
+                        tid, _ = m
+                        obs = self.buffer.pop(tid)
+                        self.buffer_last_bbox.pop(tid, None)
+                        self.buffer_entry_frame.pop(tid, None)
+                        obs.append(self._make_obs(det, ts))
+                        self.active[tid] = obs
+                        self.active_last_bbox[tid] = det.bbox
+                        self.active_last_frame[tid] = fk
+                    else:
+                        still_unmatched.append(det)
+                unmatched_high = still_unmatched
 
             for det in unmatched_high:
                 if det.confidence >= self.new_track_threshold:

@@ -186,6 +186,46 @@ def _detect_persons_rtdetr(
     all_dets: list[list[dict]] = []
     autocast_ctx = torch.autocast("cuda", dtype=dtype)
 
+    def _infer_one(batch_frames: list, inputs_raw, sizes, depth: int = 0) -> list[list[dict]]:
+        """Run inference on one (sub-)batch. On CUDA OOM, split in half and recurse."""
+        try:
+            inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
+                      for k, v in inputs_raw.items()}
+            with torch.no_grad(), autocast_ctx:
+                outputs = model(**inputs)
+            results = processor.post_process_object_detection(
+                outputs, threshold=threshold,
+                target_sizes=torch.tensor(sizes, device=device),
+            )
+        except torch.cuda.OutOfMemoryError as exc:
+            torch.cuda.empty_cache()
+            n = len(batch_frames)
+            if depth >= 3 or n <= 4:
+                logger.error("[rtdetr] OOM at batch_size=%d depth=%d, dropping: %s", n, depth, exc)
+                return [[] for _ in batch_frames]
+            mid = n // 2
+            logger.warning("[rtdetr] OOM at batch_size=%d depth=%d, splitting to %d/%d",
+                           n, depth, mid, n - mid)
+            left_inputs, left_sizes = _preprocess(batch_frames[:mid])
+            right_inputs, right_sizes = _preprocess(batch_frames[mid:])
+            return (_infer_one(batch_frames[:mid], left_inputs, left_sizes, depth + 1) +
+                    _infer_one(batch_frames[mid:], right_inputs, right_sizes, depth + 1))
+        except Exception as exc:
+            logger.warning("[rtdetr] batch failed (non-OOM): %s", exc)
+            return [[] for _ in batch_frames]
+
+        out: list[list[dict]] = []
+        for res in results:
+            dets = []
+            for score, label, box in zip(res["scores"], res["labels"], res["boxes"]):
+                if label.item() not in person_ids:
+                    continue
+                x1, y1, x2, y2 = box.tolist()
+                dets.append({"bbox": [float(x1), float(y1), float(x2), float(y2)],
+                             "score": float(score), "label": "person"})
+            out.append(dets)
+        return out
+
     with ThreadPoolExecutor(max_workers=2) as ex:
         # Submit first batch preprocessing
         futures = [ex.submit(_preprocess, b) for b in batches[:2]]
@@ -196,38 +236,46 @@ def _detect_persons_rtdetr(
                 futures.append(ex.submit(_preprocess, batches[idx + 2]))
 
             inputs_raw, sizes = futures[idx].result()
-            inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
-                      for k, v in inputs_raw.items()}
-
-            try:
-                with torch.no_grad(), autocast_ctx:
-                    outputs = model(**inputs)
-                results = processor.post_process_object_detection(
-                    outputs, threshold=threshold,
-                    target_sizes=torch.tensor(sizes, device=device),
-                )
-            except Exception as exc:
-                logger.warning("[rtdetr] batch failed: %s", exc)
-                all_dets.extend([[] for _ in batch])
-                continue
-
-            for res in results:
-                dets = []
-                for score, label, box in zip(res["scores"], res["labels"], res["boxes"]):
-                    if label.item() not in person_ids:
-                        continue
-                    x1, y1, x2, y2 = box.tolist()
-                    dets.append({"bbox": [float(x1), float(y1), float(x2), float(y2)],
-                                 "score": float(score), "label": "person"})
-                all_dets.append(dets)
+            all_dets.extend(_infer_one(batch, inputs_raw, sizes))
 
     return all_dets
 
 
+def _sanitize_dets_inplace(
+    dets_per_frame: list[list[dict]],
+    frames: list[np.ndarray],
+    min_w: int = 6,
+    min_h: int = 12,
+) -> list[list[dict]]:
+    """Clip bboxes into frame bounds and drop bboxes smaller than min_w/min_h.
+
+    Conservative: only removes clearly broken bboxes (out-of-frame or pixel-noise sized).
+    No aspect-ratio or score-based filter — those risk dropping crouching/sitting persons.
+    """
+    out: list[list[dict]] = []
+    for dets, frame in zip(dets_per_frame, frames):
+        H, W = frame.shape[:2]
+        kept: list[dict] = []
+        for d in dets:
+            x1, y1, x2, y2 = d["bbox"]
+            x1 = max(0.0, min(float(x1), float(W - 1)))
+            x2 = max(0.0, min(float(x2), float(W)))
+            y1 = max(0.0, min(float(y1), float(H - 1)))
+            y2 = max(0.0, min(float(y2), float(H)))
+            if (x2 - x1) < min_w or (y2 - y1) < min_h:
+                continue
+            d["bbox"] = [x1, y1, x2, y2]
+            kept.append(d)
+        out.append(kept)
+    return out
+
+
 def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.25) -> list[list[dict]]:
     """Person detection: RT-DETR primary (fast), GDINO fallback."""
-    rtdetr_result = _detect_persons_rtdetr(frames, threshold=max(threshold, 0.4))
+    rtdetr_threshold = float(os.getenv("RTDETR_PERSON_THRESHOLD", str(max(threshold, 0.4))))
+    rtdetr_result = _detect_persons_rtdetr(frames, threshold=rtdetr_threshold)
     if rtdetr_result is not None:
+        rtdetr_result = _sanitize_dets_inplace(rtdetr_result, frames)
         n_dets = sum(len(d) for d in rtdetr_result)
         logger.debug("[detect] RT-DETR: %d frames → %d detections", len(frames), n_dets)
         return rtdetr_result
@@ -304,7 +352,7 @@ def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.25) -> 
     finally:
         prefetch_exec.shutdown(wait=False)
 
-    return all_dets
+    return _sanitize_dets_inplace(all_dets, frames)
 
 
 # ---------------------------------------------------------------------------
