@@ -1400,20 +1400,53 @@ async def process_video_stream(
                 pass
 
 
-def _batch_embed_fast(
+def _best_observation(obs: list):
+    """Pick the observation that maximizes frame quality for SigLIP/Qwen crops.
+
+    Score = 0.5 * bbox_area_ratio + 0.3 * laplacian_norm + 0.2 * confidence
+    where bbox_area_ratio and laplacian_norm are normalised to [0, 1] across obs.
+    Falls back to median frame if scoring fails.
+    """
+    if not obs:
+        return None
+    if len(obs) == 1:
+        return obs[0]
+    try:
+        areas = []
+        for o in obs:
+            x1, y1, x2, y2 = o.bbox
+            areas.append(max(0.0, (x2 - x1) * (y2 - y1)))
+        laps = [float(getattr(o, "laplacian_score", 0.0) or 0.0) for o in obs]
+        confs = [float(getattr(o, "confidence", 0.0) or 0.0) for o in obs]
+
+        max_area = max(areas) or 1.0
+        max_lap  = max(laps)  or 1.0
+
+        best, best_score = obs[len(obs) // 2], -1.0
+        for o, area, lap, conf in zip(obs, areas, laps, confs):
+            score = 0.5 * (area / max_area) + 0.3 * (lap / max_lap) + 0.2 * conf
+            if score > best_score:
+                best_score = score
+                best = o
+        return best
+    except Exception:
+        return obs[len(obs) // 2]
+
+
+def _batch_siglip_embeddings(
     t_data: list,
     video_id: str,
 ) -> tuple[list, list, list]:
     """
-    Fast batch embedding: DINOv2 + SigLIP only. VLM + VideoMAE run AFTER fragment merge.
-    Returns: (all_embeddings, all_rep_crops, all_siglip_embeddings)
+    Batch SigLIP2 embeddings only. DINOv2 removed — SigLIP2 is the sole embedding model.
+    Returns: (siglip_multi_feats, all_rep_crops, all_siglip_embeddings)
+      siglip_multi_feats: multi-frame pool-avg per fragment (for fragment merge)
+      all_rep_crops: PIL Images 384×384 from best-quality frame (for Qwen/storage)
+      all_siglip_embeddings: single-crop embedding per fragment (for DB)
     """
-    import torch.nn.functional as F
-
     device = _get_device()
     dtype = torch.float16
 
-    # ── Build crops for all tracklets ────────────────────────────────────────
     def _extract_crop(frame, bbox, size):
         x1, y1, x2, y2 = map(int, bbox)
         h, w = frame.shape[:2]
@@ -1433,66 +1466,63 @@ def _batch_embed_fast(
         )
         return cv2.resize(pad, (size, size), interpolation=cv2.INTER_LINEAR)
 
-    # ── Representative crops (384×384) — built once, shared by SigLIP + storage ──
+    # ── Representative crops (384×384) from best-quality frame ───────────────
+    # best_obs is determined once here; the same crop feeds both SigLIP and Qwen.
     all_rep_crops: list[Image.Image] = []
     for lt, t_idx, rep_bbox, t_frames in t_data:
-        mid_idx = len(t_frames) // 2
-        c = _extract_crop(t_frames[mid_idx], rep_bbox, 384) if t_frames else None
+        best_obs = _best_observation(lt.observations)
+        if best_obs is not None:
+            rep_bbox = [float(x) for x in best_obs.bbox]
+            # t_frames is indexed by position; find the frame matching best_obs
+            best_frame_idx = next(
+                (i for i, o in enumerate(lt.observations) if o is best_obs), len(t_frames) // 2
+            )
+            best_frame = t_frames[best_frame_idx] if best_frame_idx < len(t_frames) else t_frames[len(t_frames) // 2]
+        else:
+            best_frame = t_frames[len(t_frames) // 2] if t_frames else None
+        c = _extract_crop(best_frame, rep_bbox, 384) if best_frame is not None else None
         all_rep_crops.append(
             Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)) if c is not None
             else Image.fromarray(np.zeros((384, 384, 3), dtype=np.uint8))
         )
 
-    # ── DINOv2 batch ──────────────────────────────────────────────────────────
-    all_embeddings = []
-    model_dino = get_model("dinov2")
-    proc_dino = get_model("dinov2_processor")
-    logger.info("[pipeline] %s: DINOv2 embedding %d tracklets...", video_id, len(t_data))
+    model_sip = get_model("siglip2")
+    proc_sip = get_model("siglip2_processor")
     _t0 = time.perf_counter()
-    if model_dino and proc_dino:
+
+    # ── SigLIP2 multi-frame pool-avg — for fragment merge ────────────────────
+    siglip_multi_feats = [[] for _ in t_data]
+    if model_sip and proc_sip and t_data:
         try:
-            pil_crops, tracklet_slices = [], []
+            siglip_crops, siglip_slices = [], []
             for lt, t_idx, rep_bbox, t_frames in t_data:
                 n = min(5, len(t_frames))
                 indices = np.linspace(0, len(t_frames) - 1, n, dtype=int)
-                start = len(pil_crops)
+                start = len(siglip_crops)
                 for idx in indices:
                     c = _extract_crop(t_frames[idx], rep_bbox, 224)
                     if c is not None:
-                        pil_crops.append(Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)))
-                tracklet_slices.append((start, len(pil_crops)))
+                        siglip_crops.append(Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)))
+                siglip_slices.append((start, len(siglip_crops)))
 
-            if pil_crops:
-                inputs = proc_dino(images=pil_crops, return_tensors="pt")
-                inputs = {
-                    k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
-                    for k, v in inputs.items()
-                }
-                with torch.no_grad():
-                    feats = model_dino(**inputs).pooler_output.float()  # [N, 1024]
-
-                for start, end in tracklet_slices:
-                    if end > start:
-                        avg = feats[start:end].mean(0)
-                        norm = avg.norm()
-                        all_embeddings.append((avg / norm if norm > 0 else avg).tolist())
-                    else:
-                        all_embeddings.append(None)
-            else:
-                all_embeddings = [None] * len(t_data)
+            if siglip_crops:
+                inputs = proc_sip(images=siglip_crops, return_tensors="pt", padding=True)
+                inputs = {k: v.to(device, dtype=dtype) if v.is_floating_point() else v.to(device)
+                          for k, v in inputs.items()}
+                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
+                    feats = model_sip.get_image_features(**{k: v for k, v in inputs.items()
+                                                             if k in ["pixel_values"]})
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+                for t_i, (s, e) in enumerate(siglip_slices):
+                    if e > s:
+                        avg = feats[s:e].mean(0)
+                        siglip_multi_feats[t_i] = (avg / avg.norm()).cpu().float().tolist()
         except Exception as exc:
-            logger.warning("[pipeline] DINOv2 batch failed: %s — falling back", exc)
-            all_embeddings = [_generate_dinov2_embeddings(t[3], [t[2]] * len(t[3]), f"{video_id}_{t[1]}") for t in t_data]
-    else:
-        all_embeddings = [None] * len(t_data)
-    logger.info("[pipeline] %s: DINOv2 done in %.1fs", video_id, time.perf_counter() - _t0)
+            logger.warning("[pipeline] SigLIP2 multi-frame encoding failed: %s", exc)
+            siglip_multi_feats = [[] for _ in t_data]
 
-    # ── SigLIP image encoding — for text-image search embeddings only ────────
-    logger.info("[pipeline] %s: SigLIP image encoding %d crops...", video_id, len(all_rep_crops))
-    _t0 = time.perf_counter()
+    # ── SigLIP2 single-crop embedding — for DB storage ───────────────────────
     img_feats = None
-    model_sip = get_model("siglip2")
-    proc_sip = get_model("siglip2_processor")
     if model_sip and proc_sip and t_data:
         try:
             img_inputs = proc_sip(images=all_rep_crops, return_tensors="pt", padding=True)
@@ -1501,13 +1531,11 @@ def _batch_embed_fast(
             with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
                 img_feats = model_sip.get_image_features(**{k: v for k, v in img_inputs.items()
                                                              if k in ["pixel_values"]})
-            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)  # [N, D]
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
         except Exception as exc:
             logger.warning("[pipeline] SigLIP image encoding failed: %s", exc)
             img_feats = None
-    logger.info("[pipeline] %s: SigLIP done in %.1fs", video_id, time.perf_counter() - _t0)
 
-    # Capture SigLIP2 image embeddings for fragment merge + text search
     all_siglip_embeddings: list[list[float]] = []
     try:
         if img_feats is not None:
@@ -1517,11 +1545,11 @@ def _batch_embed_fast(
     except Exception:
         all_siglip_embeddings = [[]] * len(t_data)
 
-    logger.info("[pipeline] %s: embed done — %d tracklets | DINOv2=%d | SigLIP=%d",
-                video_id, len(t_data),
-                sum(1 for e in all_embeddings if e),
+    logger.info("[pipeline] %s: SigLIP2 done in %.1fs — %d fragments | merge_emb=%d | DB_emb=%d",
+                video_id, time.perf_counter() - _t0, len(t_data),
+                sum(1 for e in siglip_multi_feats if e),
                 sum(1 for e in all_siglip_embeddings if e))
-    return all_embeddings, all_rep_crops, all_siglip_embeddings
+    return siglip_multi_feats, all_rep_crops, all_siglip_embeddings
 
 
 def _process_video_sync(
@@ -1633,29 +1661,26 @@ def _process_video_sync(
 
     t_data = []
     for t_idx, lt in enumerate(accepted):
-        obs = lt.observations
-        mid = obs[len(obs) // 2]
-        rep_bbox_float = [float(x) for x in mid.bbox]
-        t_frames = [frame_lookup[o.frame_index] for o in obs if o.frame_index in frame_lookup] or [sampled_frames[0].image]
+        best = _best_observation(lt.observations)
+        rep_bbox_float = [float(x) for x in best.bbox]
+        t_frames = [frame_lookup[o.frame_index] for o in lt.observations if o.frame_index in frame_lookup] or [sampled_frames[0].image]
         t_data.append((lt, t_idx, rep_bbox_float, t_frames))
 
-    all_embeddings, all_rep_crops, all_siglip_embeddings = _batch_embed_fast(t_data, video_id)
+    siglip_multi_feats, all_rep_crops, all_siglip_embeddings = _batch_siglip_embeddings(t_data, video_id)
 
-    # Stage 8: Post-hoc fragment merging via embedding cosine similarity.
+    # Stage 8: Post-hoc fragment merging via SigLIP2 cosine similarity.
     import numpy as _np
 
-    _use_siglip = any(len(e) > 0 for e in all_siglip_embeddings)
-    _merge_embs = all_siglip_embeddings if _use_siglip else all_embeddings
     _n_raw = len(accepted)
     logger.info(
-        "[merge] %s: %s  0/%d — merging fragments (emb=%s, threshold=0.85, max_gap=60s)",
-        video_id, _vlm_progress_bar(0, _n_raw), _n_raw, "SigLIP" if _use_siglip else "DINOv2",
+        "[merge] %s: %s  0/%d — merging fragments (emb=SigLIP2, threshold=0.85, max_gap=60s)",
+        video_id, _vlm_progress_bar(0, _n_raw), _n_raw,
     )
 
     _merger = TrackletFragmentMerger(similarity_threshold=0.85, max_gap_seconds=60.0)
     _orig_accepted = list(accepted)
     _t_merge = time.perf_counter()
-    accepted, _groups = _merger.merge(list(accepted), _merge_embs)
+    accepted, _groups = _merger.merge(list(accepted), siglip_multi_feats)
     _merge_elapsed = time.perf_counter() - _t_merge
 
     _n_merged = sum(len(g) - 1 for g in _groups if len(g) > 1)
@@ -1677,21 +1702,43 @@ def _process_video_sync(
     def _richest(g: list[int]) -> int:
         return max(g, key=lambda i: len(_orig_accepted[i].observations))
 
-    all_embeddings        = [_pool_avg([all_embeddings[i]        for i in g]) for g in _groups]
     all_siglip_embeddings = [_pool_avg([all_siglip_embeddings[i] for i in g]) for g in _groups]
     all_rep_crops         = [all_rep_crops[_richest(g)]          for g in _groups]
 
-    # Rebuild t_data aligned to merged accepted list (~25 tracklets)
+    # Rebuild t_data aligned to merged tracklets — use _best_observation for rep frame
     t_data = []
     for new_idx, mt in enumerate(accepted):
-        obs = mt.observations
-        mid = obs[len(obs) // 2]
-        rep_bbox_float = [float(x) for x in mid.bbox]
+        best = _best_observation(mt.observations)
+        rep_bbox_float = [float(x) for x in best.bbox]
         t_frames = (
-            [frame_lookup[o.frame_index] for o in obs if o.frame_index in frame_lookup]
+            [frame_lookup[o.frame_index] for o in mt.observations if o.frame_index in frame_lookup]
             or [sampled_frames[0].image]
         )
         t_data.append((mt, new_idx, rep_bbox_float, t_frames))
+
+    # Rebuild all_rep_crops for Qwen from best-quality frame of each merged tracklet.
+    # _richest() above picks the fragment with most obs, but _best_observation() within
+    # the merged tracklet's observations is the correct frame for appearance captioning.
+    def _make_rep_crop_384(frame, bbox):
+        x1, y1 = max(0, int(bbox[0])), max(0, int(bbox[1]))
+        x2, y2 = min(frame.shape[1], int(bbox[2])), min(frame.shape[0], int(bbox[3]))
+        crop = frame[y1:y2, x1:x2] if x2 > x1 and y2 > y1 else frame
+        if crop.size == 0:
+            crop = frame
+        max_dim = max(crop.shape[0], crop.shape[1])
+        top = (max_dim - crop.shape[0]) // 2
+        sq = cv2.copyMakeBorder(
+            crop, top, max_dim - crop.shape[0] - top,
+            (max_dim - crop.shape[1]) // 2, max_dim - crop.shape[1] - (max_dim - crop.shape[1]) // 2,
+            cv2.BORDER_CONSTANT, value=(114, 114, 114),
+        )
+        return Image.fromarray(cv2.cvtColor(cv2.resize(sq, (384, 384), interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB))
+
+    all_rep_crops = []
+    for mt, new_idx, rep_bbox_float, t_frames in t_data:
+        best = _best_observation(mt.observations)
+        best_frame = frame_lookup.get(best.frame_index, t_frames[0] if t_frames else sampled_frames[0].image)
+        all_rep_crops.append(_make_rep_crop_384(best_frame, best.bbox))
 
     # ── VLM: Qwen2-VL-7B trên ~25 merged tracklets ───────────────────────────
     logger.info("[vlm] %s: captioning %d merged tracklets (batch_size=%d)",
@@ -1773,7 +1820,6 @@ def _process_video_sync(
     for t_idx, (lt, _, rep_bbox_float, t_frames) in enumerate(t_data):
         obs = lt.observations
         attributes = all_attributes[t_idx]
-        embedding = all_embeddings[t_idx]
         siglip_emb = all_siglip_embeddings[t_idx] if t_idx < len(all_siglip_embeddings) else []
         action_tuple = all_actions[t_idx]
         if isinstance(action_tuple, tuple) and len(action_tuple) >= 3:
@@ -1837,7 +1883,7 @@ def _process_video_sync(
             representative_bbox=[int(x) for x in rep_bbox_float],
             bev_x=_bev_inputs[t_idx].get("bev_x", 0.0),
             bev_y=_bev_inputs[t_idx].get("bev_y", 0.0),
-            embedding_vector=embedding or [],
+            embedding_vector=[],
             siglip_embedding=siglip_emb or [],
             action=action,
             action_confidence=action_conf,
@@ -2011,12 +2057,6 @@ def process_batch(req: BatchProcessRequest) -> BatchProcessResponse:
         rep_cam = rep_det.get("camera_id", "unknown")
         rep_vid = rep_det.get("video_id", contributing_vids[0] if contributing_vids else "unknown")
 
-        # DINOv2 embedding
-        embedding = _generate_dinov2_embeddings(
-            all_track_frames, all_track_bboxes,
-            f"{tracklet_id_prefix}_{group_idx}",
-        )
-
         # VLM open-vocabulary attribute captioning
         mid_frame = all_track_frames[len(all_track_frames) // 2]
         rep_crop_cv = _extract_crop_for_vlm(mid_frame, rep_bbox)
@@ -2082,7 +2122,7 @@ def process_batch(req: BatchProcessRequest) -> BatchProcessResponse:
             representative_bbox=[int(x) for x in rep_bbox],
             bev_x=rep_bev_x,
             bev_y=rep_bev_y,
-            embedding_vector=embedding or [],
+            embedding_vector=[],
             action=action,
             occlusion_score=0.0,
             contributing_cameras=sorted(set(contributing_cams)),
