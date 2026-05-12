@@ -80,7 +80,10 @@ DEFAULT_SAMPLE_INTERVAL = 15
 DEFAULT_MIN_BBOX_AREA = 400
 DEFAULT_BEV_MAX_DIST = 1.5
 MAX_WORKERS = int(os.getenv("BATCH_MAX_WORKERS", "8"))
-VLM_BATCH_SIZE = _get_positive_env_int("VLM_BATCH_SIZE", 1)
+VLM_BATCH_SIZE = _get_positive_env_int("VLM_BATCH_SIZE", 4)
+VLM_BATCH_MAX_SIZE = _get_positive_env_int("VLM_BATCH_MAX_SIZE", 8)
+VLM_BATCH_GROW_STEP = _get_positive_env_int("VLM_BATCH_GROW_STEP", 1)
+VLM_BATCH_STABLE_STEPS = _get_positive_env_int("VLM_BATCH_STABLE_STEPS", 3)
 VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
     "VLM_BATCH_MAX_NEW_TOKENS_PER_CROP", 512
 )
@@ -1117,7 +1120,7 @@ def _caption_crop_vlm(crop: "Image.Image") -> dict:
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=VLM_BATCH_MAX_NEW_TOKENS_PER_CROP,
                 do_sample=False,
                 temperature=None,
                 top_p=None,
@@ -1146,36 +1149,65 @@ def _vlm_progress_bar(done: int, total: int, width: int = 25) -> str:
 
 
 def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag: str = "") -> list:
-    """Batch Qwen2-VL captioning — sends up to batch_size crops per call (~3-4x faster).
-
-    Retries failed batches with smaller sub-batches before falling back to singles.
-    """
+    """Adaptive Qwen2-VL captioning with OOM-aware batch backoff."""
     model = get_model("qwen2vl")
     processor = get_model("qwen2vl_processor")
     if model is None or processor is None:
         return [_default_attributes() for _ in crops]
 
-    batch_size = max(1, batch_size)
     device = _get_device()
     results: list = []
     total = len(crops)
     log_every = max(1, total // 20)  # log every ~5%
     _vlm_t0 = time.perf_counter()
 
-    for i in range(0, total, batch_size):
-        batch = crops[i:i + batch_size]
+    start_batch_size = max(1, min(batch_size, VLM_BATCH_MAX_SIZE, total or 1))
+    current_batch_size = start_batch_size
+    stable_windows = 0
+    i = 0
+
+    def _log_progress(done: int, batch_used: int) -> None:
+        if done == 1 or done % log_every == 0 or done == total:
+            elapsed = time.perf_counter() - _vlm_t0
+            eta = (elapsed / done * (total - done)) if done else 0
+            logger.info(
+                "[vlm] %s %s  %.0fs elapsed  ETA %.0fs  batch=%d current=%d start=%d max=%d tokens/crop=%d",
+                tag,
+                _vlm_progress_bar(done, total),
+                elapsed,
+                eta,
+                batch_used,
+                current_batch_size,
+                start_batch_size,
+                VLM_BATCH_MAX_SIZE,
+                VLM_BATCH_MAX_NEW_TOKENS_PER_CROP,
+            )
+
+    def _maybe_grow_batch() -> None:
+        nonlocal current_batch_size, stable_windows
+        if stable_windows >= VLM_BATCH_STABLE_STEPS and current_batch_size < VLM_BATCH_MAX_SIZE:
+            current_batch_size = min(
+                VLM_BATCH_MAX_SIZE,
+                current_batch_size + VLM_BATCH_GROW_STEP,
+            )
+            stable_windows = 0
+
+    while i < total:
+        batch = crops[i:i + current_batch_size]
         n = len(batch)
 
         if n == 1:
             results.append(_caption_crop_vlm(batch[0]))
-            done = len(results)
-            if done == 1 or done % log_every == 0 or done == total:
-                elapsed = time.perf_counter() - _vlm_t0
-                eta = (elapsed / done * (total - done)) if done else 0
-                logger.info("[vlm] %s %s  %.0fs elapsed  ETA %.0fs",
-                            tag, _vlm_progress_bar(done, total), elapsed, eta)
+            i += 1
+            stable_windows += 1
+            _log_progress(len(results), n)
+            _maybe_grow_batch()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
             continue
 
+        inputs = None
+        output_ids = None
         try:
             prompt = _VLM_BATCH_PROMPT_TEMPLATE.format(n=n)
             content = [{"type": "image", "image": c} for c in batch]
@@ -1205,22 +1237,76 @@ def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag:
             logger.debug("[vlm] batch(%d) OK at offset %d", n, i)
             for obj in parsed_list:
                 results.append(_parse_vlm_attrs(obj))
+            i += n
+            stable_windows += 1
+            _log_progress(len(results), n)
+            _maybe_grow_batch()
 
-        except Exception as exc:
-            next_batch_size = min(max(1, batch_size // 2), max(1, (n + 1) // 2))
-            if n > 1 and next_batch_size < n:
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "out of memory" in msg and current_batch_size > 1:
+                next_batch_size = max(1, current_batch_size // 2)
                 logger.warning(
-                    "[vlm] batch(%d) failed: %s — retrying with smaller batches of %d",
+                    "[vlm] %s OOM at %d/%d (batch=%d) -> retry batch=%d",
+                    tag,
+                    i,
+                    total,
+                    current_batch_size,
+                    next_batch_size,
+                )
+                current_batch_size = next_batch_size
+                stable_windows = 0
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                continue
+            if current_batch_size > 1:
+                next_batch_size = max(1, current_batch_size // 2)
+                logger.warning(
+                    "[vlm] %s batch(%d) failed at %d/%d: %s -> retry batch=%d",
+                    tag,
                     n,
+                    i,
+                    total,
                     exc,
                     next_batch_size,
                 )
-                results.extend(_caption_crops_vlm_batch(batch, batch_size=next_batch_size, tag=tag))
+                current_batch_size = next_batch_size
+                stable_windows = 0
+                continue
+            logger.warning("[vlm] single crop failed at %d/%d: %s", i, total, exc)
+            results.append(_default_attributes())
+            i += 1
+            _log_progress(len(results), 1)
+
+        except Exception as exc:
+            if current_batch_size > 1:
+                next_batch_size = max(1, current_batch_size // 2)
+                logger.warning(
+                    "[vlm] %s batch(%d) failed at %d/%d: %s -> retry batch=%d",
+                    tag,
+                    n,
+                    i,
+                    total,
+                    exc,
+                    next_batch_size,
+                )
+                current_batch_size = next_batch_size
+                stable_windows = 0
                 continue
 
-            logger.warning("[vlm] batch(%d) failed: %s — falling back to single crops", n, exc)
-            for crop in batch:
-                results.append(_caption_crop_vlm(crop))
+            logger.warning("[vlm] single crop failed at %d/%d: %s", i, total, exc)
+            results.append(_default_attributes())
+            i += 1
+            _log_progress(len(results), 1)
+
+        finally:
+            try:
+                del inputs
+                del output_ids
+            except Exception:
+                pass
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
     return results
 
@@ -1877,8 +1963,14 @@ def _process_video_sync(
         all_rep_crops.append(_make_rep_crop_384(best_frame, best.bbox))
 
     # ── VLM: Qwen2-VL-7B trên ~25 merged tracklets ───────────────────────────
-    logger.info("[vlm] %s: captioning %d merged tracklets (batch_size=%d)",
-                video_id, len(all_rep_crops), VLM_BATCH_SIZE)
+    logger.info(
+        "[vlm] %s: captioning %d merged tracklets (start_batch=%d, max_batch=%d, tokens/crop=%d)",
+        video_id,
+        len(all_rep_crops),
+        VLM_BATCH_SIZE,
+        VLM_BATCH_MAX_SIZE,
+        VLM_BATCH_MAX_NEW_TOKENS_PER_CROP,
+    )
     all_attributes: list[dict] = _caption_crops_vlm_batch(
         all_rep_crops, batch_size=VLM_BATCH_SIZE, tag=video_id,
     )
