@@ -1,25 +1,16 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { useToast } from "@/components/ui/ToastProvider";
-import { VideoGrid } from "@/components/video/VideoGrid";
-import { VideoList } from "@/components/video/VideoList";
-import { CandidateDetailModal } from "@/features/candidate/CandidateDetailModal";
 import { useSearch } from "@/features/search/SearchContext";
 import {
-  getHistoryCandidates,
   getHistoryEvidence,
   getSearchHistory,
-  getTraceTimeline,
   type SearchHistoryItem,
 } from "@/lib/api";
-import type { VideoClip, VideoItem } from "@/lib/types";
-
-type ActivePanel =
-  | { type: "candidates"; queryId: string; items: VideoItem[]; selectedCandidateId: string | null }
-  | { type: "evidence"; queryId: string; clips: VideoClip[] }
-  | null;
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "Đang chờ",
@@ -42,16 +33,12 @@ function statusBadgeClass(status: string | null): string {
 }
 
 export function HistoryView() {
+  const router = useRouter();
   const { showToast } = useToast();
   const { setQuery } = useSearch();
   const [historyItems, setHistoryItems] = useState<SearchHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [activeRow, setActiveRow] = useState<string | null>(null);
-  const [actionLoading, setActionLoading] = useState(false);
-  const [activePanel, setActivePanel] = useState<ActivePanel>(null);
-  const [selectedCandidate, setSelectedCandidate] = useState<
-    { queryId: string; candidateId: string } | null
-  >(null);
+  const [evidenceLoading, setEvidenceLoading] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,60 +61,22 @@ export function HistoryView() {
     };
   }, [showToast]);
 
-  const handleViewCandidates = useCallback(async (row: SearchHistoryItem) => {
-    setActiveRow(row.queryId);
-    setActionLoading(true);
-    setQuery(row.queryText);
-    try {
-      const payload = await getHistoryCandidates(row.queryId);
-      setActivePanel({
-        type: "candidates",
-        queryId: row.queryId,
-        items: payload.items,
-        selectedCandidateId: payload.selectedCandidateId,
-      });
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Không tải được candidates.", "error");
-    } finally {
-      setActionLoading(false);
-    }
-  }, [setQuery, showToast]);
-
   const handleViewEvidence = useCallback(async (row: SearchHistoryItem) => {
-    setActiveRow(row.queryId);
-    setActionLoading(true);
+    setEvidenceLoading(row.queryId);
     setQuery(row.queryText);
     try {
       const meta = await getHistoryEvidence(row.queryId);
-      const timeline = await getTraceTimeline(meta.evidenceId);
-      const clips: VideoClip[] = timeline.segments
-        .filter((seg) => seg.videoClipUrl)
-        .map((seg) => ({
-          id: `${meta.evidenceId}-${seg.segmentOrder}`,
-          title: seg.cameraId ? `Camera ${seg.cameraId}` : `Segment ${seg.segmentOrder}`,
-          description: seg.timeStart ? new Date(seg.timeStart).toLocaleString("vi-VN") : "",
-          thumbnailUrl: seg.thumbnailUrl ?? "",
-          previewUrl: seg.videoClipUrl ?? undefined,
-        }));
-      if (clips.length === 0) {
-        showToast("Evidence chưa render xong. Vui lòng thử lại sau.", "error");
-        return;
-      }
-      setActivePanel({ type: "evidence", queryId: row.queryId, clips });
+      const candidateParam = meta.candidateId
+        ? `&candidate=${encodeURIComponent(meta.candidateId)}`
+        : "";
+      router.push(
+        `/trace/${meta.evidenceId}?query=${encodeURIComponent(row.queryId)}${candidateParam}`,
+      );
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Không tải được evidence.", "error");
-    } finally {
-      setActionLoading(false);
+      setEvidenceLoading(null);
     }
-  }, [setQuery, showToast]);
-
-  const handleCandidateClick = useCallback((video: VideoItem) => {
-    if (!video.queryId) {
-      showToast("Không tìm thấy query_id cho candidate này.", "error");
-      return;
-    }
-    setSelectedCandidate({ queryId: video.queryId, candidateId: video.id });
-  }, [showToast]);
+  }, [router, setQuery, showToast]);
 
   return (
     <div className="mx-auto w-full max-w-4xl text-ink dark:text-slate-100">
@@ -143,16 +92,11 @@ export function HistoryView() {
         {historyItems.map((row) => {
           const statusLabel = STATUS_LABEL[row.status ?? ""] ?? row.status ?? "—";
           const hasCandidates = row.candidateCount > 0;
-          const isActive = activeRow === row.queryId;
+          const isEvidenceLoading = evidenceLoading === row.queryId;
           return (
             <li
               key={row.queryId}
-              className={[
-                "rounded-2xl border bg-white px-5 py-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.36)]",
-                isActive
-                  ? "border-blue-300 dark:border-blue-500/60"
-                  : "border-slate-200 hover:border-blue-200 hover:shadow-[0_16px_30px_rgba(37,99,235,0.1)] dark:border-slate-800 dark:hover:border-blue-500/60",
-              ].join(" ")}
+              className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition hover:border-blue-200 hover:shadow-[0_16px_30px_rgba(37,99,235,0.1)] dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.36)] dark:hover:border-blue-500/60 dark:hover:shadow-[0_24px_44px_rgba(30,64,175,0.24)]"
             >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
@@ -174,27 +118,35 @@ export function HistoryView() {
                   </div>
                   <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 md:text-base">{row.queryText}</p>
                   <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                    {row.candidateCount} candidate{row.candidateCount === 1 ? "" : "s"}
+                    Đã xem {row.candidateCount} candidate{row.candidateCount === 1 ? "" : "s"}
                     {row.selectedCandidateId ? " · đã chọn 1" : ""}
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
+                  {hasCandidates ? (
+                    <Link
+                      href={`/history/${encodeURIComponent(row.queryId)}/candidates`}
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-200 dark:hover:border-blue-500/60 dark:hover:text-blue-300"
+                    >
+                      Xem kết quả
+                    </Link>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-400 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-600"
+                    >
+                      Xem kết quả
+                    </button>
+                  )}
                   <button
                     type="button"
-                    disabled={!hasCandidates || actionLoading}
-                    onClick={() => void handleViewCandidates(row)}
-                    className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-200 dark:hover:border-blue-500/60 dark:hover:text-blue-300"
-                  >
-                    Xem kết quả
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!row.hasEvidence || actionLoading}
+                    disabled={!row.hasEvidence || isEvidenceLoading}
                     onClick={() => void handleViewEvidence(row)}
                     className="rounded-xl border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-700/60 dark:bg-blue-950/45 dark:text-blue-300 dark:hover:bg-blue-900/40"
                     title={row.hasEvidence ? "Xem video đã truy vết" : "Chưa có video truy vết (chỉ lưu 4 truy vấn gần nhất)"}
                   >
-                    Xem video truy vết
+                    {isEvidenceLoading ? "Đang mở..." : "Xem video truy vết"}
                   </button>
                 </div>
               </div>
@@ -202,31 +154,6 @@ export function HistoryView() {
           );
         })}
       </ul>
-
-      {activePanel?.type === "candidates" ? (
-        <section className="mt-8">
-          <h2 className="mb-4 text-lg font-black tracking-normal text-slate-950 dark:text-white">Candidates đã lưu</h2>
-          {activePanel.items.length === 0 ? (
-            <p className="text-sm text-slate-500 dark:text-slate-400">Không có candidate nào.</p>
-          ) : (
-            <VideoGrid items={activePanel.items} onItemClick={handleCandidateClick} />
-          )}
-        </section>
-      ) : null}
-
-      {activePanel?.type === "evidence" ? (
-        <section className="mt-8">
-          <h2 className="mb-4 text-lg font-black tracking-normal text-slate-950 dark:text-white">Video đã truy vết</h2>
-          <VideoList clips={activePanel.clips} />
-        </section>
-      ) : null}
-
-      <CandidateDetailModal
-        open={selectedCandidate !== null}
-        queryId={selectedCandidate?.queryId ?? null}
-        candidateId={selectedCandidate?.candidateId ?? null}
-        onClose={() => setSelectedCandidate(null)}
-      />
     </div>
   );
 }

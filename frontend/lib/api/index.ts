@@ -20,6 +20,7 @@ export {
 export { parseJsonOrThrow, readApiErrorMessage, mapBackendErrorMessage } from "./errors";
 export type {
   SearchFilters,
+  SearchPage,
   IngestResponse,
   IngestStatsResponse,
   SearchHistoryItem,

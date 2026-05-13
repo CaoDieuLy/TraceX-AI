@@ -38,6 +38,11 @@ class SearchRequest(BaseModel):
     time_to: str | None = None
     query_image_url: str | None = None  # URL of uploaded query image (for history display)
     user_id: int = 1  # injected by metadata-service from JWT; fallback=1 for direct calls
+    # When the frontend paginates (offset > 0) it can pass back the qid returned by
+    # the first call so we reuse the same query_history row instead of creating a
+    # new one per page. Candidates are then *appended* (UPSERT) so the persisted
+    # count grows to match what the user has actually scrolled to.
+    query_id: str | None = None
 
 from shared.database import SessionLocal
 from shared.models import (
@@ -739,10 +744,27 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
 
     db = SessionLocal()
     try:
-        qid = str(uuid.uuid4())
+        # If the frontend passes an existing query_id and it belongs to the
+        # current user, reuse it — that way "Tiếp theo" pagination doesn't
+        # spawn a duplicate query_history row per page. Otherwise mint a new
+        # qid and create a fresh history entry.
+        qh: QueryHistory | None = None
+        if body.query_id:
+            qh = db.query(QueryHistory).filter(
+                QueryHistory.query_id == body.query_id,
+                QueryHistory.user_id == body.user_id,
+            ).one_or_none()
+
+        if qh is not None:
+            qid = qh.query_id
+            reused_history = True
+        else:
+            qid = str(uuid.uuid4())
+            reused_history = False
+
         logger.info(
             "[query:%s] start user_id=%s top_k=%d offset=%d camera_ids=%s "
-            "time_from=%s time_to=%s image_query=%s query=%r",
+            "time_from=%s time_to=%s image_query=%s reused_history=%s query=%r",
             qid,
             body.user_id,
             top_k,
@@ -751,6 +773,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             time_from,
             time_to,
             bool(body.query_image_url),
+            reused_history,
             query,
         )
 
@@ -765,16 +788,17 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             search_query,
         )
 
-        # ── Luồng 20.5: Create QueryHistory record ──────────────────────
-        qh = QueryHistory(
-            query_id=qid,
-            user_id=body.user_id,
-            query_text=query or "",
-            status="searching",
-            query_image_url=body.query_image_url or None,
-        )
-        db.add(qh)
-        db.flush()  # FK constraint: query_candidates.query_id → query_history.query_id
+        # ── Luồng 20.5: Create / reuse QueryHistory record ──────────────
+        if qh is None:
+            qh = QueryHistory(
+                query_id=qid,
+                user_id=body.user_id,
+                query_text=query or "",
+                status="searching",
+                query_image_url=body.query_image_url or None,
+            )
+            db.add(qh)
+            db.flush()  # FK constraint: query_candidates.query_id → query_history.query_id
 
         # Parse query into structured constraints once (gender / colors /
         # garments / actions). Drives both the gender hard-filter at the
@@ -1107,7 +1131,14 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             "vector_text_quality" if query_vec else "text_quality",
         )
 
-        for rank_idx, item in enumerate(merged, start=1):
+        # Only persist the slice the user is actually viewing (paged). Earlier
+        # versions wrote every merged candidate (~200) up front, which made
+        # /history overstate how many candidates the user had actually seen.
+        # When the frontend paginates with the same `query_id`, subsequent
+        # calls append the next page via UPSERT.
+        paged = merged[offset:offset + top_k]
+        for page_idx, item in enumerate(paged):
+            rank_idx = offset + page_idx + 1
             rep = item["rep"]
             candidate_id = item["candidate_id"]
             db.execute(pg_insert(QueryCandidate).values(
@@ -1132,9 +1163,8 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                     match_type="vector",
                 ).on_conflict_do_nothing(index_elements=["candidate_id", "tracklet_id"]))
 
-        paged = merged[offset:offset + top_k]
         qh.status = "candidates_found"
-        qh.result_count = len(paged)
+        qh.result_count = offset + len(paged)
         db.commit()
         # INFO-level: one compact line per ranked candidate so health/QA can
         # spot-check ranking without parsing the per-member DEBUG payload.

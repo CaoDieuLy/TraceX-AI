@@ -64,6 +64,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [results, setResults] = useState<VideoItem[]>([]);
+  const [currentQueryId, setCurrentQueryId] = useState<string | null>(null);
   const [gridPage, setGridPage] = useState(0);
   const [locationIds, setLocationIds] = useState<string[]>([]);
   const [timeFrom, setTimeFrom] = useState("");
@@ -125,12 +126,14 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setError(null);
     setHasSearched(true);
     setIsLoading(true);
+    setCurrentQueryId(null);
     try {
       const requestLimit = Math.min(GRID_BATCH_SIZE, topK);
-      const next = await searchVideos(trimmed, requestLimit, 0, buildSearchFilters());
-      setResults(next);
+      const page = await searchVideos(trimmed, requestLimit, 0, buildSearchFilters());
+      setResults(page.items);
+      setCurrentQueryId(page.queryId);
       setGridPage(0);
-      setHasMore(next.length >= requestLimit && next.length < topK);
+      setHasMore(page.items.length >= requestLimit && page.items.length < topK);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Không thể tải kết quả tìm kiếm.";
       setError(message);
@@ -157,13 +160,23 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setError(null);
     try {
       const requestLimit = Math.min(GRID_BATCH_SIZE, remaining);
-      const next = await searchVideos(trimmed, requestLimit, results.length, buildSearchFilters());
-      if (!next.length) {
+      const page = await searchVideos(
+        trimmed,
+        requestLimit,
+        results.length,
+        buildSearchFilters(),
+        false,
+        currentQueryId,
+      );
+      if (!page.items.length) {
         setHasMore(false);
         return false;
       }
-      setResults((prev) => [...prev, ...next]);
-      setHasMore(next.length >= requestLimit && results.length + next.length < topK);
+      setResults((prev) => [...prev, ...page.items]);
+      if (page.queryId && page.queryId !== currentQueryId) {
+        setCurrentQueryId(page.queryId);
+      }
+      setHasMore(page.items.length >= requestLimit && results.length + page.items.length < topK);
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Không thể tải thêm kết quả.";
@@ -172,7 +185,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [query, isLoading, hasSearched, hasMore, topK, results.length, validateTimeRange, buildSearchFilters]);
+  }, [query, isLoading, hasSearched, hasMore, topK, results.length, currentQueryId, validateTimeRange, buildSearchFilters]);
 
   const clearFilters = useCallback(() => {
     setLocationIds([]);
@@ -188,6 +201,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setIsLoading(false);
     setHasMore(false);
     setGridPage(0);
+    setCurrentQueryId(null);
     clearFilters();
   }, [clearFilters]);
 
@@ -204,11 +218,14 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     }
     setIsLoading(true);
     setError(null);
+    // Top-N change starts a fresh search session, so don't pass the previous qid.
+    setCurrentQueryId(null);
     void searchVideos(trimmed, Math.min(GRID_BATCH_SIZE, topK), 0, buildSearchFilters())
-      .then((next) => {
-        setResults(next);
+      .then((page) => {
+        setResults(page.items);
+        setCurrentQueryId(page.queryId);
         setGridPage(0);
-        setHasMore(next.length >= Math.min(GRID_BATCH_SIZE, topK) && next.length < topK);
+        setHasMore(page.items.length >= Math.min(GRID_BATCH_SIZE, topK) && page.items.length < topK);
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : "Không thể tải kết quả tìm kiếm.";

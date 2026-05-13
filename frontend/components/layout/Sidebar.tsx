@@ -97,7 +97,7 @@ export function Sidebar() {
 
   const isHome = pathname === "/home";
   const isNew = isHome && view !== "history";
-  const isHistory = pathname === "/history";
+  const isHistory = pathname === "/history" || pathname.startsWith("/history/");
   const isDetail = pathname.startsWith("/detail/");
   const isUsers = pathname === "/admin/users";
   const isGuide = pathname === "/guide";

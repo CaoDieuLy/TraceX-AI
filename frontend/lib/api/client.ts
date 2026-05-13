@@ -169,7 +169,19 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return parseJsonOrThrow<T>(response);
 }
 
-export async function searchVideos(query: string, topK: number, offset = 0, filters?: SearchFilters, persistQuery = false): Promise<VideoItem[]> {
+export type SearchPage = {
+  queryId: string | null;
+  items: VideoItem[];
+};
+
+export async function searchVideos(
+  query: string,
+  topK: number,
+  offset = 0,
+  filters?: SearchFilters,
+  persistQuery = false,
+  reuseQueryId?: string | null,
+): Promise<SearchPage> {
   const apiBaseUrl = getApiBaseUrl();
   const payloadBody: {
     query: string;
@@ -179,6 +191,7 @@ export async function searchVideos(query: string, topK: number, offset = 0, filt
     camera_ids?: string[];
     time_from?: string;
     time_to?: string;
+    query_id?: string;
   } = { query, top_k: topK, offset, persist_query: persistQuery };
   if (filters?.camera_ids?.length) {
     payloadBody.camera_ids = filters.camera_ids;
@@ -189,21 +202,25 @@ export async function searchVideos(query: string, topK: number, offset = 0, filt
   if (filters?.time_to) {
     payloadBody.time_to = filters.time_to;
   }
+  if (reuseQueryId) {
+    payloadBody.query_id = reuseQueryId;
+  }
   const payload = await apiFetch<SearchApiResponse>("/search", {
     method: "POST",
     body: JSON.stringify(payloadBody),
   });
 
-  const queryId = payload.query_id;
-  return payload.results.map((item) => ({
+  const queryId = payload.query_id ?? null;
+  const items = payload.results.map((item) => ({
     id: item.id,
     title: `Candidate ${item.id}`,
     description: item.description,
     thumbnailUrl: isLikelyImageUrl(item.thumbnail_url)
       ? resolveMediaUrl(item.thumbnail_url, apiBaseUrl)
       : placeholderThumbnail(item.id),
-    queryId: item.query_id ?? queryId,
+    queryId: item.query_id ?? queryId ?? undefined,
   }));
+  return { queryId, items };
 }
 
 export async function getVideoDetail(videoId: string): Promise<{ id: string; segments: VideoClip[] }> {
@@ -316,16 +333,17 @@ export async function getSearchHistory(): Promise<SearchHistoryItem[]> {
 }
 
 export async function getHistoryCandidates(queryId: string): Promise<HistoryCandidatesResult> {
+  const apiBaseUrl = getApiBaseUrl();
   const payload = await apiFetch<HistoryCandidatesApiResponse>(
     `/history/${encodeURIComponent(queryId)}/candidates`,
   );
   const items: VideoItem[] = payload.results.map((row) => ({
     id: row.id,
-    title: row.description || row.id,
+    title: `Candidate ${row.id}`,
     description: row.description,
     thumbnailUrl: isLikelyImageUrl(row.thumbnail_url)
-      ? row.thumbnail_url
-      : (row.thumbnail_url || placeholderThumbnail(row.id)),
+      ? resolveMediaUrl(row.thumbnail_url, apiBaseUrl)
+      : placeholderThumbnail(row.id),
     queryId: row.query_id,
   }));
   return {

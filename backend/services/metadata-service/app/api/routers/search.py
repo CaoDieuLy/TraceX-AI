@@ -25,6 +25,7 @@ class SearchRequest(BaseModel):
     time_from: str | None = None
     time_to: str | None = None
     query_image_url: str | None = None  # URL of uploaded query image (for history display)
+    query_id: str | None = None  # passed back by FE during pagination so the qh row is reused
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,8 @@ def search_candidates(
         payload["time_to"] = body.time_to
     if body.query_image_url:
         payload["query_image_url"] = body.query_image_url
+    if body.query_id:
+        payload["query_id"] = body.query_id
 
     try:
         result = _post_to_query_service("/search", payload)
