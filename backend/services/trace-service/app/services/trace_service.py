@@ -424,6 +424,40 @@ class TraceService:
         )
         return count
 
+    def prune_user_evidence_keep_recent(self, user_id: int, keep: int = 4) -> int:
+        """Keep only the `keep` most recent evidence videos per user; delete the rest.
+
+        Query rows in `query_history` are kept intact — only `evidence_videos`
+        (and their cascading `evidence_tracklets`) plus the on-disk clip
+        directory are removed. Disk cleanup is best-effort.
+        """
+        from pathlib import Path
+        import shutil
+
+        from ..core.models import QueryHistory
+
+        traces_root = Path(os.getenv("TRACES_DIR", "/workspace/storage/traces"))
+
+        rows = (
+            self.session.query(EvidenceVideo)
+            .join(QueryHistory, EvidenceVideo.query_id == QueryHistory.query_id)
+            .filter(QueryHistory.user_id == user_id)
+            .order_by(EvidenceVideo.created_at.desc())
+            .all()
+        )
+        to_delete = rows[keep:]
+        for ev in to_delete:
+            clip_dir = traces_root / str(ev.query_id) / str(ev.query_candidate_id)
+            if clip_dir.exists():
+                try:
+                    shutil.rmtree(clip_dir)
+                except OSError as exc:
+                    logger.warning(
+                        "prune_user_evidence: failed to remove %s: %s", clip_dir, exc,
+                    )
+            self.session.delete(ev)
+        return len(to_delete)
+
     def _resolve_source_video_path(self, video) -> str | None:
         """Return a readable local path to the source MP4, or None.
 

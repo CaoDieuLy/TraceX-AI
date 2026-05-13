@@ -15,6 +15,11 @@ type SearchApiResponse = {
 type SearchHistoryApiItem = {
   query_id: string;
   query_text: string;
+  status?: string | null;
+  selected_candidate_id?: string | null;
+  candidate_count?: number;
+  evidence_video_id?: number | null;
+  has_evidence?: boolean;
   video_id: string | null;
   storage_path: string | null;
   created_at: string;
@@ -29,10 +34,47 @@ type SearchHistoryApiResponse = {
 export type SearchHistoryItem = {
   queryId: string;
   queryText: string;
+  status: string | null;
+  selectedCandidateId: string | null;
+  candidateCount: number;
+  evidenceVideoId: number | null;
+  hasEvidence: boolean;
   videoId: string | null;
   storagePath: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type HistoryCandidateApi = {
+  id: string;
+  thumbnail_url: string;
+  description: string;
+  query_id: string;
+  is_selected: boolean;
+  rank_position: number;
+  fusion_score: number;
+};
+
+type HistoryCandidatesApiResponse = {
+  results: HistoryCandidateApi[];
+  query_id: string;
+  selected_candidate_id: string | null;
+};
+
+export type HistoryCandidatesResult = {
+  queryId: string;
+  selectedCandidateId: string | null;
+  items: VideoItem[];
+};
+
+export type HistoryEvidenceMeta = {
+  evidenceId: number;
+  queryId: string;
+  candidateId: string;
+  traceConfidence: number;
+  segmentCount: number;
+  totalDuration: number;
+  createdAt: string;
 };
 
 type VideoDetailApiResponse = {
@@ -252,16 +294,69 @@ export async function triggerFullPipeline(
   });
 }
 
-export async function getSearchHistory(): Promise<SearchHistoryItem[]> {
-  const payload = await apiFetch<SearchHistoryApiResponse>("/history");
-  return payload.items.map((item) => ({
+function mapHistoryItem(item: SearchHistoryApiItem): SearchHistoryItem {
+  return {
     queryId: item.query_id,
     queryText: item.query_text,
+    status: item.status ?? null,
+    selectedCandidateId: item.selected_candidate_id ?? null,
+    candidateCount: item.candidate_count ?? 0,
+    evidenceVideoId: item.evidence_video_id ?? null,
+    hasEvidence: Boolean(item.has_evidence),
     videoId: item.video_id,
     storagePath: item.storage_path,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
+  };
+}
+
+export async function getSearchHistory(): Promise<SearchHistoryItem[]> {
+  const payload = await apiFetch<SearchHistoryApiResponse>("/history");
+  return payload.items.map(mapHistoryItem);
+}
+
+export async function getHistoryCandidates(queryId: string): Promise<HistoryCandidatesResult> {
+  const payload = await apiFetch<HistoryCandidatesApiResponse>(
+    `/history/${encodeURIComponent(queryId)}/candidates`,
+  );
+  const items: VideoItem[] = payload.results.map((row) => ({
+    id: row.id,
+    title: row.description || row.id,
+    description: row.description,
+    thumbnailUrl: isLikelyImageUrl(row.thumbnail_url)
+      ? row.thumbnail_url
+      : (row.thumbnail_url || placeholderThumbnail(row.id)),
+    queryId: row.query_id,
   }));
+  return {
+    queryId: payload.query_id,
+    selectedCandidateId: payload.selected_candidate_id,
+    items,
+  };
+}
+
+export async function getHistoryEvidence(queryId: string): Promise<HistoryEvidenceMeta> {
+  type EvidenceApi = {
+    evidence_id: number;
+    query_id: string;
+    candidate_id: string;
+    trace_confidence: number;
+    segment_count: number;
+    total_duration: number;
+    created_at: string;
+  };
+  const payload = await apiFetch<EvidenceApi>(
+    `/history/${encodeURIComponent(queryId)}/evidence`,
+  );
+  return {
+    evidenceId: payload.evidence_id,
+    queryId: payload.query_id,
+    candidateId: payload.candidate_id,
+    traceConfidence: payload.trace_confidence,
+    segmentCount: payload.segment_count,
+    totalDuration: payload.total_duration,
+    createdAt: payload.created_at,
+  };
 }
 
 export async function selectHistoryVideo(query: string, selectedIndex: number): Promise<void> {
@@ -273,14 +368,7 @@ export async function selectHistoryVideo(query: string, selectedIndex: number): 
 
 export async function getAdminUserQueries(userId: number): Promise<SearchHistoryItem[]> {
   const payload = await apiFetch<SearchHistoryApiResponse>(`/admin/users/${userId}/queries`);
-  return payload.items.map((item) => ({
-    queryId: item.query_id,
-    queryText: item.query_text,
-    videoId: item.video_id,
-    storagePath: item.storage_path,
-    createdAt: item.created_at,
-    updatedAt: item.updated_at,
-  }));
+  return payload.items.map(mapHistoryItem);
 }
 
 // ---------------------------------------------------------------------------

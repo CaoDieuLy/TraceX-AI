@@ -174,6 +174,12 @@ def build_trace(
         time_window_end=window_end,
     )
 
+    # Cap evidence-video storage per user — keep only the 4 most recent so we
+    # don't accumulate unbounded rendered clips on disk. Older evidence rows
+    # are deleted (cascade also removes their evidence_tracklets); the source
+    # query_history rows are kept so history list is unaffected.
+    service.prune_user_evidence_keep_recent(query.user_id, keep=4)
+
     session.commit()
 
     # Kick off background render for every pending clip. The worker dedupes
@@ -569,6 +575,9 @@ def continue_trace(
         time_window_start=window_start,
         time_window_end=window_end,
     )
+
+    # Same per-user retention cap as /trace/build.
+    service.prune_user_evidence_keep_recent(query.user_id, keep=4)
 
     session.commit()
 
