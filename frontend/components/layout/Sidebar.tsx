@@ -97,7 +97,7 @@ export function Sidebar() {
 
   const isHome = pathname === "/home";
   const isNew = isHome && view !== "history";
-  const isHistory = isHome && view === "history";
+  const isHistory = pathname === "/history";
   const isDetail = pathname.startsWith("/detail/");
   const isUsers = pathname === "/admin/users";
   const isGuide = pathname === "/guide";
@@ -170,7 +170,7 @@ export function Sidebar() {
                   <path d="M5 12h14M12 5v14" />
                 </svg>
               </NavItem>
-              <NavItem href="/home?view=history" label="Lịch sử" active={isHistory} collapsed={collapsed}>
+              <NavItem href="/history" label="Lịch sử" active={isHistory} collapsed={collapsed}>
                 <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
                   <path d="M4 12a8 8 0 1 0 2.34-5.66" />
                   <path d="M4 4v6h6" />
@@ -243,7 +243,7 @@ export function Sidebar() {
                 <path d="M5 12h14M12 5v14" />
               </svg>
             </NavItem>
-            <NavItem href="/home?view=history" label="Lịch sử" active={isHistory} collapsed>
+            <NavItem href="/history" label="Lịch sử" active={isHistory} collapsed>
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
                 <path d="M4 12a8 8 0 1 0 2.34-5.66" />
                 <path d="M4 4v6h6" />

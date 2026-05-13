@@ -36,15 +36,21 @@ export function MainShell({ children }: { children: ReactNode }) {
           }
         >
           <div className="mx-auto flex max-w-6xl flex-col gap-4">
-            <div className="rounded-2xl border border-slate-200/85 bg-white/65 p-3 shadow-[0_12px_30px_rgba(15,23,42,0.07)] backdrop-blur-md dark:border-slate-800/85 dark:bg-slate-900/70 dark:shadow-[0_18px_40px_rgba(2,6,23,0.38)]">
-              <div className="flex flex-wrap items-start gap-4">
-                {isHomePage ? <SearchBar className="min-w-[min(100%,280px)] flex-1" /> : null}
-                <div className="ml-auto flex shrink-0 items-start gap-3 pt-1">
-                  {showSearchControls ? <TopKSelect /> : null}
-                  <AccountMenu />
+            {isHomePage ? (
+              <div className="rounded-2xl border border-slate-200/85 bg-white/65 p-3 shadow-[0_12px_30px_rgba(15,23,42,0.07)] backdrop-blur-md dark:border-slate-800/85 dark:bg-slate-900/70 dark:shadow-[0_18px_40px_rgba(2,6,23,0.38)]">
+                <div className="flex flex-wrap items-start gap-4">
+                  <SearchBar className="min-w-[min(100%,280px)] flex-1" />
+                  <div className="ml-auto flex shrink-0 items-start gap-3 pt-1">
+                    {showSearchControls ? <TopKSelect /> : null}
+                    <AccountMenu />
+                  </div>
                 </div>
               </div>
-            </div>
+            ) : (
+              <div className="flex justify-end">
+                <AccountMenu />
+              </div>
+            )}
           </div>
         </header>
         <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-6 py-8">{children}</main>
