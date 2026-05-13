@@ -280,6 +280,12 @@ def _upsert_video(
     from shared.models import Video
     existing = session.scalar(select(Video).where(Video.video_id == video_id))
     if existing is not None:
+        if recorded_at is not None and existing.recorded_at is None:
+            existing.recorded_at = recorded_at
+        if source_filename and not existing.source_filename:
+            existing.source_filename = source_filename
+        if drive_file_id and not existing.drive_file_id:
+            existing.drive_file_id = drive_file_id
         return
 
     session.add(Video(
@@ -290,6 +296,7 @@ def _upsert_video(
         storage_backend="google_drive",
         drive_file_id=drive_file_id,
         source_filename=source_filename,
+        recorded_at=recorded_at,
         processed=False,
     ))
     session.flush()

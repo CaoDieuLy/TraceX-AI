@@ -49,6 +49,7 @@ from shared.models import (
     QueryCandidate, QueryCandidateTracklet, QueryHistory,
     Tracklet, TrackletAction, Video,
 )
+from shared.tracklet_time import tracklet_time_seconds, tracklet_time_window
 from app.services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
 from app.services.query_metadata_parse import (
     parse_query_metadata,
@@ -58,7 +59,7 @@ from app.services.query_metadata_parse import (
     METADATA_BONUS_PER_MATCH,
     METADATA_MAX_BONUS,
 )
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import contains_eager, joinedload
 import re
 
@@ -237,6 +238,25 @@ def _build_search_text(row: Tracklet) -> str:
     ]).lower()
 
 
+def _tracklet_overlaps_time_range(
+    tracklet: Tracklet,
+    time_from: datetime | None,
+    time_to: datetime | None,
+) -> bool:
+    """Return True when the tracklet's real video time overlaps the query range."""
+    if time_from is None and time_to is None:
+        return True
+    window = tracklet_time_window(tracklet)
+    if window is None:
+        return False
+    start_dt, end_dt = window
+    if time_from is not None and end_dt < time_from:
+        return False
+    if time_to is not None and start_dt > time_to:
+        return False
+    return True
+
+
 def _score_search_text(search_text: str, cleaned_query: str, query_tokens: set[str]) -> float:
     score = 0.0
     if cleaned_query in search_text:
@@ -303,8 +323,9 @@ def _local_prefilter(
     """
     cleaned_query = (query_text or "").strip().lower()
 
-    # Join Video so we can filter by absolute recording timestamp.
-    # Absolute tracklet time = video.recorded_at + start/end_time (seconds).
+    # Join Video so Python-side time filtering/grouping can use the real
+    # recording timestamp: video.recorded_at or timestamp parsed from filename
+    # + tracklet start/end offsets.
     statement = (
         select(Tracklet)
         .join(Video, Tracklet.video_id == Video.video_id)
@@ -322,21 +343,6 @@ def _local_prefilter(
 
     tf = _parse_dt(time_from)
     tt = _parse_dt(time_to)
-    if tf:
-        # Tracklet still active at time_from:
-        # video.recorded_at + end_time seconds >= time_from
-        statement = statement.where(
-            text("videos.recorded_at + (tracklets.end_time * interval '1 second') >= :tf")
-            .bindparams(tf=tf)
-        )
-    if tt:
-        # Tracklet started before time_to:
-        # video.recorded_at + start_time seconds <= time_to
-        statement = statement.where(
-            text("videos.recorded_at + (tracklets.start_time * interval '1 second') <= :tt")
-            .bindparams(tt=tt)
-        )
-
     # Gender hard-filter — only when the query explicitly mentions one gender.
     # Tracklets with low gender_conf (uncertain VLM output) are kept to avoid
     # silently dropping valid matches.
@@ -352,7 +358,16 @@ def _local_prefilter(
         )
 
     if not cleaned_query:
-        rows = session.scalars(statement.limit(limit)).all()
+        rows: list[Tracklet] = []
+        stream = session.execute(
+            statement.execution_options(stream_results=True, yield_per=256)
+        ).scalars()
+        for row in stream:
+            if not _tracklet_overlaps_time_range(row, tf, tt):
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
         return rows, {row.tracklet_id: 0.0 for row in rows}
 
     query_tokens = {token for token in cleaned_query.split() if token}
@@ -367,6 +382,8 @@ def _local_prefilter(
 
     top_matches: list[tuple[float, int, Tracklet]] = []
     for row in stream:
+        if not _tracklet_overlaps_time_range(row, tf, tt):
+            continue
         search_text = _build_search_text(row)
         score = _score_search_text(search_text, cleaned_query, query_tokens)
         if score <= 0:
@@ -605,13 +622,9 @@ def _tracklet_embedding(t: Tracklet) -> list[float]:
         return []
 
 
-def _tracklet_abs_window(t: Tracklet) -> tuple[float, float]:
-    """Absolute (start_ts, end_ts) in Unix seconds. Uses video.recorded_at loaded via contains_eager."""
-    try:
-        base = t.video.recorded_at.timestamp() if (t.video and t.video.recorded_at) else 0.0
-    except Exception:
-        base = 0.0
-    return base + float(t.start_time or 0.0), base + float(t.end_time or 0.0)
+def _tracklet_abs_window(t: Tracklet) -> tuple[float, float] | None:
+    """Absolute (start_ts, end_ts) in Unix seconds from video recording time."""
+    return tracklet_time_seconds(t)
 
 
 def _can_merge(t1: Tracklet, t2: Tracklet) -> bool:
@@ -619,8 +632,12 @@ def _can_merge(t1: Tracklet, t2: Tracklet) -> bool:
     # Check metadata first — cheapest way to reject obviously different people
     if not _metadata_matches(t1, t2):
         return False
-    s1, e1 = _tracklet_abs_window(t1)
-    s2, e2 = _tracklet_abs_window(t2)
+    w1 = _tracklet_abs_window(t1)
+    w2 = _tracklet_abs_window(t2)
+    if w1 is None or w2 is None:
+        return False
+    s1, e1 = w1
+    s2, e2 = w2
     # Time gap between end of one and start of the other
     gap = max(s1 - e2, s2 - e1, 0.0)
     if gap > _MERGE_MAX_GAP_S:
@@ -729,6 +746,67 @@ def _merge_by_similarity(ranked_tracklets: list[Tracklet]) -> list[list[Tracklet
         [ranked_tracklets[i] for i in sorted(idxs)]
         for idxs in sorted(root_to_idxs.values(), key=min)
     ]
+
+
+def _split_group_by_24h_windows(
+    group: list[Tracklet],
+    rank_index: dict[str, int],
+) -> list[list[Tracklet]]:
+    """Split an identity group into candidate windows anchored at first tracklet.
+
+    A candidate covers 24 hours starting at its earliest real tracklet time. If
+    another same-identity tracklet starts after that 24h window, it becomes the
+    first tracklet of a new candidate.
+    """
+    timed: list[tuple[float, Tracklet]] = []
+    unknown: list[Tracklet] = []
+    for tracklet in group:
+        window = _tracklet_abs_window(tracklet)
+        if window is None:
+            unknown.append(tracklet)
+            continue
+        timed.append((window[0], tracklet))
+
+    timed.sort(key=lambda item: (item[0], rank_index.get(item[1].tracklet_id, 10**9)))
+
+    windows: list[list[Tracklet]] = []
+    current: list[Tracklet] = []
+    current_start: float | None = None
+
+    def flush_current() -> None:
+        if not current:
+            return
+        current.sort(key=lambda t: rank_index.get(t.tracklet_id, 10**9))
+        windows.append(list(current))
+
+    for start_ts, tracklet in timed:
+        if current_start is None or start_ts > current_start + _MERGE_MAX_GAP_S:
+            flush_current()
+            current = [tracklet]
+            current_start = start_ts
+            continue
+        current.append(tracklet)
+
+    flush_current()
+    for tracklet in unknown:
+        windows.append([tracklet])
+
+    windows.sort(key=lambda items: min(rank_index.get(t.tracklet_id, 10**9) for t in items))
+    return windows
+
+
+def _split_groups_by_24h_windows(
+    groups: list[list[Tracklet]],
+    ranked_tracklets: list[Tracklet],
+) -> list[list[Tracklet]]:
+    rank_index = {
+        tracklet.tracklet_id: idx
+        for idx, tracklet in enumerate(ranked_tracklets)
+    }
+    split: list[list[Tracklet]] = []
+    for group in groups:
+        split.extend(_split_group_by_24h_windows(group, rank_index))
+    return split
 
 
 @router.post("")
@@ -909,11 +987,13 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
 
         # Stage C — Identity merge (union-find on tracklet-tracklet SigLIP sim).
         merge_t0 = time.perf_counter()
-        groups = _merge_by_similarity(shortlist)
+        identity_groups = _merge_by_similarity(shortlist)
+        groups = _split_groups_by_24h_windows(identity_groups, shortlist)
         merged_groups = [g for g in groups if len(g) > 1]
         logger.info(
-            "[query:%s] merge groups=%d merged_groups=%d singletons=%d max_group_size=%d elapsed=%.3fs",
+            "[query:%s] merge identity_groups=%d candidate_windows=%d merged_windows=%d singletons=%d max_group_size=%d elapsed=%.3fs",
             qid,
+            len(identity_groups),
             len(groups),
             len(merged_groups),
             len(groups) - len(merged_groups),

@@ -1,6 +1,6 @@
 """Trace API router - select candidate, build trace, feedback."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -41,6 +41,7 @@ from ...core.schemas import (
 )
 from ...database import get_session
 from ...services.trace_service import TraceService
+from backend.services.shared.tracklet_time import tracklet_time_window
 
 router = APIRouter()
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -139,16 +140,24 @@ def build_trace(
     # Delete old evidence for this candidate (cache overwrite behavior)
     service.delete_old_evidence(request.candidate_id)
 
-    # Get tracklets for this candidate within time window
-    window_start = query.created_at - timedelta(hours=request.time_window_hours)
-    window_end = query.created_at + timedelta(hours=request.time_window_hours)
+    # QueryCandidateTracklet already defines the candidate membership. The
+    # 24h trace window is anchored at the first real tracklet time, not at the
+    # time the user submitted the query.
+    tracklets = service.get_candidate_tracklets(candidate_id=request.candidate_id)
 
-    tracklets = service.get_candidate_tracklets(
-        candidate_id=request.candidate_id,
+    if not tracklets:
+        raise HTTPException(status_code=404, detail="No tracklets found for candidate")
+
+    window_start, window_end = service.candidate_time_window(
+        tracklets,
+        hours=request.time_window_hours,
+        fallback_start=query.created_at,
+    )
+    tracklets = service.filter_tracklets_by_time_window(
+        tracklets,
         time_window_start=window_start,
         time_window_end=window_end,
     )
-
     if not tracklets:
         raise HTTPException(status_code=404, detail="No tracklets found for candidate in time window")
 
@@ -384,21 +393,20 @@ def _embedding_info(t: Tracklet) -> CandidateTrackletEmbeddingInfo:
 def _tracklet_to_preview(t: Tracklet) -> CandidateTrackletPreview:
     """Flatten a Tracklet row + its embedding/actions into the wire schema.
 
-    `time_start` / `time_end` are wall-clock anchored to the recording's
-    `recorded_at` (falling back to `created_at`) plus the tracklet's offset
-    within that video. This is what the popup uses to sort across tracklets
-    that came from different videos.
+    `time_start` / `time_end` are wall-clock anchored to the recording time
+    from `recorded_at` or the camera filename plus the tracklet's offset within
+    that video. This is what the popup uses to sort across tracklets that came
+    from different videos.
     """
-    base_dt = None
     video_id = None
+    window = tracklet_time_window(t)
     if t.video is not None:
-        base_dt = t.video.recorded_at or t.video.created_at
         video_id = t.video.video_id
     start_offset = float(t.start_time) if t.start_time is not None else None
     end_offset = float(t.end_time) if t.end_time is not None else None
 
-    time_start = base_dt + timedelta(seconds=start_offset) if base_dt and start_offset is not None else None
-    time_end = base_dt + timedelta(seconds=end_offset) if base_dt and end_offset is not None else None
+    time_start = window[0] if window else None
+    time_end = window[1] if window else None
     duration = (end_offset - start_offset) if (start_offset is not None and end_offset is not None) else None
 
     actions = [
@@ -472,10 +480,10 @@ def get_candidate_detail(
 ) -> CandidateDetailResponse:
     """Full detail of a candidate + every tracklet that belongs to it.
 
-    Returns tracklets ordered by wall-clock time (`video.recorded_at +
-    tracklet.start_time`) so the UI can scroll through them chronologically.
-    Each tracklet carries its full appearance/demographic record, top
-    VideoMAE actions, and embedding metadata.
+    Returns the persisted QueryCandidateTracklet members ordered by real
+    wall-clock time (video recording time from DB/filename + tracklet offset).
+    Each tracklet carries its full appearance/demographic record, top VideoMAE
+    actions, and embedding metadata.
     """
     service = _build_trace_service(session)
 
@@ -489,14 +497,7 @@ def get_candidate_detail(
     if candidate.query_id != str(request.query_id):
         raise HTTPException(status_code=400, detail="Candidate does not belong to this query")
 
-    window_start = query.created_at - timedelta(hours=24)
-    window_end = query.created_at + timedelta(hours=24)
-
-    tracklets = service.get_candidate_tracklets(
-        candidate_id=request.candidate_id,
-        time_window_start=window_start,
-        time_window_end=window_end,
-    )
+    tracklets = service.get_candidate_tracklets(candidate_id=request.candidate_id)
 
     previews = [_tracklet_to_preview(t) for t in tracklets]
     # Order by wall-clock start (None last). Tie-break by tracklet_id for stability.
@@ -556,12 +557,17 @@ def continue_trace(
     # Delete old evidence
     service.delete_old_evidence(request.candidate_id)
 
-    # Build new trace with new window
-    window_start = query.created_at - timedelta(hours=request.new_time_window_hours)
-    window_end = query.created_at + timedelta(hours=request.new_time_window_hours)
-
-    tracklets = service.get_candidate_tracklets(
-        candidate_id=request.candidate_id,
+    # Build new trace with a window anchored at the first real tracklet time.
+    base_tracklets = service.get_candidate_tracklets(candidate_id=request.candidate_id)
+    if not base_tracklets:
+        raise HTTPException(status_code=404, detail="No tracklets found for candidate")
+    window_start, window_end = service.candidate_time_window(
+        base_tracklets,
+        hours=request.new_time_window_hours,
+        fallback_start=query.created_at,
+    )
+    tracklets = service.filter_tracklets_by_time_window(
+        base_tracklets,
         time_window_start=window_start,
         time_window_end=window_end,
     )

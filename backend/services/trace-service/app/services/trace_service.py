@@ -47,6 +47,7 @@ from ..core.models import (
     QueryCandidateTracklet,
     Tracklet,
 )
+from backend.services.shared.tracklet_time import tracklet_time_window
 
 
 class TraceService:
@@ -65,10 +66,10 @@ class TraceService:
     def get_candidate_tracklets(
         self,
         candidate_id: UUID | str,
-        time_window_start: datetime,
-        time_window_end: datetime,
+        time_window_start: datetime | None = None,
+        time_window_end: datetime | None = None,
     ) -> list[Tracklet]:
-        """Get all tracklets for a candidate within time window.
+        """Get all tracklets for a candidate, optionally constrained by real time.
 
         Strategy:
         1. Try query_candidate_tracklets join table (populated by advanced re-ID flows).
@@ -141,22 +142,72 @@ class TraceService:
                 before, len(tracklets), _gender, _top, _bottom,
             )
 
-        # ── Time-window filter ─────────────────────────────────────────────
-        # Use recorded_at (actual recording time from filename) when available,
-        # fall back to created_at (ingest time).
-        filtered: list[Tracklet] = []
-        for t in tracklets:
-            video = t.video
-            if video:
-                base_ts = (video.recorded_at or video.created_at).timestamp()
-                t_start = base_ts + (t.start_time or 0)
-                t_end = base_ts + (t.end_time or 0)
-                if t_start <= time_window_end.timestamp() and t_end >= time_window_start.timestamp():
-                    filtered.append(t)
-            else:
-                filtered.append(t)  # no video metadata: include anyway
+        return self._sort_tracklets_by_time(
+            self._filter_tracklets_by_time_window(
+                tracklets,
+                time_window_start=time_window_start,
+                time_window_end=time_window_end,
+            )
+        )
 
+    def _filter_tracklets_by_time_window(
+        self,
+        tracklets: list[Tracklet],
+        *,
+        time_window_start: datetime | None = None,
+        time_window_end: datetime | None = None,
+    ) -> list[Tracklet]:
+        if time_window_start is None and time_window_end is None:
+            return list(tracklets)
+
+        filtered: list[Tracklet] = []
+        for tracklet in tracklets:
+            window = tracklet_time_window(tracklet)
+            if window is None:
+                continue
+            start_dt, end_dt = window
+            if time_window_start is not None and end_dt < time_window_start:
+                continue
+            if time_window_end is not None and start_dt > time_window_end:
+                continue
+            filtered.append(tracklet)
         return filtered
+
+    def filter_tracklets_by_time_window(
+        self,
+        tracklets: list[Tracklet],
+        *,
+        time_window_start: datetime | None = None,
+        time_window_end: datetime | None = None,
+    ) -> list[Tracklet]:
+        return self._filter_tracklets_by_time_window(
+            tracklets,
+            time_window_start=time_window_start,
+            time_window_end=time_window_end,
+        )
+
+    def _sort_tracklets_by_time(self, tracklets: list[Tracklet]) -> list[Tracklet]:
+        def key(tracklet: Tracklet) -> tuple[datetime, str]:
+            window = tracklet_time_window(tracklet)
+            start_dt = window[0] if window else datetime.max.replace(tzinfo=timezone.utc)
+            return start_dt, tracklet.tracklet_id
+
+        return sorted(tracklets, key=key)
+
+    def candidate_time_window(
+        self,
+        tracklets: list[Tracklet],
+        *,
+        hours: float = 24.0,
+        fallback_start: datetime | None = None,
+    ) -> tuple[datetime, datetime]:
+        starts = [
+            window[0]
+            for tracklet in tracklets
+            if (window := tracklet_time_window(tracklet)) is not None
+        ]
+        start = min(starts) if starts else (fallback_start or datetime.now(timezone.utc))
+        return start, start + timedelta(hours=hours)
 
     def build_trace_segments(
         self,
@@ -193,10 +244,9 @@ class TraceService:
 
             time_start = None
             time_end = None
-            if video:
-                base_dt = video.recorded_at or video.created_at
-                time_start = base_dt + timedelta(seconds=tracklet.start_time or 0)
-                time_end   = base_dt + timedelta(seconds=tracklet.end_time   or 0)
+            window = tracklet_time_window(tracklet)
+            if window:
+                time_start, time_end = window
 
             # Try to render an evidence clip with moving bbox. Falls back to the
             # legacy synthetic URL when (a) we lack query/candidate context, or
