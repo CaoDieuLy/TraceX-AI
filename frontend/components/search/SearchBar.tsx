@@ -27,6 +27,7 @@ export function SearchBar({ className = "" }: SearchBarProps) {
   const [locationOpen, setLocationOpen] = useState(false);
   const [locationKeyword, setLocationKeyword] = useState("");
   const [imageError, setImageError] = useState<string | null>(null);
+  const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
   const locationRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -61,6 +62,13 @@ export function SearchBar({ className = "" }: SearchBarProps) {
     if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
     setImageError(null);
     setImage({ name: file.name, size: file.size, type: file.type, previewUrl: URL.createObjectURL(file) });
+  }
+
+  function handleRemoveImage() {
+    if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
+    setImage(null);
+    setImageError(null);
+    if (imageInputRef.current) imageInputRef.current.value = "";
   }
 
   const filteredLocations = useMemo(() => {
@@ -117,21 +125,11 @@ export function SearchBar({ className = "" }: SearchBarProps) {
           title="Tải ảnh mẫu (tối đa 5MB)"
           className="min-h-[52px] shrink-0 cursor-pointer rounded-2xl border border-slate-200/90 bg-white/85 px-4 text-sm font-medium text-slate-700 shadow-[0_12px_30px_rgba(15,23,42,0.08)] transition duration-200 hover:border-sky-300 hover:text-slate-900 dark:border-slate-700/90 dark:bg-slate-900/85 dark:text-slate-200 dark:shadow-[0_16px_34px_rgba(2,6,23,0.35)] dark:hover:border-sky-500 dark:hover:text-white"
         >
-          {image ? (
-            <span className="flex items-center gap-1.5">
-              <svg viewBox="0 0 24 24" className="h-4 w-4 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M20 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2Z" />
-                <circle cx="12" cy="13" r="3" />
-              </svg>
-              {image.name.length > 14 ? image.name.slice(0, 12) + "…" : image.name}
-            </span>
-          ) : (
-            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <path d="M3 15l6-6 4 4 2-2 6 6" />
-              <circle cx="8.5" cy="8.5" r="1.5" />
-            </svg>
-          )}
+          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M3 15l6-6 4 4 2-2 6 6" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+          </svg>
         </button>
         <button
           type="submit"
@@ -212,8 +210,68 @@ export function SearchBar({ className = "" }: SearchBarProps) {
           Xóa lọc
         </button>
       </div>
+      {image ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="group relative inline-flex items-center gap-2 rounded-2xl border border-slate-200/90 bg-white/85 p-1.5 pr-3 shadow-[0_8px_20px_rgba(15,23,42,0.06)] dark:border-slate-700/90 dark:bg-slate-900/85 dark:shadow-[0_12px_26px_rgba(2,6,23,0.32)]">
+            <button
+              type="button"
+              onClick={() => setImagePreviewOpen(true)}
+              title="Xem ảnh phóng to"
+              className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-800"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={image.previewUrl} alt={image.name} className="h-full w-full object-cover" />
+            </button>
+            <div className="flex min-w-0 flex-col">
+              <span className="max-w-[180px] truncate text-sm font-medium text-slate-800 dark:text-slate-100">{image.name}</span>
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">{(image.size / 1024).toFixed(0)} KB</span>
+            </div>
+            <button
+              type="button"
+              onClick={handleRemoveImage}
+              title="Xóa ảnh"
+              className="ml-1 flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-red-300 hover:bg-red-50 hover:text-red-600 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-400 dark:hover:border-red-500/60 dark:hover:bg-red-950/40 dark:hover:text-red-300"
+            >
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M6 6l12 12" />
+                <path d="M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      ) : null}
       {filterError ? <p className="text-xs font-medium text-red-600 dark:text-red-400">{filterError}</p> : null}
       {imageError ? <p className="text-xs font-medium text-red-600 dark:text-red-400">{imageError}</p> : null}
+
+      {imagePreviewOpen && image ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm"
+          onClick={() => setImagePreviewOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="relative max-h-full max-w-4xl" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => setImagePreviewOpen(false)}
+              className="absolute -right-3 -top-3 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full bg-white text-slate-700 shadow-lg transition hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              title="Đóng"
+            >
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M6 6l12 12" />
+                <path d="M18 6L6 18" />
+              </svg>
+            </button>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={image.previewUrl}
+              alt={image.name}
+              className="max-h-[85vh] max-w-full rounded-2xl object-contain shadow-2xl"
+            />
+            <p className="mt-3 text-center text-sm text-white/90">{image.name}</p>
+          </div>
+        </div>
+      ) : null}
     </form>
   );
 }
