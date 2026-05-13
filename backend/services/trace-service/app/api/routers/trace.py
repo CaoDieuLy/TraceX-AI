@@ -180,6 +180,12 @@ def build_trace(
     # query_history rows are kept so history list is unaffected.
     service.prune_user_evidence_keep_recent(query.user_id, keep=4)
 
+    # Mark the query as completed so /history can show a "Đã truy vết" badge
+    # even before the background render finishes — the evidence row already
+    # exists at this point.
+    query.status = "completed"
+    query.updated_at = datetime.now(timezone.utc)
+
     session.commit()
 
     # Kick off background render for every pending clip. The worker dedupes
