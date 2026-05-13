@@ -8,6 +8,8 @@ export {
   getIngestStats,
   triggerFullPipeline,
   getSearchHistory,
+  getHistoryCandidates,
+  getHistoryEvidence,
   selectHistoryVideo,
   getAdminUserQueries,
   getCandidateDetail,
@@ -16,4 +18,11 @@ export {
   getTraceTimeline,
 } from "./client";
 export { parseJsonOrThrow, readApiErrorMessage, mapBackendErrorMessage } from "./errors";
-export type { SearchFilters, IngestResponse, IngestStatsResponse, SearchHistoryItem } from "./client";
+export type {
+  SearchFilters,
+  IngestResponse,
+  IngestStatsResponse,
+  SearchHistoryItem,
+  HistoryCandidatesResult,
+  HistoryEvidenceMeta,
+} from "./client";
