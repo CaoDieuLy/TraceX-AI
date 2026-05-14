@@ -50,6 +50,7 @@ from shared.models import (
     Tracklet, TrackletAction, Video,
 )
 from shared.tracklet_time import tracklet_time_seconds, tracklet_time_window
+from app.config import settings
 from app.services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
 from app.services.query_metadata_parse import (
     parse_query_metadata,
@@ -1231,8 +1232,9 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         # page to the active search UI. The history page has its own pagination,
         # so users can come back later and browse every candidate found for the
         # query without forcing the search page to render them all at once.
-        paged = merged[offset:offset + top_k]
-        for rank_idx, item in enumerate(merged, start=1):
+        ranked_candidates = merged[: settings.max_candidates]
+        paged = ranked_candidates[offset:offset + top_k]
+        for rank_idx, item in enumerate(ranked_candidates, start=1):
             rep = item["rep"]
             candidate_id = item["candidate_id"]
             candidate_key = _candidate_key_for_group(item["group"])
@@ -1285,7 +1287,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 ))
 
         qh.status = "candidates_found"
-        qh.result_count = len(merged)
+        qh.result_count = len(ranked_candidates)
         db.commit()
         # INFO-level: one compact line per ranked candidate so health/QA can
         # spot-check ranking without parsing the per-member DEBUG payload.

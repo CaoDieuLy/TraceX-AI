@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -14,6 +16,16 @@ from shared.models import (
 )
 
 router = APIRouter(tags=["history"])
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+_HISTORY_CANDIDATE_LIMIT = _positive_env_int("MAX_CANDIDATES", 50)
 
 
 @router.get("")
@@ -36,7 +48,10 @@ def get_history(
             qid: int(count)
             for qid, count in session.execute(
                 select(QueryCandidate.query_id, func.count(QueryCandidate.id))
-                .where(QueryCandidate.query_id.in_(query_ids))
+                .where(
+                    QueryCandidate.query_id.in_(query_ids),
+                    QueryCandidate.rank_position <= _HISTORY_CANDIDATE_LIMIT,
+                )
                 .group_by(QueryCandidate.query_id)
             ).all()
         }
@@ -100,13 +115,19 @@ def get_history_candidates(
     total_count = session.scalar(
         select(func.count())
         .select_from(QueryCandidate)
-        .where(QueryCandidate.query_id == query_id)
+        .where(
+            QueryCandidate.query_id == query_id,
+            QueryCandidate.rank_position <= _HISTORY_CANDIDATE_LIMIT,
+        )
     ) or 0
 
     candidates = session.scalars(
         select(QueryCandidate)
-        .where(QueryCandidate.query_id == query_id)
-        .order_by(QueryCandidate.rank_position.asc())
+        .where(
+            QueryCandidate.query_id == query_id,
+            QueryCandidate.rank_position <= _HISTORY_CANDIDATE_LIMIT,
+        )
+        .order_by(QueryCandidate.rank_position.asc(), QueryCandidate.id.asc())
         .offset(offset)
         .limit(limit)
     ).all()
