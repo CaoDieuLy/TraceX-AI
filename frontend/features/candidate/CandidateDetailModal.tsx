@@ -280,15 +280,17 @@ function TrackletRow({
                 <Badge>no embedding</Badge>
               )}
             </div>
-            <button
-              type="button"
-              onClick={onRemove}
-              disabled={isRemoving || !canRemove}
-              title={canRemove ? "Loại tracklet khỏi candidate" : "Candidate phải giữ lại ít nhất 1 tracklet"}
-              className="rounded-full border border-red-200 bg-red-50 px-3 py-1 text-[11px] font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isRemoving ? "Đang loại..." : canRemove ? "Loại khỏi candidate" : "Giữ lại tracklet cuối"}
-            </button>
+            {canRemove ? (
+              <button
+                type="button"
+                onClick={onRemove}
+                disabled={isRemoving}
+                title="Loại tracklet khỏi candidate"
+                className="rounded-full border border-red-200 bg-red-50 px-3 py-1 text-[11px] font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isRemoving ? "Đang loại..." : "Loại khỏi candidate"}
+              </button>
+            ) : null}
           </div>
         </header>
 
