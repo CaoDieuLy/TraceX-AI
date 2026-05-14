@@ -215,6 +215,11 @@ services:
       - MTMC_GT_ROOT=/workspace/datasets/MTMC_Tracking_2024/train
       - A20_ROOT=${A20_ROOT:-/workspace/a20-root}
       - TRACE_CACHE_ROOT=/workspace/storage/cache
+      # Trace clip rendering is CPU/IO bound and intentionally conservative so
+      # metadata embedding + query ranking can continue in parallel.
+      - TRACE_CLIP_PARALLEL_WORKERS=${TRACE_CLIP_PARALLEL_WORKERS:-2}
+      - TRACE_CLIP_FFMPEG_THREADS=${TRACE_CLIP_FFMPEG_THREADS:-2}
+      - TRACE_CLIP_VALIDATE_TIMEOUT_SECONDS=${TRACE_CLIP_VALIDATE_TIMEOUT_SECONDS:-0}
       - REALESRGAN_MODEL_PATH=/workspace/models/realesrgan
       - PROPAINTER_MODEL_PATH=/workspace/models/propaint
       - RIFE_MODEL_PATH=/workspace/models/rife

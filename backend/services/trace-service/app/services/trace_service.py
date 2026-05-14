@@ -63,8 +63,10 @@ def _trace_clip_url_ready(url: str | None) -> bool:
     if path is None:
         return False
     try:
-        return path.is_file() and path.stat().st_size > 0
-    except OSError:
+        from .clip_render import validate_playable_mp4
+        return validate_playable_mp4(path)
+    except Exception as exc:
+        logger.warning("[trace] clip readiness validation failed for %s: %s", path, exc)
         return False
 
 from ..config import settings

@@ -11,6 +11,7 @@ Static URL : /static/traces/{query_id}/{candidate_id}/{tracklet_id}.mp4
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -33,6 +34,8 @@ _H264_ENCODER = os.getenv("TRACE_CLIP_H264_ENCODER", "libx264")
 _H264_CRF = os.getenv("TRACE_CLIP_H264_CRF", "23")
 _H264_PRESET = os.getenv("TRACE_CLIP_H264_PRESET", "veryfast")
 _H264_BITRATE = os.getenv("TRACE_CLIP_H264_BITRATE", "6000k")
+_FFMPEG_THREADS = max(1, int(os.getenv("TRACE_CLIP_FFMPEG_THREADS", "2")))
+_VALIDATE_TIMEOUT_SECONDS = int(os.getenv("TRACE_CLIP_VALIDATE_TIMEOUT_SECONDS", "0"))
 
 
 def _slugify(value: str) -> str:
@@ -101,6 +104,109 @@ def resolve_ffmpeg() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def _finalize_tmp_mp4(tmp_path: Path, out_path: Path) -> bool:
+    if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+        logger.warning("[clip_render] output not produced: %s", tmp_path)
+        return False
+    if not validate_playable_mp4(tmp_path, write_marker=False):
+        logger.warning("[clip_render] output failed playable validation: %s", tmp_path)
+        tmp_path.unlink(missing_ok=True)
+        return False
+    tmp_path.replace(out_path)
+    _write_validation_marker(out_path)
+    return True
+
+
+def _validation_marker_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".ready.json")
+
+
+def _file_signature(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+def _validation_marker_matches(path: Path) -> bool:
+    marker_path = _validation_marker_path(path)
+    if not marker_path.exists():
+        return False
+    try:
+        marker = json.loads(marker_path.read_text())
+        return marker == _file_signature(path)
+    except Exception:
+        return False
+
+
+def _write_validation_marker(path: Path) -> None:
+    marker_path = _validation_marker_path(path)
+    try:
+        marker_path.write_text(json.dumps(_file_signature(path), sort_keys=True))
+    except OSError as exc:
+        logger.warning("[clip_render] cannot write validation marker for %s: %s", path, exc)
+
+
+def _validation_timeout(path: Path) -> int:
+    if _VALIDATE_TIMEOUT_SECONDS > 0:
+        return _VALIDATE_TIMEOUT_SECONDS
+    try:
+        size_mb = max(1.0, path.stat().st_size / (1024 * 1024))
+    except OSError:
+        size_mb = 1.0
+    return max(120, min(3600, int(size_mb * 3) + 60))
+
+
+def validate_playable_mp4(path: Path, *, write_marker: bool = True) -> bool:
+    """Return True only if ffmpeg can decode the MP4 video stream end-to-end."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    if _validation_marker_matches(path):
+        return True
+
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        logger.warning("[clip_render] ffmpeg unavailable; cannot validate %s", path)
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-v",
+                "error",
+                "-xerror",
+                "-i",
+                str(path),
+                "-map",
+                "0:v:0",
+                "-f",
+                "null",
+                "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_validation_timeout(path),
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[clip_render] playable validation timed out: %s", path)
+        return False
+    except Exception as exc:
+        logger.warning("[clip_render] playable validation failed to start for %s: %s", path, exc)
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            "[clip_render] playable validation failed for %s: %s",
+            path,
+            (result.stderr or "").strip(),
+        )
+        return False
+    if write_marker:
+        _write_validation_marker(path)
+    return True
+
+
 def _open_h264_writer(
     out_path: Path,
     *,
@@ -146,6 +252,8 @@ def _open_h264_writer(
     args.extend([
         "-pix_fmt",
         "yuv420p",
+        "-threads",
+        str(_FFMPEG_THREADS),
         "-movflags",
         "+faststart",
         "-f",
@@ -187,7 +295,7 @@ def render_tracklet_clip(
     # Cache hit — clip from a previous render of the same (query, candidate,
     # tracklet) tuple is reused as-is. Async/parallel callers rely on this so
     # repeated /trace/build calls (or polling refreshes) don't redo work.
-    if out_path.exists() and out_path.stat().st_size > 0:
+    if out_path.exists() and validate_playable_mp4(out_path):
         return rel_url
 
     src = Path(source_video_path)
@@ -198,6 +306,11 @@ def render_tracklet_clip(
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
     tmp_path.unlink(missing_ok=True)
+
+    duration_seconds = max(0.0, float(end_time or 0.0) - float(start_time or 0.0))
+    if duration_seconds <= 0.0:
+        logger.warning("[clip_render] empty duration for tracklet=%s", tracklet_id)
+        return None
 
     cap = cv2.VideoCapture(str(src))
     if not cap.isOpened():
@@ -272,8 +385,6 @@ def render_tracklet_clip(
     finally:
         cap.release()
 
-    if not tmp_path.exists() or tmp_path.stat().st_size == 0:
-        logger.warning("[clip_render] output not produced: %s", tmp_path)
+    if not _finalize_tmp_mp4(tmp_path, out_path):
         return None
-    tmp_path.replace(out_path)
     return rel_url

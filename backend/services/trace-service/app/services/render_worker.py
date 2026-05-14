@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
 from ..core.models import EvidenceTracklet, EvidenceVideo, Tracklet
@@ -30,10 +30,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Render N clips in parallel. ffmpeg+OpenCV are both I/O-bound on disk reads
-# of the source HEVC and CPU-bound on the libx264 encode; 4 workers fits an
-# A100 host comfortably without thrashing the page cache.
-_MAX_RENDER_WORKERS = int(os.getenv("TRACE_CLIP_PARALLEL_WORKERS", "4"))
+# Render trace clips in a separate worker pool from metadata/query pipelines.
+# Keep the default conservative so long trace renders do not starve ingest,
+# embedding, or query ranking on shared CPU/disk.
+_MAX_RENDER_WORKERS = int(os.getenv("TRACE_CLIP_PARALLEL_WORKERS", "2"))
 
 # In-flight evidence IDs, so a slow first-render doesn't get re-enqueued by a
 # second client polling /trace/status. Concurrent renders for the same clip
@@ -175,6 +175,7 @@ def _render_evidence_clips_impl(evidence_id: int) -> None:
                 "start_time": float(tracklet.start_time or 0.0),
                 "end_time": float(tracklet.end_time or 0.0),
             })
+        jobs.sort(key=lambda job: max(0.0, job["end_time"] - job["start_time"]))
 
         logger.info(
             "[render_worker] evidence %s: rendering %d clips with %d workers",
@@ -194,7 +195,7 @@ def _render_evidence_clips_impl(evidence_id: int) -> None:
                 )
                 for job in jobs
             ]
-            for fut in futures:
+            for fut in as_completed(futures):
                 evidence_tracklet_id, clip_url = fut.result()
                 if not clip_url:
                     continue

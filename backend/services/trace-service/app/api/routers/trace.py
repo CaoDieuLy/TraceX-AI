@@ -241,10 +241,10 @@ def get_trace_status(
 ) -> TraceStatusResponse:
     """Get trace status by evidence ID.
 
-    Computes progress live from `evidence_tracklets.video_clip_url` and the
-    actual `/static/traces/...` file on disk. A non-empty URL is still pending
-    if its MP4 has not been produced yet. As a self-healing measure, pending
-    evidence is re-enqueued for rendering (the worker dedupes in-flight IDs).
+    Computes progress live from `evidence_tracklets.video_clip_url` and a full
+    ffmpeg decode validation of the `/static/traces/...` MP4. A non-empty URL is
+    still pending if the MP4 is missing, incomplete, or not playable. As a
+    self-healing measure, pending evidence is re-enqueued for rendering.
     """
     evidence = session.get(EvidenceVideo, evidence_id)
     if not evidence:
