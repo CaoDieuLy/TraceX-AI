@@ -82,6 +82,7 @@ def _get_env_float(name: str, default: float) -> float:
         logger.warning("Invalid %s=%r; using %.3f", name, raw, default)
         return default
 
+#test thử coolify
 
 DEFAULT_SAMPLE_INTERVAL = 15
 DEFAULT_MIN_BBOX_AREA = 400
