@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -60,6 +61,19 @@ def _get_candidate(session: Session, candidate_id: str) -> QueryCandidate | None
     return session.scalar(select(QueryCandidate).where(QueryCandidate.candidate_id == str(candidate_id)))
 
 
+def _build_candidate_id_list(
+    primary_candidate_id: str,
+    candidate_ids_raw: Any,
+) -> list[str]:
+    candidate_ids: list[str] = []
+    extra_ids = candidate_ids_raw if isinstance(candidate_ids_raw, list) else []
+    for raw_id in [primary_candidate_id, *extra_ids]:
+        candidate_id = str(raw_id).strip()
+        if candidate_id and candidate_id not in candidate_ids:
+            candidate_ids.append(candidate_id)
+    return candidate_ids
+
+
 @router.post("/select", response_model=SelectCandidateResponse)
 def select_candidate(
     request: SelectCandidateRequest,
@@ -109,11 +123,11 @@ def select_candidate(
 
 @router.post("/build", response_model=BuildTraceResponse)
 def build_trace(
-    request: BuildTraceRequest,
     session: SessionDep,
     background_tasks: BackgroundTasks,
+    body: dict[str, Any] = Body(...),
 ) -> BuildTraceResponse:
-    """Build a trace from the selected candidate.
+    """Build a trace from one or more selected candidates.
 
     Returns immediately with `video_clip_url=None` on each segment. Clip
     rendering runs in a background task; the frontend polls /trace/status
@@ -121,6 +135,10 @@ def build_trace(
     required because rendering 40+-tracklet candidates took minutes and was
     exceeding the upstream proxy's response timeout.
     """
+    try:
+        request = BuildTraceRequest(**body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     service = _build_trace_service(session)
 
     # Verify query exists
@@ -128,23 +146,46 @@ def build_trace(
     if not query:
         raise HTTPException(status_code=404, detail="Query not found")
 
-    # Verify candidate exists and is selected
-    candidate = _get_candidate(session, request.candidate_id)
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    if not candidate.is_selected:
-        raise HTTPException(status_code=400, detail="Candidate is not selected. Please select it first.")
-    if candidate.query_id != str(request.query_id):
-        raise HTTPException(status_code=400, detail="Candidate does not belong to this query")
+    candidate_ids = _build_candidate_id_list(request.candidate_id, body.get("candidate_ids"))
+    if not candidate_ids:
+        raise HTTPException(status_code=400, detail="No candidates selected")
+
+    candidates: list[QueryCandidate] = []
+    for candidate_id in candidate_ids:
+        candidate = _get_candidate(session, candidate_id)
+        if not candidate:
+            raise HTTPException(status_code=404, detail=f"Candidate not found: {candidate_id}")
+        if candidate.query_id != str(request.query_id):
+            raise HTTPException(status_code=400, detail="Candidate does not belong to this query")
+        candidates.append(candidate)
+
+    primary_candidate_id = candidate_ids[0]
+    candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
 
     # Keep one trace result per query. Tracing another candidate replaces the
     # previous evidence for the same query.
     service.delete_query_evidence(request.query_id)
 
-    # QueryCandidateTracklet already defines the candidate membership. The
-    # 24h trace window is anchored at the first real tracklet time, not at the
-    # time the user submitted the query.
-    tracklets = service.get_candidate_tracklets(candidate_id=request.candidate_id)
+    # QueryCandidateTracklet already defines candidate membership. For a
+    # multi-candidate trace, union those memberships, drop explicit exclusions,
+    # then sort by real wall-clock time before applying the normal trace window.
+    excluded_raw = body.get("excluded_tracklet_ids")
+    excluded_tracklet_ids = {
+        str(tid)
+        for tid in (excluded_raw if isinstance(excluded_raw, list) else [])
+    }
+    tracklet_by_id: dict[str, Tracklet] = {}
+    for candidate_id in candidate_ids:
+        candidate = candidate_by_id[candidate_id]
+        for tracklet in service.get_candidate_tracklets(
+            candidate_id=candidate_id,
+            allow_fallback=bool(candidate.preview_url),
+        ):
+            if tracklet.tracklet_id in excluded_tracklet_ids:
+                continue
+            tracklet_by_id.setdefault(tracklet.tracklet_id, tracklet)
+
+    tracklets = service.sort_tracklets_by_time(list(tracklet_by_id.values()))
 
     if not tracklets:
         raise HTTPException(status_code=404, detail="No tracklets found for candidate")
@@ -167,7 +208,7 @@ def build_trace(
     segments = service.build_trace_segments(
         tracklets,
         query_id=request.query_id,
-        candidate_id=request.candidate_id,
+        candidate_id=primary_candidate_id,
         render_clips=False,
     )
 
@@ -177,7 +218,7 @@ def build_trace(
     # Create evidence video record
     evidence = service.create_evidence_video(
         query_id=request.query_id,
-        candidate_id=request.candidate_id,
+        candidate_id=primary_candidate_id,
         segments=segments,
         trace_confidence=trace_confidence,
         time_window_start=window_start,
@@ -187,9 +228,14 @@ def build_trace(
     # Mark the query as completed so /history can show a "Đã truy vết" badge
     # even before the background render finishes — the evidence row already
     # exists at this point.
+    now = datetime.now(timezone.utc)
+    service.deselect_other_candidates(request.query_id)
+    for candidate in candidates:
+        candidate.is_selected = True
+        candidate.selected_at = now
     query.status = "completed"
-    query.selected_candidate_id = str(request.candidate_id)
-    query.updated_at = datetime.now(timezone.utc)
+    query.selected_candidate_id = primary_candidate_id
+    query.updated_at = now
 
     session.commit()
 
@@ -220,7 +266,7 @@ def build_trace(
     return BuildTraceResponse(
         success=True,
         query_id=request.query_id,
-        candidate_id=request.candidate_id,
+        candidate_id=primary_candidate_id,
         evidence_id=evidence.id,
         trace_duration_ms=int(total_duration * 1000) if total_duration else None,
         trace_confidence=trace_confidence,
@@ -508,7 +554,10 @@ def get_candidate_detail(
     if candidate.query_id != str(request.query_id):
         raise HTTPException(status_code=400, detail="Candidate does not belong to this query")
 
-    tracklets = service.get_candidate_tracklets(candidate_id=request.candidate_id)
+    tracklets = service.get_candidate_tracklets(
+        candidate_id=request.candidate_id,
+        allow_fallback=bool(candidate.preview_url),
+    )
 
     previews = [_tracklet_to_preview(t) for t in tracklets]
     # Order by wall-clock start (None last). Tie-break by tracklet_id for stability.
@@ -535,6 +584,72 @@ def get_candidate_detail(
         tracklets=previews,
         camera_path=camera_path,
     )
+
+
+@router.post("/candidate-tracklet/remove")
+def remove_candidate_tracklet(
+    session: SessionDep,
+    body: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """Remove one persisted tracklet membership from a candidate."""
+    query_id = str(body.get("query_id") or "").strip()
+    candidate_id = str(body.get("candidate_id") or "").strip()
+    tracklet_id = str(body.get("tracklet_id") or "").strip()
+    if not query_id or not candidate_id or not tracklet_id:
+        raise HTTPException(status_code=400, detail="query_id, candidate_id, and tracklet_id are required")
+
+    query = _get_query(session, query_id)
+    if not query:
+        raise HTTPException(status_code=404, detail="Query not found")
+
+    candidate = _get_candidate(session, candidate_id)
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    if candidate.query_id != query_id:
+        raise HTTPException(status_code=400, detail="Candidate does not belong to this query")
+
+    link = session.scalar(
+        select(QueryCandidateTracklet).where(
+            QueryCandidateTracklet.candidate_id == candidate_id,
+            QueryCandidateTracklet.tracklet_id == tracklet_id,
+        )
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Tracklet is not part of this candidate")
+
+    session.delete(link)
+    session.flush()
+
+    remaining_rows = (
+        session.query(QueryCandidateTracklet)
+        .filter(QueryCandidateTracklet.candidate_id == candidate_id)
+        .order_by(QueryCandidateTracklet.id.asc())
+        .all()
+    )
+    remaining_count = len(remaining_rows)
+
+    if remaining_rows:
+        first_tracklet_id = remaining_rows[0].tracklet_id
+        candidate.preview_url = f"/candidates/{first_tracklet_id}/preview"
+        first_tracklet = session.scalar(
+            select(Tracklet).where(Tracklet.tracklet_id == first_tracklet_id)
+        )
+        if first_tracklet and first_tracklet.appearance_summary:
+            candidate.appearance_summary = first_tracklet.appearance_summary
+    else:
+        candidate.preview_url = ""
+
+    query.updated_at = datetime.now(timezone.utc)
+    session.commit()
+
+    return {
+        "success": True,
+        "query_id": query_id,
+        "candidate_id": candidate_id,
+        "tracklet_id": tracklet_id,
+        "remaining_tracklet_count": remaining_count,
+        "message": "Tracklet removed from candidate",
+    }
 
 
 @router.post("/continue", response_model=ContinueTraceResponse)
@@ -571,7 +686,10 @@ def continue_trace(
     service.delete_query_evidence(request.query_id)
 
     # Build new trace with a window anchored at the first real tracklet time.
-    base_tracklets = service.get_candidate_tracklets(candidate_id=request.candidate_id)
+    base_tracklets = service.get_candidate_tracklets(
+        candidate_id=request.candidate_id,
+        allow_fallback=bool(candidate.preview_url),
+    )
     if not base_tracklets:
         raise HTTPException(status_code=404, detail="No tracklets found for candidate")
     window_start, window_end = service.candidate_time_window(

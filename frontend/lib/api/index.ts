@@ -13,6 +13,7 @@ export {
   selectHistoryVideo,
   getAdminUserQueries,
   getCandidateDetail,
+  removeCandidateTracklet,
   selectCandidate,
   buildTrace,
   getTraceTimeline,

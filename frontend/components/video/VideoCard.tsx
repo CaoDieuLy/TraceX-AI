@@ -7,6 +7,8 @@ import type { TrackletSummary, VideoItem } from "@/lib/types";
 type VideoCardProps = {
   video: VideoItem;
   onClick?: (video: VideoItem) => void;
+  onToggleSelect?: (video: VideoItem) => void;
+  isSelected?: boolean;
   rank?: number;
 };
 
@@ -81,9 +83,11 @@ function overallTimeRange(tracklets: TrackletSummary[]): string | null {
   return formatTimeRange(earliestIso, latestIso);
 }
 
-export function VideoCard({ video, onClick, rank }: VideoCardProps) {
+export function VideoCard({ video, onClick, onToggleSelect, isSelected = false, rank }: VideoCardProps) {
   const className =
-    "group flex flex-col overflow-hidden rounded-2xl border border-surface-muted bg-white text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-elevated";
+    `group relative flex flex-col overflow-hidden rounded-2xl border bg-white text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-elevated ${
+      isSelected ? "border-blue-500 ring-2 ring-blue-200" : "border-surface-muted"
+    }`;
 
   const displayRank = video.rank ?? rank;
   const label = displayRank !== undefined ? `Candidate ${displayRank}` : video.title;
@@ -142,11 +146,31 @@ export function VideoCard({ video, onClick, rank }: VideoCardProps) {
     </>
   );
 
-  if (onClick) {
+  if (onClick || onToggleSelect) {
     return (
-      <button type="button" className={className} onClick={() => onClick(video)}>
-        {body}
-      </button>
+      <article className={className}>
+        {onToggleSelect ? (
+          <button
+            type="button"
+            aria-pressed={isSelected}
+            onClick={() => onToggleSelect(video)}
+            className={`absolute right-2 top-2 z-10 rounded-full border px-3 py-1 text-xs font-bold shadow-sm transition ${
+              isSelected
+                ? "border-blue-600 bg-blue-600 text-white"
+                : "border-white/80 bg-white/95 text-slate-700 hover:border-blue-300 hover:text-blue-700"
+            }`}
+          >
+            {isSelected ? "Đã chọn" : "Chọn"}
+          </button>
+        ) : null}
+        {onClick ? (
+          <button type="button" className="flex flex-1 flex-col text-left" onClick={() => onClick(video)}>
+            {body}
+          </button>
+        ) : (
+          <div className="flex flex-1 flex-col">{body}</div>
+        )}
+      </article>
     );
   }
 

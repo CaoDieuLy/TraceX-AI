@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { useToast } from "@/components/ui/ToastProvider";
 import { VideoGrid } from "@/components/video/VideoGrid";
 import { CandidateDetailModal } from "@/features/candidate/CandidateDetailModal";
 import { useSearch } from "@/features/search/SearchContext";
-import { triggerIngest } from "@/lib/api";
+import { buildTrace, triggerIngest } from "@/lib/api";
 import { loadSessionUser, type AuthUser } from "@/lib/auth";
 import { GRID_BATCH_SIZE } from "@/lib/config";
 import {
@@ -64,11 +65,25 @@ function iconClass(tone: "blue" | "teal" | "amber") {
 }
 
 export function HomeView() {
+  const router = useRouter();
   const { showToast } = useToast();
-  const { hasSearched, isLoading, error, hasMore, results, gridPage, setGridPage, topK, loadMore } = useSearch();
+  const {
+    hasSearched,
+    isLoading,
+    error,
+    hasMore,
+    results,
+    gridPage,
+    setGridPage,
+    topK,
+    loadMore,
+    updateCandidateTrackletRemoval,
+  } = useSearch();
   const lastErrorRef = useRef<string | null>(null);
 
   const [selectedCandidate, setSelectedCandidate] = useState<{ queryId: string; candidateId: string } | null>(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
+  const [isTracing, setIsTracing] = useState(false);
 
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -88,6 +103,19 @@ export function HomeView() {
   const isLastPage = isLastLoadedPage && !hasMore;
   const startRank = gridPage * PAGE_SIZE + 1;
   const endRank = Math.min((gridPage + 1) * PAGE_SIZE, results.length);
+  const resultTotalLabel = hasMore ? topK : results.length;
+  const selectedIdSet = useMemo(() => new Set(selectedCandidateIds), [selectedCandidateIds]);
+  const selectedItems = useMemo(
+    () =>
+      selectedCandidateIds
+        .map((id) => results.find((item) => item.id === id) ?? null)
+        .filter((item): item is VideoItem => item !== null),
+    [results, selectedCandidateIds],
+  );
+  const selectedTrackletCount = selectedItems.reduce(
+    (total, item) => total + (item.trackletCount ?? item.tracklets?.length ?? 0),
+    0,
+  );
 
   useEffect(() => {
     if (error && error !== lastErrorRef.current) {
@@ -95,6 +123,12 @@ export function HomeView() {
       lastErrorRef.current = error;
     }
   }, [error, showToast]);
+
+  useEffect(() => {
+    setSelectedCandidateIds((current) =>
+      current.filter((id) => results.some((item) => item.id === id)),
+    );
+  }, [results]);
 
   const handleImport = useCallback(async () => {
     if (isImporting) return;
@@ -121,6 +155,61 @@ export function HomeView() {
     }
     setSelectedCandidate({ queryId: video.queryId, candidateId: video.id });
   }, [showToast]);
+
+  const handleToggleCandidate = useCallback((video: VideoItem) => {
+    if (!video.queryId) {
+      showToast("Không tìm thấy query_id cho candidate này.", "error");
+      return;
+    }
+    setSelectedCandidateIds((current) =>
+      current.includes(video.id)
+        ? current.filter((id) => id !== video.id)
+        : [...current, video.id],
+    );
+  }, [showToast]);
+
+  const handleTrackletRemoved = useCallback((
+    candidateId: string,
+    trackletId: string,
+    remainingTrackletCount: number,
+  ) => {
+    updateCandidateTrackletRemoval(candidateId, trackletId, remainingTrackletCount);
+    if (remainingTrackletCount <= 0) {
+      setSelectedCandidateIds((current) => current.filter((id) => id !== candidateId));
+    }
+    showToast("Đã loại tracklet khỏi candidate.", "success");
+  }, [showToast, updateCandidateTrackletRemoval]);
+
+  const handleTraceSelected = useCallback(async () => {
+    if (!selectedCandidateIds.length) {
+      showToast("Hãy chọn ít nhất một candidate để truy vết.", "error");
+      return;
+    }
+    const queryId = selectedItems[0]?.queryId;
+    if (!queryId) {
+      showToast("Không tìm thấy query_id cho các candidate đã chọn.", "error");
+      return;
+    }
+    const traceableIds = selectedItems
+      .filter((item) => (item.trackletCount ?? item.tracklets?.length ?? 0) > 0)
+      .map((item) => item.id);
+    if (!traceableIds.length) {
+      showToast("Các candidate đã chọn không còn tracklet để truy vết.", "error");
+      return;
+    }
+    setIsTracing(true);
+    try {
+      const result = await buildTrace(queryId, traceableIds, { mergeVideos: false });
+      const candidateLabel = traceableIds.length === 1 ? traceableIds[0] : `${traceableIds.length} candidates`;
+      router.push(
+        `/trace/${result.evidenceId}?query=${encodeURIComponent(queryId)}&candidate=${encodeURIComponent(candidateLabel)}`,
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Không thể tạo trace.", "error");
+    } finally {
+      setIsTracing(false);
+    }
+  }, [router, selectedCandidateIds.length, selectedItems, showToast]);
 
   if (!hasSearched) {
     return (
@@ -270,7 +359,48 @@ export function HomeView() {
           Không tìm thấy kết quả phù hợp.
         </p>
       ) : null}
-      <VideoGrid items={pageItems} startRank={startRank} onItemClick={handleCandidateClick} />
+      {results.length > 0 ? (
+        <>
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900/90">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Đang hiển thị {startRank}–{endRank}/{resultTotalLabel} candidate
+                </p>
+                <p className="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">
+                  Đã chọn {selectedCandidateIds.length} candidate · {selectedTrackletCount} tracklets
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedCandidateIds([])}
+                  disabled={!selectedCandidateIds.length || isTracing}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                >
+                  Bỏ chọn
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTraceSelected}
+                  disabled={!selectedCandidateIds.length || isTracing}
+                  className="rounded-xl bg-blue-600 px-5 py-2 text-sm font-bold text-white shadow-[0_12px_28px_rgba(37,99,235,0.24)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isTracing ? "Đang truy vết..." : "Truy vết"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <VideoGrid
+            items={pageItems}
+            startRank={startRank}
+            onItemClick={handleCandidateClick}
+            onToggleSelect={handleToggleCandidate}
+            selectedIds={selectedIdSet}
+          />
+        </>
+      ) : null}
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.36)]">
         <div className="flex flex-wrap items-center justify-between gap-4">
@@ -317,6 +447,7 @@ export function HomeView() {
         queryId={selectedCandidate?.queryId ?? null}
         candidateId={selectedCandidate?.candidateId ?? null}
         onClose={() => setSelectedCandidate(null)}
+        onTrackletRemoved={handleTrackletRemoved}
       />
     </div>
   );

@@ -52,6 +52,11 @@ type SearchContextValue = {
   runSearch: () => Promise<void>;
   loadMore: () => Promise<boolean>;
   resetSearch: () => void;
+  updateCandidateTrackletRemoval: (
+    candidateId: string,
+    trackletId: string,
+    remainingTrackletCount: number,
+  ) => void;
 };
 
 const SearchContext = createContext<SearchContextValue | null>(null);
@@ -208,6 +213,23 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     clearFilters();
   }, [clearFilters]);
 
+  const updateCandidateTrackletRemoval = useCallback((
+    candidateId: string,
+    trackletId: string,
+    remainingTrackletCount: number,
+  ) => {
+    setResults((current) =>
+      current.map((item) => {
+        if (item.id !== candidateId) return item;
+        return {
+          ...item,
+          trackletCount: remainingTrackletCount,
+          tracklets: item.tracklets?.filter((t) => t.trackletId !== trackletId),
+        };
+      }),
+    );
+  }, []);
+
   const isFirstTopKRender = useRef(true);
   useEffect(() => {
     if (isFirstTopKRender.current) {
@@ -274,6 +296,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
       runSearch,
       loadMore,
       resetSearch,
+      updateCandidateTrackletRemoval,
     }),
     [
       query,
@@ -292,6 +315,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
       runSearch,
       loadMore,
       resetSearch,
+      updateCandidateTrackletRemoval,
     ],
   );
 

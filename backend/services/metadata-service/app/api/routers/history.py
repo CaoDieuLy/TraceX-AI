@@ -135,6 +135,14 @@ def get_history_candidates(
         .offset(offset)
         .limit(limit)
     ).all()
+    selected_candidate_ids = session.scalars(
+        select(QueryCandidate.candidate_id)
+        .where(
+            QueryCandidate.query_id == query_id,
+            QueryCandidate.is_selected == True,  # noqa: E712
+        )
+        .order_by(QueryCandidate.rank_position.asc(), QueryCandidate.id.asc())
+    ).all()
 
     # Pick one representative tracklet per candidate for the thumbnail URL and
     # collect tracklet summaries (camera + time window) so history cards match
@@ -197,6 +205,7 @@ def get_history_candidates(
         "results": results,
         "query_id": query_id,
         "selected_candidate_id": query.selected_candidate_id,
+        "selected_candidate_ids": selected_candidate_ids,
         "total_count": int(total_count),
         "offset": offset,
         "limit": limit,

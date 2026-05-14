@@ -68,6 +68,14 @@ def select_candidate(
     return _forward("POST", "/trace/select", json=body, timeout=60.0)
 
 
+@router.post("/candidate-tracklet/remove")
+def remove_candidate_tracklet(
+    body: dict[str, Any] = Body(...),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    return _forward("POST", "/trace/candidate-tracklet/remove", json=body, timeout=60.0)
+
+
 @router.post("/build")
 def build_trace(
     body: dict[str, Any] = Body(...),

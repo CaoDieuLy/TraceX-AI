@@ -104,12 +104,13 @@ class TraceService:
         candidate_id: UUID | str,
         time_window_start: datetime | None = None,
         time_window_end: datetime | None = None,
+        allow_fallback: bool = True,
     ) -> list[Tracklet]:
         """Get all tracklets for a candidate, optionally constrained by real time.
 
         Strategy:
         1. Try query_candidate_tracklets join table (populated by advanced re-ID flows).
-        2. Fallback: use primary_camera_id of the candidate → expand to ±_CAM_NEIGHBOR_RADIUS
+        2. Fallback when allowed: use primary_camera_id of the candidate → expand to ±_CAM_NEIGHBOR_RADIUS
            neighbouring cameras → return all tracklets in that range.
            This covers the case where person found in cam_20 can realistically
            appear in cam_10…cam_30.
@@ -134,6 +135,8 @@ class TraceService:
 
         if via_join:
             tracklets = via_join
+        elif not allow_fallback:
+            tracklets = []
         else:
             # ── 2. Fallback: neighbor-camera expansion ─────────────────────
             primary_cam = candidate.primary_camera_id or ""
@@ -229,6 +232,10 @@ class TraceService:
             return start_dt, tracklet.tracklet_id
 
         return sorted(tracklets, key=key)
+
+    def sort_tracklets_by_time(self, tracklets: list[Tracklet]) -> list[Tracklet]:
+        """Return tracklets ordered by real wall-clock start time."""
+        return self._sort_tracklets_by_time(tracklets)
 
     def candidate_time_window(
         self,

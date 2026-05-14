@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
 
-import { buildTrace, getCandidateDetail, resolveMediaUrl, selectCandidate } from "@/lib/api";
+import { getCandidateDetail, removeCandidateTracklet, resolveMediaUrl } from "@/lib/api";
 import type { CandidateDetail, CandidateTracklet } from "@/lib/types";
 
 type Props = {
@@ -11,25 +10,32 @@ type Props = {
   queryId: string | null;
   candidateId: string | null;
   onClose: () => void;
+  onTrackletRemoved?: (candidateId: string, trackletId: string, remainingTrackletCount: number) => void;
 };
 
-export function CandidateDetailModal({ open, queryId, candidateId, onClose }: Props) {
-  const router = useRouter();
-  const pathname = usePathname();
+export function CandidateDetailModal({
+  open,
+  queryId,
+  candidateId,
+  onClose,
+  onTrackletRemoved,
+}: Props) {
   const [detail, setDetail] = useState<CandidateDetail | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isTracing, setIsTracing] = useState(false);
+  const [removingTrackletId, setRemovingTrackletId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open || !queryId || !candidateId) {
       setDetail(null);
       setError(null);
+      setRemovingTrackletId(null);
       return;
     }
     let cancelled = false;
     setIsLoading(true);
     setError(null);
+    setDetail(null);
     void getCandidateDetail(queryId, candidateId)
       .then((d) => {
         if (cancelled) return;
@@ -57,31 +63,30 @@ export function CandidateDetailModal({ open, queryId, candidateId, onClose }: Pr
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  const handleTrace = async () => {
-    if (!queryId || !candidateId) return;
-    setIsTracing(true);
+  const handleRemoveTracklet = async (trackletId: string) => {
+    if (!queryId || !candidateId || removingTrackletId) return;
+    setRemovingTrackletId(trackletId);
     setError(null);
     try {
-      // Select is idempotent; do it before build so the candidate is marked
-      // as selected. build itself does not require selection but the trace
-      // bookkeeping in the DB expects it.
-      try {
-        await selectCandidate(queryId, candidateId);
-      } catch {
-        // non-fatal — build can still proceed
-      }
-      const result = await buildTrace(queryId, candidateId, { mergeVideos: false });
-      onClose();
-      const candidatesPath = `/history/${encodeURIComponent(queryId)}/candidates`;
-      const tracePath = `/trace/${result.evidenceId}?query=${encodeURIComponent(queryId)}&candidate=${encodeURIComponent(candidateId)}`;
-      if (typeof window !== "undefined" && pathname !== candidatesPath) {
-        window.history.pushState(null, "", candidatesPath);
-      }
-      router.push(tracePath);
+      const result = await removeCandidateTracklet(queryId, candidateId, trackletId);
+      setDetail((current) => {
+        if (!current) return current;
+        const tracklets = current.tracklets.filter((t) => t.trackletId !== trackletId);
+        const cameraPath = Array.from(
+          new Set(tracklets.map((t) => t.cameraId).filter((id): id is string => Boolean(id))),
+        );
+        return {
+          ...current,
+          tracklets,
+          cameraPath,
+          totalTrackletsInWindow: result.remainingTrackletCount,
+        };
+      });
+      onTrackletRemoved?.(candidateId, trackletId, result.remainingTrackletCount);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Không thể tạo trace.");
+      setError(err instanceof Error ? err.message : "Không thể loại tracklet khỏi candidate.");
     } finally {
-      setIsTracing(false);
+      setRemovingTrackletId(null);
     }
   };
 
@@ -122,12 +127,20 @@ export function CandidateDetailModal({ open, queryId, candidateId, onClose }: Pr
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-700" />
               Đang tải thông tin candidate…
             </div>
-          ) : error ? (
+          ) : null}
+
+          {error ? (
             <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
             </div>
-          ) : detail ? (
-            <CandidateBody detail={detail} />
+          ) : null}
+
+          {!isLoading && detail ? (
+            <CandidateBody
+              detail={detail}
+              removingTrackletId={removingTrackletId}
+              onRemoveTracklet={handleRemoveTracklet}
+            />
           ) : null}
         </div>
 
@@ -138,16 +151,12 @@ export function CandidateDetailModal({ open, queryId, candidateId, onClose }: Pr
               : null}
           </div>
           <div className="flex items-center gap-3">
-            {error && !isLoading ? (
-              <span className="text-xs text-red-600">{error}</span>
-            ) : null}
             <button
               type="button"
-              onClick={handleTrace}
-              disabled={!detail || isTracing}
-              className="rounded-xl bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={onClose}
+              className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
             >
-              {isTracing ? "Đang truy vết…" : "Truy vết"}
+              Đóng
             </button>
           </div>
         </footer>
@@ -156,19 +165,32 @@ export function CandidateDetailModal({ open, queryId, candidateId, onClose }: Pr
   );
 }
 
-function CandidateBody({ detail }: { detail: CandidateDetail }) {
+function CandidateBody({
+  detail,
+  removingTrackletId,
+  onRemoveTracklet,
+}: {
+  detail: CandidateDetail;
+  removingTrackletId: string | null;
+  onRemoveTracklet: (trackletId: string) => void;
+}) {
   return (
     <div className="flex flex-col gap-4">
       <ScoreStrip detail={detail} />
       <ol className="flex flex-col gap-4">
         {detail.tracklets.map((t, idx) => (
           <li key={t.trackletId}>
-            <TrackletRow tracklet={t} index={idx} />
+            <TrackletRow
+              tracklet={t}
+              index={idx}
+              isRemoving={removingTrackletId === t.trackletId}
+              onRemove={() => onRemoveTracklet(t.trackletId)}
+            />
           </li>
         ))}
         {detail.tracklets.length === 0 ? (
           <p className="rounded-xl border border-dashed border-slate-300 px-4 py-6 text-center text-sm text-slate-500">
-            Không có tracklet nào trong cửa sổ thời gian.
+            Candidate này không còn tracklet nào.
           </p>
         ) : null}
       </ol>
@@ -195,7 +217,17 @@ function ScoreStrip({ detail }: { detail: CandidateDetail }) {
   );
 }
 
-function TrackletRow({ tracklet, index }: { tracklet: CandidateTracklet; index: number }) {
+function TrackletRow({
+  tracklet,
+  index,
+  isRemoving,
+  onRemove,
+}: {
+  tracklet: CandidateTracklet;
+  index: number;
+  isRemoving: boolean;
+  onRemove: () => void;
+}) {
   const cropSrc = useMemo(() => {
     if (!tracklet.cropUrl) return null;
     return resolveMediaUrl(tracklet.cropUrl);
@@ -226,17 +258,27 @@ function TrackletRow({ tracklet, index }: { tracklet: CandidateTracklet; index: 
       </div>
 
       <div className="flex flex-1 flex-col gap-3">
-        <header className="flex flex-wrap items-baseline justify-between gap-2">
+        <header className="flex flex-wrap items-start justify-between gap-2">
           <p className="font-mono text-xs text-slate-500" title={tracklet.trackletId}>
             {tracklet.trackletId}
           </p>
-          <div className="flex gap-2 text-[10px] text-slate-500">
-            <Badge>quality {fmtScore(tracklet.qualityScore)}</Badge>
-            {tracklet.embedding.hasEmbedding ? (
-              <Badge>{tracklet.embedding.model} · {tracklet.embedding.dim ?? "?"}d</Badge>
-            ) : (
-              <Badge>no embedding</Badge>
-            )}
+          <div className="flex flex-wrap items-center justify-end gap-2 text-[10px] text-slate-500">
+            <div className="flex gap-2">
+              <Badge>quality {fmtScore(tracklet.qualityScore)}</Badge>
+              {tracklet.embedding.hasEmbedding ? (
+                <Badge>{tracklet.embedding.model} · {tracklet.embedding.dim ?? "?"}d</Badge>
+              ) : (
+                <Badge>no embedding</Badge>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={onRemove}
+              disabled={isRemoving}
+              className="rounded-full border border-red-200 bg-red-50 px-3 py-1 text-[11px] font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isRemoving ? "Đang loại..." : "Loại khỏi candidate"}
+            </button>
           </div>
         </header>
 

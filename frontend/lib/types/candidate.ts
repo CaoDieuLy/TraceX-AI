@@ -107,6 +107,7 @@ export type BuildTraceResult = {
   evidenceId: number;
   queryId: string;
   candidateId: string;
+  candidateIds?: string[];
   traceConfidence: number | null;
   segmentCount: number;
   totalDurationSeconds: number | null;

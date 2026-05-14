@@ -70,6 +70,7 @@ type HistoryCandidatesApiResponse = {
   results: HistoryCandidateApi[];
   query_id: string;
   selected_candidate_id: string | null;
+  selected_candidate_ids?: string[];
   total_count?: number;
   offset?: number;
   limit?: number;
@@ -79,6 +80,7 @@ type HistoryCandidatesApiResponse = {
 export type HistoryCandidatesResult = {
   queryId: string;
   selectedCandidateId: string | null;
+  selectedCandidateIds: string[];
   totalCount: number;
   offset: number;
   limit: number;
@@ -387,6 +389,9 @@ export async function getHistoryCandidates(
   return {
     queryId: payload.query_id,
     selectedCandidateId: payload.selected_candidate_id,
+    selectedCandidateIds:
+      payload.selected_candidate_ids ??
+      payload.results.filter((row) => row.is_selected).map((row) => row.id),
     totalCount: payload.total_count ?? items.length,
     offset: payload.offset ?? offset,
     limit: payload.limit ?? limit,
@@ -599,6 +604,7 @@ type BuildTraceApi = {
   success: boolean;
   query_id: string;
   candidate_id: string;
+  candidate_ids?: string[] | null;
   evidence_id: number;
   trace_duration_ms: number | null;
   trace_confidence: number | null;
@@ -641,16 +647,54 @@ export async function selectCandidate(queryId: string, candidateId: string): Pro
   });
 }
 
-export async function buildTrace(
+export type RemoveCandidateTrackletResult = {
+  candidateId: string;
+  trackletId: string;
+  remainingTrackletCount: number;
+};
+
+export async function removeCandidateTracklet(
   queryId: string,
   candidateId: string,
-  options?: { timeWindowHours?: number; mergeVideos?: boolean },
-): Promise<BuildTraceResult> {
-  const payload = await apiFetch<BuildTraceApi>("/trace/build", {
+  trackletId: string,
+): Promise<RemoveCandidateTrackletResult> {
+  const payload = await apiFetch<{
+    candidate_id: string;
+    tracklet_id: string;
+    remaining_tracklet_count: number;
+  }>("/trace/candidate-tracklet/remove", {
     method: "POST",
     body: JSON.stringify({
       query_id: queryId,
       candidate_id: candidateId,
+      tracklet_id: trackletId,
+    }),
+  });
+  return {
+    candidateId: payload.candidate_id,
+    trackletId: payload.tracklet_id,
+    remainingTrackletCount: payload.remaining_tracklet_count,
+  };
+}
+
+export async function buildTrace(
+  queryId: string,
+  candidateIds: string | string[],
+  options?: { timeWindowHours?: number; mergeVideos?: boolean; excludedTrackletIds?: string[] },
+): Promise<BuildTraceResult> {
+  const ids = (Array.isArray(candidateIds) ? candidateIds : [candidateIds])
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (!ids.length) {
+    throw new Error("Chưa chọn candidate để truy vết.");
+  }
+  const payload = await apiFetch<BuildTraceApi>("/trace/build", {
+    method: "POST",
+    body: JSON.stringify({
+      query_id: queryId,
+      candidate_id: ids[0],
+      candidate_ids: ids,
+      excluded_tracklet_ids: options?.excludedTrackletIds ?? [],
       time_window_hours: options?.timeWindowHours ?? 24,
       merge_videos: options?.mergeVideos ?? false,
     }),
@@ -659,6 +703,7 @@ export async function buildTrace(
     evidenceId: payload.evidence_id,
     queryId: payload.query_id,
     candidateId: payload.candidate_id,
+    candidateIds: payload.candidate_ids ?? undefined,
     traceConfidence: payload.trace_confidence,
     segmentCount: payload.segment_count,
     totalDurationSeconds: payload.total_duration_seconds,
