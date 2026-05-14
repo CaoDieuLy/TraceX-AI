@@ -47,7 +47,7 @@ def parse_recorded_at_from_filename(value: str | None) -> datetime | None:
 
 
 def video_recorded_at(video: Any, *, fallback_to_created_at: bool = False) -> datetime | None:
-    """Return the video's recording timestamp, preferring DB metadata then filename.
+    """Return the video's recording timestamp, preferring the camera filename.
 
     `created_at` is only a last-resort fallback when explicitly allowed. Search
     and trace grouping should normally use the real recording timestamp encoded
@@ -56,14 +56,14 @@ def video_recorded_at(video: Any, *, fallback_to_created_at: bool = False) -> da
     if video is None:
         return None
 
-    recorded = _as_utc(getattr(video, "recorded_at", None))
-    if recorded is not None:
-        return recorded
-
     for attr in ("source_filename", "video_id", "title", "storage_path"):
         parsed = parse_recorded_at_from_filename(getattr(video, attr, None))
         if parsed is not None:
             return parsed
+
+    recorded = _as_utc(getattr(video, "recorded_at", None))
+    if recorded is not None:
+        return recorded
 
     if fallback_to_created_at:
         return _as_utc(getattr(video, "created_at", None))

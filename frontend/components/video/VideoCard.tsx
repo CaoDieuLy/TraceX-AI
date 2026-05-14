@@ -10,18 +10,47 @@ type VideoCardProps = {
   rank?: number;
 };
 
-function formatClock(iso: string | null): string | null {
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function parseTime(iso: string | null): Date | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return d;
+}
+
+function formatUtcDate(d: Date): string {
+  return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+}
+
+function formatUtcClock(d: Date): string {
+  return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
+}
+
+function sameUtcDate(a: Date, b: Date): boolean {
+  return (
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
+  );
+}
+
+function formatUtcDateTime(d: Date): string {
+  return `${formatUtcDate(d)} ${formatUtcClock(d)}`;
 }
 
 function formatTimeRange(start: string | null, end: string | null): string | null {
-  const a = formatClock(start);
-  const b = formatClock(end);
-  if (a && b) return `${a}–${b}`;
-  return a ?? b ?? null;
+  const a = parseTime(start);
+  const b = parseTime(end);
+  if (a && b) {
+    if (sameUtcDate(a, b)) {
+      return `${formatUtcDate(a)} ${formatUtcClock(a)}–${formatUtcClock(b)}`;
+    }
+    return `${formatUtcDateTime(a)} – ${formatUtcDateTime(b)}`;
+  }
+  return a ? formatUtcDateTime(a) : b ? formatUtcDateTime(b) : null;
 }
 
 function uniqueLocations(tracklets: TrackletSummary[]): string[] {
@@ -76,7 +105,8 @@ export function VideoCard({ video, onClick, rank }: VideoCardProps) {
       const t = tracklets[0];
       const loc = cameraIdToLocationLabel(t.cameraId);
       const time = formatTimeRange(t.timeStart, t.timeEnd);
-      locationLine = [loc, time].filter(Boolean).join(" · ") || null;
+      locationLine = loc ? `Vị trí: ${loc}` : null;
+      timeLine = time;
     }
   }
 
@@ -100,13 +130,13 @@ export function VideoCard({ video, onClick, rank }: VideoCardProps) {
           </p>
         ) : null}
         {countLine ? (
-          <p className="truncate text-xs font-semibold text-blue-700 dark:text-blue-300">{countLine}</p>
+          <p className="text-xs font-semibold text-blue-700 dark:text-blue-300">{countLine}</p>
         ) : null}
         {locationLine ? (
-          <p className="truncate text-xs text-ink-secondary dark:text-slate-400">{locationLine}</p>
+          <p className="line-clamp-2 text-xs leading-snug text-ink-secondary dark:text-slate-400">{locationLine}</p>
         ) : null}
         {timeLine ? (
-          <p className="truncate text-xs text-ink-secondary dark:text-slate-400">{timeLine}</p>
+          <p className="text-xs font-medium leading-snug text-ink-secondary dark:text-slate-400">{timeLine}</p>
         ) : null}
       </div>
     </>

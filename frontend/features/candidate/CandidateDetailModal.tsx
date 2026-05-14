@@ -322,10 +322,48 @@ function fmtScore(v: number | null | undefined): string | null {
   return v.toFixed(3);
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function parseTime(iso: string | null): Date | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function formatUtcDate(d: Date): string {
+  return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+}
+
+function formatUtcClock(d: Date): string {
+  return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
+}
+
+function sameUtcDate(a: Date, b: Date): boolean {
+  return (
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
+  );
+}
+
+function formatUtcDateTime(d: Date): string {
+  return `${formatUtcDate(d)} ${formatUtcClock(d)}`;
+}
+
 function fmtTimeRange(start: string | null, end: string | null, duration: number | null): string | null {
-  if (!start) return duration ? `${duration.toFixed(1)}s` : null;
-  const d = new Date(start);
-  const hh = d.toLocaleTimeString(undefined, { hour12: false });
-  const dur = duration ? ` · ${duration.toFixed(1)}s` : end ? "" : "";
-  return `${hh}${dur}`;
+  const a = parseTime(start);
+  const b = parseTime(end);
+  const dur = duration ? ` · ${duration.toFixed(1)}s` : "";
+  if (a && b) {
+    const range = sameUtcDate(a, b)
+      ? `${formatUtcDate(a)} ${formatUtcClock(a)}–${formatUtcClock(b)}`
+      : `${formatUtcDateTime(a)} – ${formatUtcDateTime(b)}`;
+    return `${range}${dur}`;
+  }
+  if (a) return `${formatUtcDateTime(a)}${dur}`;
+  if (b) return `${formatUtcDateTime(b)}${dur}`;
+  return duration ? `${duration.toFixed(1)}s` : null;
 }
