@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useToast } from "@/components/ui/ToastProvider";
 import { VideoGrid } from "@/components/video/VideoGrid";
@@ -19,6 +19,7 @@ export function HistoryCandidatesView({ queryId }: Props) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [data, setData] = useState<HistoryCandidatesResult | null>(null);
+  const [gridPage, setGridPage] = useState(0);
   const [selectedCandidate, setSelectedCandidate] = useState<
     { queryId: string; candidateId: string } | null
   >(null);
@@ -28,6 +29,7 @@ export function HistoryCandidatesView({ queryId }: Props) {
     setLoading(true);
     setLoadingMore(false);
     setData(null);
+    setGridPage(0);
     void getHistoryCandidates(queryId, 0, GRID_BATCH_SIZE)
       .then((payload) => {
         if (cancelled) return;
@@ -46,17 +48,37 @@ export function HistoryCandidatesView({ queryId }: Props) {
     };
   }, [queryId, showToast]);
 
-  const handleLoadMore = useCallback(async () => {
-    if (!data || loadingMore || !data.hasMore) return;
+  const pageItems = useMemo(
+    () => data?.items.slice(gridPage * GRID_BATCH_SIZE, gridPage * GRID_BATCH_SIZE + GRID_BATCH_SIZE) ?? [],
+    [data?.items, gridPage],
+  );
+  const totalLoadedPages = data ? Math.ceil(data.items.length / GRID_BATCH_SIZE) || 1 : 1;
+  const isLastLoadedPage = gridPage >= totalLoadedPages - 1 || pageItems.length === 0;
+  const isLastPage = Boolean(data) && isLastLoadedPage && !data?.hasMore;
+  const startRank = gridPage * GRID_BATCH_SIZE + 1;
+  const endRank = data ? Math.min(startRank + pageItems.length - 1, data.totalCount) : 0;
+
+  const handleLoadMore = useCallback(async (): Promise<boolean> => {
+    if (!data || loadingMore || !data.hasMore) return false;
     setLoadingMore(true);
     try {
       const next = await getHistoryCandidates(queryId, data.items.length, GRID_BATCH_SIZE);
+      if (!next.items.length) {
+        setData({
+          ...next,
+          items: data.items,
+          hasMore: false,
+        });
+        return false;
+      }
       setData({
         ...next,
         items: [...data.items, ...next.items],
       });
+      return true;
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Không tải thêm được candidates.", "error");
+      return false;
     } finally {
       setLoadingMore(false);
     }
@@ -102,22 +124,50 @@ export function HistoryCandidatesView({ queryId }: Props) {
       {!loading && data && data.items.length > 0 ? (
         <>
           <p className="mb-4 text-sm text-slate-500 dark:text-slate-400">
-            Đang hiển thị {data.items.length}/{data.totalCount} candidate{data.totalCount === 1 ? "" : "s"} đã lưu
+            Đang hiển thị {startRank}–{endRank}/{data.totalCount} candidate{data.totalCount === 1 ? "" : "s"} đã lưu
             {data.selectedCandidateId ? " · đã chọn 1" : ""}
           </p>
-          <VideoGrid items={data.items} onItemClick={handleCandidateClick} />
-          {data.hasMore ? (
-            <div className="mt-6 flex justify-center">
+          <VideoGrid items={pageItems} startRank={startRank} onItemClick={handleCandidateClick} />
+
+          <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.36)]">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                {gridPage > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setGridPage(gridPage - 1)}
+                    className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 shadow-[0_8px_20px_rgba(15,23,42,0.08)] transition duration-200 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-700"
+                  >
+                    Trước
+                  </button>
+                ) : null}
+                <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
+                  {isLastPage ? "Hết kết quả" : `Top ${startRank}–${endRank}`}
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => void handleLoadMore()}
-                disabled={loadingMore}
+                disabled={isLastPage || loadingMore}
+                onClick={async () => {
+                  if (!isLastLoadedPage) {
+                    setGridPage(gridPage + 1);
+                    return;
+                  }
+                  if (data.hasMore) {
+                    const added = await handleLoadMore();
+                    if (added) setGridPage(gridPage + 1);
+                  }
+                }}
                 className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-bold text-white shadow-[0_12px_28px_rgba(15,23,42,0.22)] transition duration-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-blue-600 dark:shadow-[0_16px_32px_rgba(37,99,235,0.28)] dark:hover:bg-blue-500"
               >
-                {loadingMore ? "Đang tải..." : `Tải thêm ${GRID_BATCH_SIZE} candidate`}
+                {loadingMore ? "Đang tải..." : "Tiếp theo"}
               </button>
             </div>
-          ) : null}
+          </div>
+
+          <p className="mt-10 text-center text-xs font-semibold tracking-wide text-slate-500 dark:text-slate-400">
+            Mỗi trang {GRID_BATCH_SIZE} kết quả · Top n hiện tại = {data.totalCount}
+          </p>
         </>
       ) : null}
 
