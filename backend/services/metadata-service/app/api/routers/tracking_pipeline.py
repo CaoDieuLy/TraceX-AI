@@ -272,6 +272,141 @@ class VideoFrameSampler:
 
 # ── BodyPartAdaptiveTracker ───────────────────────────────────────────────────
 
+class _PersonKalman:
+    """8-D Kalman filter for a single person bbox, SORT/DeepSORT style.
+
+    State: [u, v, s, r, du, dv, ds, dr] where
+        u, v  = bbox center
+        s     = bbox area (scale)
+        r     = aspect ratio (w/h)
+        d.    = corresponding velocity (assumed near-constant)
+    Measurement: [u, v, s, r].
+
+    Why this and not a hand-rolled linear predictor:
+      • Process noise covariance scales with bbox height → a person far from
+        the camera has more positional uncertainty per frame, matching reality.
+      • Velocity is smoothed across observations rather than being a delta
+        between the last two frames (which is very noisy at 4 fps).
+      • Mahalanobis distance from predicted state gives a principled "this
+        detection is too far given my uncertainty" gate that adapts to how
+        well the track has been tracked.
+
+    Implementation kept dependency-free: pure numpy, ~5 lines per step.
+    """
+
+    # Standard SORT noise coefficients (Bewley et al. 2016).
+    _STD_POS = 1.0 / 20.0
+    _STD_VEL = 1.0 / 160.0
+
+    def __init__(self, bbox: tuple):
+        x1, y1, x2, y2 = bbox
+        w = max(x2 - x1, 1.0)
+        h = max(y2 - y1, 1.0)
+        u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        s = w * h
+        r = w / h
+        # Initial mean and covariance.
+        self.mean = np.array([u, v, s, r, 0, 0, 0, 0], dtype=np.float64)
+        std = np.array([
+            2 * self._STD_POS * h,
+            2 * self._STD_POS * h,
+            2 * s * 0.05,
+            1e-2,
+            10 * self._STD_VEL * h,
+            10 * self._STD_VEL * h,
+            10 * s * 0.05,
+            1e-5,
+        ])
+        self.cov = np.diag(std ** 2)
+
+        # Constant-velocity transition F (dt = 1 frame; gap is handled by
+        # iterating predict() the correct number of times).
+        self._F = np.eye(8)
+        for i in range(4):
+            self._F[i, i + 4] = 1.0
+        # Measurement matrix H (we observe position only)
+        self._H = np.zeros((4, 8))
+        for i in range(4):
+            self._H[i, i] = 1.0
+
+    def predict(self, n_steps: int = 1) -> np.ndarray:
+        """Advance by n_steps frames. Returns predicted measurement [u, v, s, r]."""
+        if n_steps <= 0:
+            return self._H @ self.mean
+        # Compose F^n_steps for n>1 (so noise grows correctly per step).
+        for _ in range(n_steps):
+            h = max(np.sqrt(max(self.mean[2] / max(self.mean[3], 1e-6), 1.0)), 1.0)
+            std_pos = self._STD_POS * h
+            std_vel = self._STD_VEL * h
+            Q = np.diag(np.array([
+                std_pos, std_pos, 1e-2 * abs(self.mean[2]) + 1e-2, 1e-2,
+                std_vel, std_vel, 1e-5 * abs(self.mean[2]) + 1e-5, 1e-5,
+            ]) ** 2)
+            self.mean = self._F @ self.mean
+            self.cov = self._F @ self.cov @ self._F.T + Q
+        return self._H @ self.mean
+
+    def update(self, bbox: tuple) -> None:
+        """Fold a new bbox observation into the state."""
+        x1, y1, x2, y2 = bbox
+        w = max(x2 - x1, 1.0)
+        h = max(y2 - y1, 1.0)
+        z = np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0, w * h, w / h])
+
+        std = np.array([self._STD_POS * h, self._STD_POS * h,
+                        1e-1 * abs(self.mean[2]) + 1e-1, 1e-1])
+        R = np.diag(std ** 2)
+
+        y = z - self._H @ self.mean
+        S = self._H @ self.cov @ self._H.T + R
+        try:
+            K = self.cov @ self._H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return  # singular → skip update, keep prior
+        self.mean = self.mean + K @ y
+        self.cov = (np.eye(8) - K @ self._H) @ self.cov
+
+    def predicted_bbox(self, n_steps: int = 0) -> tuple:
+        """Predict ahead by n_steps without mutating state. Returns (x1,y1,x2,y2)."""
+        if n_steps <= 0:
+            u, v, s, r = self.mean[:4]
+        else:
+            # Project without altering state — clone mean
+            m = self.mean.copy()
+            for _ in range(n_steps):
+                m = self._F @ m
+            u, v, s, r = m[:4]
+        s = max(float(s), 1.0)
+        r = max(float(r), 1e-3)
+        w = float(np.sqrt(s * r))
+        h = float(s / max(w, 1e-3))
+        return (u - w / 2, v - h / 2, u + w / 2, v + h / 2)
+
+    def mahalanobis(self, bbox: tuple, *, position_only: bool = True) -> float:
+        """Squared Mahalanobis distance between predicted state and a det bbox.
+        position_only=True uses just (u,v) — robust to scale errors that occur
+        when detector returns a slightly differently-sized box. Returns a
+        single scalar in [0, ∞). 9.21 is the chi-square 99% level for 2 DoF."""
+        x1, y1, x2, y2 = bbox
+        u_obs = (x1 + x2) / 2.0
+        v_obs = (y1 + y2) / 2.0
+        if position_only:
+            pred_uv = self.mean[:2]
+            S = self.cov[:2, :2] + np.eye(2) * 1.0  # add small jitter
+            d = np.array([u_obs - pred_uv[0], v_obs - pred_uv[1]])
+            try:
+                return float(d @ np.linalg.inv(S) @ d)
+            except np.linalg.LinAlgError:
+                return float("inf")
+        z = np.array([u_obs, v_obs, (x2 - x1) * (y2 - y1), (x2 - x1) / max(y2 - y1, 1)])
+        innov = z - self._H @ self.mean
+        S = self._H @ self.cov @ self._H.T + np.eye(4)
+        try:
+            return float(innov @ np.linalg.inv(S) @ innov)
+        except np.linalg.LinAlgError:
+            return float("inf")
+
+
 class BodyPartAdaptiveTracker:
     """
     ByteTrack-style tracker with adaptive cost based on head visibility.
@@ -297,7 +432,14 @@ class BodyPartAdaptiveTracker:
         track_thresh: float = 0.40,
         low_thresh: float = 0.10,
         new_track_threshold: float = 0.45,
-        max_match_cost: float = 0.80,
+        # P1 — tightened from 0.80 → 0.65. Asymmetric error budget: this tracker
+        # produces raw fragments; downstream TrackletFragmentMerger reattaches
+        # split fragments using appearance, but NEVER splits a merged tracklet.
+        # → prefer over-segmenting (many small clean tracklets) over
+        # under-segmenting (one large polluted tracklet).
+        max_match_cost: float = 0.65,
+        # Buffer reactivation kept at 0.80 — same-ID rescue is appearance-free
+        # but already guarded by IoU floor (min_buffer_iou=0.30).
         max_buffer_match_cost: float = 0.80,
         max_head_center_distance: float = 120.0,
         max_foot_distance: float = 150.0,
@@ -311,6 +453,20 @@ class BodyPartAdaptiveTracker:
         min_track_frames: int = 3,
         min_track_density: float = 0.05,
         min_buffer_iou: float = 0.30,
+        # P1 — new hard gates for active matching (raw tracker has no appearance
+        # check, so we tighten geometry instead). Each gate is conservative on
+        # purpose; preferring to break a track over handing it off.
+        min_active_iou_short_gap: float = 0.10,   # detection same/adjacent frame must IoU≥this
+        short_gap_frames: int = 2,                # what "short gap" means in frames
+        max_lowconf_match_cost: float = 0.50,     # low-conf rescue gets stricter cost cap
+        max_center_jump_ratio: float = 2.0,       # bbox-center jump > N × bbox_h flags handoff
+        # P3 — Kalman filter for predicted position. Replaces the 2-frame linear
+        # velocity used previously (very noisy at 4 fps). Mahalanobis gate uses
+        # the filter's own uncertainty to decide what counts as "too far" —
+        # tight when the track is confident, lenient when it has just been
+        # observed once. 9.21 = chi-square 99% for 2 DoF (position-only).
+        use_kalman: bool = True,
+        kalman_gate_chi2: float = 9.21,
     ):
         self.track_thresh = track_thresh
         self.low_thresh = low_thresh
@@ -329,6 +485,12 @@ class BodyPartAdaptiveTracker:
         self.min_track_frames = min_track_frames
         self.min_track_density = min_track_density
         self.min_buffer_iou = min_buffer_iou
+        self.min_active_iou_short_gap = min_active_iou_short_gap
+        self.short_gap_frames = short_gap_frames
+        self.max_lowconf_match_cost = max_lowconf_match_cost
+        self.max_center_jump_ratio = max_center_jump_ratio
+        self.use_kalman = use_kalman
+        self.kalman_gate_chi2 = kalman_gate_chi2
         self._reset()
 
     def _reset(self) -> None:
@@ -338,20 +500,36 @@ class BodyPartAdaptiveTracker:
         self.buffer: dict[str, list[TrackletObservation]] = {}
         self.buffer_last_bbox: dict[str, tuple] = {}
         self.buffer_entry_frame: dict[str, int] = {}
+        # P3: Kalman filter per active track. Reset on track expiry; tracks
+        # moved to buffer drop their KF (re-seeded on reactivation).
+        self.kf: dict[str, _PersonKalman] = {}
         self.next_id = 1
 
     def _hbox(self, bbox: tuple) -> tuple:
         return _head_bbox(bbox, self.head_ratio, self.shrink_x)
 
-    def _build_state(self, obs: list[TrackletObservation], last_bbox: tuple, target_fk: int):
+    def _build_state(self, obs: list[TrackletObservation], last_bbox: tuple, target_fk: int,
+                     tid: Optional[str] = None):
         """
         Returns (hbox, head_center, predicted_center, full_bbox, foot_point, head_visible).
-        Velocity is computed on head center for consistency with head-mode cost.
+        Predicted_center comes from the Kalman filter if available, else falls
+        back to a 2-frame linear velocity.
         """
         hbox = self._hbox(last_bbox)
         hc   = _center(hbox)
         fc   = _foot_point(last_bbox)
         hv   = _head_visible(last_bbox, self.min_head_aspect, self.min_head_height)
+
+        # P3 Kalman branch
+        if self.use_kalman and tid is not None and tid in self.kf:
+            steps = max(target_fk - obs[-1].frame_index, 0) if obs else 0
+            steps = min(steps, self.track_buffer * 2)
+            pred_bbox = self.kf[tid].predicted_bbox(n_steps=steps)
+            # We compare on head-center (cost matrix expectation) — derive from
+            # predicted bbox the same way an observed bbox would.
+            pred_hbox = self._hbox(pred_bbox)
+            pred = _center(pred_hbox)
+            return hbox, hc, pred, last_bbox, fc, hv
 
         if len(obs) < 2:
             return hbox, hc, hc, last_bbox, fc, hv
@@ -370,8 +548,21 @@ class BodyPartAdaptiveTracker:
         det_bboxes: list[tuple],
         states: dict,
         track_ids: list[str],
+        *,
+        gap_frames: Optional[list[int]] = None,
     ) -> np.ndarray:
-        """Adaptive cost matrix [M, N] with spatial gating applied (gated cells = 1e9)."""
+        """Adaptive cost matrix [M, N] with spatial gating applied (gated cells = 1e9).
+
+        P1 hard gates (applied after the soft-cost blend):
+          • IoU floor on short-gap matches (gap ≤ short_gap_frames frames):
+              if last seen this frame or last frame, require IoU(det, last_bbox) ≥
+              min_active_iou_short_gap. Prevents handoff to a neighboring person
+              when the original detection momentarily disappears.
+          • Center-jump gate: if det center jumps more than max_center_jump_ratio
+              × track_height per gap frame, suppress. Catches the classic
+              handoff signature (A is gone, B appears far away on the predicted
+              line — large jump relative to body size).
+        """
         det_arr  = np.array(det_bboxes, dtype=np.float32)                              # [M, 4]
 
         t_hboxes = np.array([states[tid][0] for tid in track_ids], dtype=np.float32)  # [N, 4]
@@ -412,6 +603,40 @@ class BodyPartAdaptiveTracker:
         # Spatial gating: suppress only when BOTH primary signals exceed max distance
         too_far = (hcd > self.max_head_center_distance) & (fcd > self.max_foot_distance * 1.2)
         cost = np.where(too_far, 1e9, cost)
+
+        # P3 — Kalman Mahalanobis gate. Tight when the track is well-tracked,
+        # lenient on fresh tracks (cov is large). Operates BEFORE the P1 hard
+        # gates so a Kalman-impossible match is killed regardless of geometry.
+        if self.use_kalman and self.kf:
+            for j, tid in enumerate(track_ids):
+                kf = self.kf.get(tid)
+                if kf is None:
+                    continue
+                for i, bbox in enumerate(det_bboxes):
+                    if cost[i, j] >= 1e8:
+                        continue  # already gated
+                    if kf.mahalanobis(bbox) > self.kalman_gate_chi2:
+                        cost[i, j] = 1e9
+
+        # P1 — hard gates beyond the soft cost blend
+        if gap_frames is not None:
+            gap_arr = np.asarray(gap_frames, dtype=np.int32)                # [N]
+            short_mask = (gap_arr <= self.short_gap_frames)[None, :]        # [1, N]
+
+            # Gate 1: IoU floor for short-gap matches
+            if short_mask.any():
+                fail_iou = short_mask & (iou_full < self.min_active_iou_short_gap)
+                cost = np.where(fail_iou, 1e9, cost)
+
+            # Gate 2: center-jump check (det center vs track last bbox center,
+            # normalized by track bbox height × gap frames)
+            d_centers = (det_arr[:, :2] + det_arr[:, 2:]) / 2                # [M, 2]
+            t_centers = (t_fbboxes[:, :2] + t_fbboxes[:, 2:]) / 2            # [N, 2]
+            t_heights = np.maximum(t_fbboxes[:, 3] - t_fbboxes[:, 1], 1.0)   # [N]
+            jump = np.linalg.norm(d_centers[:, None] - t_centers[None], axis=-1)  # [M, N]
+            allowed = self.max_center_jump_ratio * t_heights[None] * np.maximum(gap_arr[None], 1)
+            cost = np.where(jump > allowed, 1e9, cost)
+
         return cost
 
     def _match_frame_greedy(
@@ -420,15 +645,29 @@ class BodyPartAdaptiveTracker:
         states: dict,
         candidates: set,
         max_cost: float,
+        *,
+        gap_frames_by_tid: Optional[dict[str, int]] = None,
     ) -> list[Optional[tuple[str, float]]]:
         """Adaptive matching. Hungarian when M>=2 and N>=2 (avoids order-dependent
-        ID switches when persons cross); greedy otherwise (equivalent and cheaper)."""
+        ID switches when persons cross); greedy otherwise (equivalent and cheaper).
+
+        gap_frames_by_tid: optional per-track frame gap (current_frame - last_seen).
+        When provided, _build_cost_matrix applies P1 hard gates (IoU floor on
+        short gaps, center-jump guard). When None, only soft cost + the legacy
+        spatial too_far gate apply (kept for the buffer reactivation path which
+        has its own dedicated IoU guard downstream)."""
         if not candidates or not det_bboxes:
             return [None] * len(det_bboxes)
 
         track_ids = list(candidates)
         M, N = len(det_bboxes), len(track_ids)
-        cost = self._build_cost_matrix(det_bboxes, states, track_ids)
+        gap_list = (
+            [gap_frames_by_tid.get(tid, 0) for tid in track_ids]
+            if gap_frames_by_tid is not None else None
+        )
+        cost = self._build_cost_matrix(
+            det_bboxes, states, track_ids, gap_frames=gap_list,
+        )
 
         results: list[Optional[tuple[str, float]]] = [None] * M
 
@@ -494,6 +733,10 @@ class BodyPartAdaptiveTracker:
                 self.buffer_last_bbox[tid] = self.active_last_bbox.pop(tid)
                 self.buffer_entry_frame[tid] = fk
                 self.active_last_frame.pop(tid, None)
+                # P3: drop Kalman filter when track goes to buffer. Re-seeded
+                # on reactivation — the long gap means the old velocity is
+                # stale and could mislead matching.
+                self.kf.pop(tid, None)
 
             # Expire old buffer tracks
             expired = [tid for tid in self.buffer
@@ -512,15 +755,31 @@ class BodyPartAdaptiveTracker:
             low  = [d for d in dets if self.low_thresh <= d.confidence < self.track_thresh]
 
             active_unmatched = set(self.active.keys())
+            # P3: advance Kalman state to current frame before matching, so the
+            # cost matrix and Mahalanobis gate see the correctly-projected mean
+            # / covariance. The number of predict steps = frame gap since the
+            # last update.
+            if self.use_kalman:
+                for tid in active_unmatched:
+                    kf = self.kf.get(tid)
+                    if kf is None:
+                        continue
+                    gap = max(fk - self.active_last_frame.get(tid, fk), 1)
+                    kf.predict(n_steps=gap)
             states = {
-                tid: self._build_state(self.active[tid], self.active_last_bbox[tid], fk)
+                tid: self._build_state(self.active[tid], self.active_last_bbox[tid], fk, tid=tid)
                 for tid in active_unmatched
             }
-
+            # Per-track frame gap → used by P1 hard gates in _build_cost_matrix
+            gap_by_tid = {
+                tid: max(fk - self.active_last_frame.get(tid, fk), 0)
+                for tid in active_unmatched
+            }
             unmatched_high: list[FrameDetection] = []
             if high and active_unmatched:
                 matches = self._match_frame_greedy(
                     [d.bbox for d in high], states, active_unmatched, self.max_match_cost,
+                    gap_frames_by_tid=gap_by_tid,
                 )
                 for det, m in zip(high, matches):
                     if m:
@@ -530,14 +789,23 @@ class BodyPartAdaptiveTracker:
                         self.active_last_frame[tid] = fk
                         active_unmatched.discard(tid)
                         states.pop(tid, None)
+                        gap_by_tid.pop(tid, None)
+                        if self.use_kalman and tid in self.kf:
+                            self.kf[tid].update(det.bbox)
                     else:
                         unmatched_high.append(det)
             else:
                 unmatched_high = list(high)
 
             if low and active_unmatched:
+                # P1 — low-confidence rescue must clear a STRICTER cost cap. Low-conf
+                # detections in hospital CCTV are often partial-body / blurry / FP,
+                # and the cost of letting one merge nearby into a different person's
+                # track is permanent (fragment merger cannot split).
                 matches = self._match_frame_greedy(
-                    [d.bbox for d in low], states, active_unmatched, self.max_match_cost,
+                    [d.bbox for d in low], states, active_unmatched,
+                    self.max_lowconf_match_cost,
+                    gap_frames_by_tid=gap_by_tid,
                 )
                 for det, m in zip(low, matches):
                     if m:
@@ -547,6 +815,8 @@ class BodyPartAdaptiveTracker:
                         self.active_last_frame[tid] = fk
                         active_unmatched.discard(tid)
                         states.pop(tid, None)
+                        if self.use_kalman and tid in self.kf:
+                            self.kf[tid].update(det.bbox)
 
             # Buffer reactivation: re-attach high-confidence dets to recently-lost tracks
             # so the same person keeps the original track_id across short occlusions.
@@ -587,6 +857,10 @@ class BodyPartAdaptiveTracker:
                     self.active[tid] = obs
                     self.active_last_bbox[tid] = det.bbox
                     self.active_last_frame[tid] = fk
+                    if self.use_kalman:
+                        # Re-seed Kalman from the new det — old velocity/cov is
+                        # stale after a buffer-length gap.
+                        self.kf[tid] = _PersonKalman(det.bbox)
                 unmatched_high = still_unmatched
 
             for det in unmatched_high:
@@ -596,6 +870,8 @@ class BodyPartAdaptiveTracker:
                     self.active[tid] = [self._make_obs(det, ts)]
                     self.active_last_bbox[tid] = det.bbox
                     self.active_last_frame[tid] = fk
+                    if self.use_kalman:
+                        self.kf[tid] = _PersonKalman(det.bbox)
 
         # Finalize all remaining tracks
         for tid, obs in list(self.active.items()) + list(self.buffer.items()):
