@@ -24,6 +24,7 @@ type SearchApiResponse = {
 type SearchHistoryApiItem = {
   query_id: string;
   query_text: string;
+  query_image_url?: string | null;
   status?: string | null;
   selected_candidate_id?: string | null;
   candidate_count?: number;
@@ -43,6 +44,7 @@ type SearchHistoryApiResponse = {
 export type SearchHistoryItem = {
   queryId: string;
   queryText: string;
+  queryImageUrl: string | null;
   status: string | null;
   selectedCandidateId: string | null;
   candidateCount: number;
@@ -114,6 +116,12 @@ export type SearchFilters = {
   time_to?: string;
 };
 
+export type SearchVideosOptions = {
+  persistQuery?: boolean;
+  reuseQueryId?: string | null;
+  queryImage?: File | null;
+};
+
 function isLikelyImageUrl(url: string): boolean {
   const value = url.toLowerCase();
   if (!value) return false;
@@ -174,13 +182,19 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
 
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
+  const isFormDataBody =
+    typeof FormData !== "undefined" && init?.body instanceof FormData;
+  const headers: Record<string, string> = {
+    ...authHeaders,
+    ...((init?.headers ?? {}) as Record<string, string>),
+  };
+  if (!isFormDataBody && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders,
-      ...(init?.headers ?? {}),
-    },
+    headers,
     cache: "no-store",
   });
 
@@ -200,10 +214,14 @@ export async function searchVideos(
   topK: number,
   offset = 0,
   filters?: SearchFilters,
-  persistQuery = false,
+  optionsOrPersistQuery: SearchVideosOptions | boolean = false,
   reuseQueryId?: string | null,
 ): Promise<SearchPage> {
   const apiBaseUrl = getApiBaseUrl();
+  const options: SearchVideosOptions =
+    typeof optionsOrPersistQuery === "boolean"
+      ? { persistQuery: optionsOrPersistQuery, reuseQueryId }
+      : optionsOrPersistQuery;
   const payloadBody: {
     query: string;
     top_k: number;
@@ -213,7 +231,12 @@ export async function searchVideos(
     time_from?: string;
     time_to?: string;
     query_id?: string;
-  } = { query, top_k: topK, offset, persist_query: persistQuery };
+  } = {
+    query,
+    top_k: topK,
+    offset,
+    persist_query: Boolean(options.persistQuery),
+  };
   if (filters?.camera_ids?.length) {
     payloadBody.camera_ids = filters.camera_ids;
   }
@@ -223,12 +246,35 @@ export async function searchVideos(
   if (filters?.time_to) {
     payloadBody.time_to = filters.time_to;
   }
-  if (reuseQueryId) {
-    payloadBody.query_id = reuseQueryId;
+  if (options.reuseQueryId) {
+    payloadBody.query_id = options.reuseQueryId;
+  }
+  const requestInit: RequestInit = { method: "POST" };
+  if (options.queryImage) {
+    const form = new FormData();
+    form.append("query", payloadBody.query);
+    form.append("top_k", String(payloadBody.top_k));
+    form.append("offset", String(payloadBody.offset));
+    form.append("persist_query", String(payloadBody.persist_query));
+    if (payloadBody.query_id) {
+      form.append("query_id", payloadBody.query_id);
+    }
+    for (const cameraId of payloadBody.camera_ids ?? []) {
+      form.append("camera_ids", cameraId);
+    }
+    if (payloadBody.time_from) {
+      form.append("time_from", payloadBody.time_from);
+    }
+    if (payloadBody.time_to) {
+      form.append("time_to", payloadBody.time_to);
+    }
+    form.append("query_image", options.queryImage, options.queryImage.name);
+    requestInit.body = form;
+  } else {
+    requestInit.body = JSON.stringify(payloadBody);
   }
   const payload = await apiFetch<SearchApiResponse>("/search", {
-    method: "POST",
-    body: JSON.stringify(payloadBody),
+    ...requestInit,
   });
 
   const queryId = payload.query_id ?? null;
@@ -343,6 +389,7 @@ function mapHistoryItem(item: SearchHistoryApiItem): SearchHistoryItem {
   return {
     queryId: item.query_id,
     queryText: item.query_text,
+    queryImageUrl: item.query_image_url ? resolveMediaUrl(item.query_image_url) : null,
     status: item.status ?? null,
     selectedCandidateId: item.selected_candidate_id ?? null,
     candidateCount: item.candidate_count ?? 0,

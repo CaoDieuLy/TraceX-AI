@@ -61,7 +61,13 @@ export function SearchBar({ className = "" }: SearchBarProps) {
     }
     if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
     setImageError(null);
-    setImage({ name: file.name, size: file.size, type: file.type, previewUrl: URL.createObjectURL(file) });
+    setImage({
+      file,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      previewUrl: URL.createObjectURL(file),
+    });
   }
 
   function handleRemoveImage() {

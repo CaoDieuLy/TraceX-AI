@@ -6,11 +6,15 @@ Frontend calls POST /api/v1/search → metadata-service → query-service (GPU).
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+import os
+import uuid
+from pathlib import Path
+from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from ...core.dependencies import get_current_user
 from shared.models import User
@@ -25,6 +29,7 @@ class SearchRequest(BaseModel):
     time_from: str | None = None
     time_to: str | None = None
     query_image_url: str | None = None  # URL of uploaded query image (for history display)
+    query_image_path: str | None = None  # local shared-storage path for query-service image tower
     query_id: str | None = None  # passed back by FE during pagination so the qh row is reused
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["search"])
 
 _QUERY_SERVICE_URL: str | None = None
+_QUERY_IMAGE_ROOT = Path(os.getenv("QUERY_IMAGE_ROOT", "/workspace/storage/query-images"))
+_MAX_QUERY_IMAGE_BYTES = int(os.getenv("MAX_QUERY_IMAGE_BYTES", str(5 * 1024 * 1024)))
+_IMAGE_EXT_BY_TYPE = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 
 def _get_query_service_url() -> str:
@@ -73,15 +87,86 @@ def _post_to_query_service(path: str, payload: dict[str, Any], timeout: float = 
     )
 
 
+def _form_int(value: object, default: int) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _query_image_extension(filename: str | None, content_type: str | None) -> str:
+    if content_type:
+        ext = _IMAGE_EXT_BY_TYPE.get(content_type.lower())
+        if ext:
+            return ext
+    suffix = Path(filename or "").suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    return ".jpg"
+
+
+async def _save_query_image(upload: StarletteUploadFile) -> tuple[str, str]:
+    content_type = (upload.content_type or "").lower()
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file ảnh cho query_image.")
+
+    content = await upload.read(_MAX_QUERY_IMAGE_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="Ảnh truy vấn đang trống.")
+    if len(content) > _MAX_QUERY_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Ảnh truy vấn không được vượt quá 5MB.")
+
+    _QUERY_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    ext = _query_image_extension(upload.filename, content_type)
+    filename = f"{uuid.uuid4().hex}{ext}"
+    path = _QUERY_IMAGE_ROOT / filename
+    path.write_bytes(content)
+    return f"/static/query-images/{filename}", str(path)
+
+
+async def _parse_search_request(request: Request) -> SearchRequest:
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        camera_ids = [
+            str(value).strip()
+            for value in form.getlist("camera_ids")
+            if str(value).strip()
+        ]
+        body = SearchRequest(
+            query=str(form.get("query") or ""),
+            text=str(form.get("text") or "") or None,
+            top_k=_form_int(form.get("top_k"), 20),
+            offset=_form_int(form.get("offset"), 0),
+            camera_ids=camera_ids or None,
+            time_from=str(form.get("time_from") or "") or None,
+            time_to=str(form.get("time_to") or "") or None,
+            query_id=str(form.get("query_id") or "") or None,
+        )
+        query_image = form.get("query_image")
+        if isinstance(query_image, StarletteUploadFile) and query_image.filename:
+            image_url, image_path = await _save_query_image(query_image)
+            body.query_image_url = image_url
+            body.query_image_path = image_path
+        return body
+
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raw_body = {}
+    return SearchRequest(**(raw_body or {}))
+
+
 @router.post("")
-def search_candidates(
-    body: SearchRequest,
+async def search_candidates(
+    request: Request,
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """
     Search candidates — forwarded to query-service for GPU ranking.
     Accepts JSON body with: query (or text), top_k, offset, camera_ids, time_from, time_to.
     """
+    body = await _parse_search_request(request)
     query_text = body.query or body.text or ""
     payload: dict[str, Any] = {
         "query": query_text,
@@ -97,6 +182,8 @@ def search_candidates(
         payload["time_to"] = body.time_to
     if body.query_image_url:
         payload["query_image_url"] = body.query_image_url
+    if body.query_image_path:
+        payload["query_image_path"] = body.query_image_path
     if body.query_id:
         payload["query_id"] = body.query_id
 

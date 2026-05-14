@@ -9,8 +9,9 @@ import { GRID_BATCH_SIZE } from "@/lib/config";
 import type { VideoItem } from "@/lib/types";
 
 export function SearchResultsPanel() {
-  const { results, isLoading, error, hasSearched, hasMore, loadMore, query } = useSearch();
+  const { results, isLoading, error, hasSearched, hasMore, loadMore, query, image } = useSearch();
   const [selected, setSelected] = useState<{ queryId: string; candidateId: string } | null>(null);
+  const searchLabel = query.trim() || (image ? "ảnh đã tải lên" : "truy vấn");
 
   const handleCardClick = (item: VideoItem) => {
     if (!item.queryId) return;
@@ -27,7 +28,7 @@ export function SearchResultsPanel() {
             ? "Đang tìm kiếm..."
             : error
               ? null
-              : `${results.length} kết quả cho "${query}"`}
+              : `${results.length} kết quả cho "${searchLabel}"`}
         </p>
       </div>
 

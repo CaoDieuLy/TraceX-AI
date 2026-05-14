@@ -75,6 +75,7 @@ def get_history(
         items.append({
             "query_id": r.query_id,
             "query_text": r.query_text,
+            "query_image_url": r.query_image_url,
             "status": r.status,
             "selected_candidate_id": r.selected_candidate_id,
             "candidate_count": candidate_counts.get(r.query_id, 0),

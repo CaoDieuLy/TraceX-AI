@@ -93,34 +93,49 @@ export function HistoryView() {
           const statusLabel = STATUS_LABEL[row.status ?? ""] ?? row.status ?? "—";
           const hasCandidates = row.candidateCount > 0;
           const isEvidenceLoading = evidenceLoading === row.queryId;
+          const queryLabel = row.queryText.trim() || (row.queryImageUrl ? "Tìm kiếm bằng ảnh" : "Truy vấn trống");
           return (
             <li
               key={row.queryId}
               className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition hover:border-blue-200 hover:shadow-[0_16px_30px_rgba(37,99,235,0.1)] dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.36)] dark:hover:border-blue-500/60 dark:hover:shadow-[0_24px_44px_rgba(30,64,175,0.24)]"
             >
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                      {new Date(row.updatedAt).toLocaleString("vi-VN")}
-                    </span>
-                    <span className={[
-                      "rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                      statusBadgeClass(row.status),
-                    ].join(" ")}>
-                      {statusLabel}
-                    </span>
-                    {row.hasEvidence ? (
-                      <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-700 dark:border-violet-800/70 dark:bg-violet-950/55 dark:text-violet-300">
-                        Có video
+                <div className="flex min-w-0 flex-1 gap-3">
+                  {row.queryImageUrl ? (
+                    <a
+                      href={row.queryImageUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-0.5 h-20 w-20 shrink-0 overflow-hidden rounded-xl border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-800"
+                      title="Mở ảnh truy vấn"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={row.queryImageUrl} alt={queryLabel} className="h-full w-full object-cover" />
+                    </a>
+                  ) : null}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        {new Date(row.updatedAt).toLocaleString("vi-VN")}
                       </span>
-                    ) : null}
+                      <span className={[
+                        "rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                        statusBadgeClass(row.status),
+                      ].join(" ")}>
+                        {statusLabel}
+                      </span>
+                      {row.hasEvidence ? (
+                        <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-700 dark:border-violet-800/70 dark:bg-violet-950/55 dark:text-violet-300">
+                          Có video
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 md:text-base">{queryLabel}</p>
+                    <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                      Tìm thấy {row.candidateCount} candidate{row.candidateCount === 1 ? "" : "s"}
+                      {row.selectedCandidateId ? " · đã chọn 1" : ""}
+                    </p>
                   </div>
-                  <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 md:text-base">{row.queryText}</p>
-                  <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                    Tìm thấy {row.candidateCount} candidate{row.candidateCount === 1 ? "" : "s"}
-                    {row.selectedCandidateId ? " · đã chọn 1" : ""}
-                  </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
                   {row.hasEvidence ? (

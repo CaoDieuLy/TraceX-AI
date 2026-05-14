@@ -21,6 +21,7 @@ export {
 export { parseJsonOrThrow, readApiErrorMessage, mapBackendErrorMessage } from "./errors";
 export type {
   SearchFilters,
+  SearchVideosOptions,
   SearchPage,
   IngestResponse,
   IngestStatsResponse,

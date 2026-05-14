@@ -115,6 +115,7 @@ def admin_get_user_queries(
             {
                 "query_id": r.query_id,
                 "query_text": r.query_text,
+                "query_image_url": r.query_image_url,
                 "video_id": r.video_id,
                 "storage_path": None,
                 "created_at": r.created_at.isoformat(),

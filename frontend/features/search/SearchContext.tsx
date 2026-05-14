@@ -17,6 +17,7 @@ import { mapLocationIdsToCameraIds } from "@/lib/config";
 import { searchVideos, selectHistoryVideo } from "@/lib/api";
 
 export type SearchImageState = {
+  file: File;
   name: string;
   size: number;
   type: string;
@@ -119,8 +120,9 @@ export function SearchProvider({ children }: { children: ReactNode }) {
 
   const runSearch = useCallback(async () => {
     const trimmed = query.trim();
-    if (!trimmed) {
-      setError("Vui lòng nhập nội dung tìm kiếm.");
+    const hasImage = image !== null;
+    if (!trimmed && !hasImage) {
+      setError("Vui lòng nhập mô tả hoặc tải ảnh để tìm kiếm.");
       setResults([]);
       setHasSearched(false);
       return;
@@ -135,7 +137,9 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setCurrentQueryId(null);
     try {
       const requestLimit = Math.min(GRID_BATCH_SIZE, topK);
-      const page = await searchVideos(trimmed, requestLimit, 0, buildSearchFilters());
+      const page = await searchVideos(trimmed, requestLimit, 0, buildSearchFilters(), {
+        queryImage: image?.file ?? null,
+      });
       setResults(page.items);
       setCurrentQueryId(page.queryId);
       setGridPage(0);
@@ -148,11 +152,11 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [query, topK, validateTimeRange, buildSearchFilters]);
+  }, [query, image, topK, validateTimeRange, buildSearchFilters]);
 
   const loadMore = useCallback(async (): Promise<boolean> => {
     const trimmed = query.trim();
-    if (!trimmed || isLoading || !hasSearched || !hasMore || !validateTimeRange()) {
+    if ((!trimmed && !image && !currentQueryId) || isLoading || !hasSearched || !hasMore || !validateTimeRange()) {
       return false;
     }
 
@@ -171,8 +175,10 @@ export function SearchProvider({ children }: { children: ReactNode }) {
         requestLimit,
         results.length,
         buildSearchFilters(),
-        false,
-        currentQueryId,
+        {
+          reuseQueryId: currentQueryId,
+          queryImage: currentQueryId ? null : image?.file ?? null,
+        },
       );
       if (!page.items.length) {
         setHasMore(false);
@@ -191,7 +197,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [query, isLoading, hasSearched, hasMore, topK, results.length, currentQueryId, validateTimeRange, buildSearchFilters]);
+  }, [query, image, isLoading, hasSearched, hasMore, topK, results.length, currentQueryId, validateTimeRange, buildSearchFilters]);
 
   const clearFilters = useCallback(() => {
     setLocationIds([]);
@@ -240,7 +246,7 @@ export function SearchProvider({ children }: { children: ReactNode }) {
       return;
     }
     const trimmed = query.trim();
-    if (!trimmed) {
+    if (!trimmed && !image) {
       return;
     }
     if (!validateTimeRange()) {
@@ -250,7 +256,9 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setError(null);
     // Top-N change starts a fresh search session, so don't pass the previous qid.
     setCurrentQueryId(null);
-    void searchVideos(trimmed, Math.min(GRID_BATCH_SIZE, topK), 0, buildSearchFilters())
+    void searchVideos(trimmed, Math.min(GRID_BATCH_SIZE, topK), 0, buildSearchFilters(), {
+      queryImage: image?.file ?? null,
+    })
       .then((page) => {
         setResults(page.items);
         setCurrentQueryId(page.queryId);

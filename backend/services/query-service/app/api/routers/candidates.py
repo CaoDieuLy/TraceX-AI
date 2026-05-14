@@ -16,6 +16,7 @@ import math
 import os
 import time
 import uuid
+from pathlib import Path
 
 import numpy as np
 from collections import defaultdict
@@ -37,6 +38,7 @@ class SearchRequest(BaseModel):
     time_from: str | None = None
     time_to: str | None = None
     query_image_url: str | None = None  # URL of uploaded query image (for history display)
+    query_image_path: str | None = None  # local shared-storage path for image encoding
     user_id: int = 1  # injected by metadata-service from JWT; fallback=1 for direct calls
     # When the frontend paginates (offset > 0) it can pass back the qid returned by
     # the first call so we reuse the same query_history row instead of creating a
@@ -576,6 +578,20 @@ def _encode_query_text_siglip(text_query: str) -> list[float]:
         return []
 
 
+def _resolve_query_image_source(image_url: str) -> str:
+    raw = (image_url or "").strip()
+    if raw.startswith("file://"):
+        return raw[len("file://"):]
+    static_prefix = "/static/query-images/"
+    if raw.startswith(static_prefix):
+        filename = Path(raw).name
+        return str(Path(os.getenv("QUERY_IMAGE_ROOT", "/workspace/storage/query-images")) / filename)
+    if raw.startswith("static/query-images/"):
+        filename = Path(raw).name
+        return str(Path(os.getenv("QUERY_IMAGE_ROOT", "/workspace/storage/query-images")) / filename)
+    return raw
+
+
 def _encode_query_image_siglip(image_url: str) -> list[float]:
     """Run the SigLIP image tower on an image URL or local path. Returns
     L2-normalized list of length 1152, or [] on failure."""
@@ -595,13 +611,14 @@ def _encode_query_image_siglip(image_url: str) -> list[float]:
         from PIL import Image
         device = get_device()
 
-        if image_url.startswith(("http://", "https://")):
+        image_source = _resolve_query_image_source(image_url)
+        if image_source.startswith(("http://", "https://")):
             import urllib.request
-            with urllib.request.urlopen(image_url, timeout=10) as resp:
+            with urllib.request.urlopen(image_source, timeout=10) as resp:
                 img = Image.open(io.BytesIO(resp.read())).convert("RGB")
         else:
             # Local path (Coolify / static-served crops)
-            img = Image.open(image_url).convert("RGB")
+            img = Image.open(image_source).convert("RGB")
 
         inputs = processor(images=[img], return_tensors="pt")
         inputs = {k: v.to(device) for k, v in inputs.items() if k == "pixel_values"}
@@ -857,6 +874,11 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             qid = str(uuid.uuid4())
             reused_history = False
 
+        effective_query_image_url = body.query_image_url or (qh.query_image_url if qh else None)
+        effective_query_image_source = body.query_image_path or body.query_image_url or effective_query_image_url
+        if qh is not None and body.query_image_url and not qh.query_image_url:
+            qh.query_image_url = body.query_image_url
+
         logger.info(
             "[query:%s] start user_id=%s top_k=%d offset=%d camera_ids=%s "
             "time_from=%s time_to=%s image_query=%s reused_history=%s query=%r",
@@ -867,7 +889,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             camera_ids,
             time_from,
             time_to,
-            bool(body.query_image_url),
+            bool(effective_query_image_source),
             reused_history,
             query,
         )
@@ -890,7 +912,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 user_id=body.user_id,
                 query_text=query or "",
                 status="searching",
-                query_image_url=body.query_image_url or None,
+                query_image_url=effective_query_image_url or None,
             )
             db.add(qh)
             db.flush()  # FK constraint: query_candidates.query_id → query_history.query_id
@@ -907,10 +929,22 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         # the query — Stage B (SigLIP rerank below) compensates by re-scoring
         # ALL shortlisted items in a shared text↔image embedding space.
         prefilter_t0 = time.perf_counter()
+        prefilter_query = "" if effective_query_image_source else search_query
         shortlist, text_score_map = _local_prefilter(
-            db, search_query, camera_ids, time_from, time_to, limit=200,
+            db, prefilter_query, camera_ids, time_from, time_to, limit=200,
             parsed=parsed_query,
         )
+        if effective_query_image_source and search_query:
+            cleaned_search_query = search_query.strip().lower()
+            query_tokens = {token for token in cleaned_search_query.split() if token}
+            text_score_map = {
+                row.tracklet_id: _score_search_text(
+                    _build_search_text(row),
+                    cleaned_search_query,
+                    query_tokens,
+                )
+                for row in shortlist
+            }
         logger.info(
             "[query:%s] prefilter rows=%d elapsed=%.3fs text_score_stats=%s",
             qid,
@@ -941,8 +975,8 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         query_vec: list[float] = []
         query_vec_source: str | None = None
         encode_t0 = time.perf_counter()
-        if body.query_image_url:
-            query_vec = _encode_query_image_siglip(body.query_image_url)
+        if effective_query_image_source:
+            query_vec = _encode_query_image_siglip(effective_query_image_source)
             if query_vec:
                 query_vec_source = "image"
                 logger.info("[search] query encoded via SigLIP image tower")

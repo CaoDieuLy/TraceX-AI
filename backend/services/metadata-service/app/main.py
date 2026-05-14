@@ -128,6 +128,11 @@ _CROPS_DIR = Path("/workspace/storage/crops")
 _CROPS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static/crops", StaticFiles(directory=str(_CROPS_DIR)), name="crops")
 
+# Serve uploaded query images so history can render the original visual prompt.
+_QUERY_IMAGES_DIR = Path("/workspace/storage/query-images")
+_QUERY_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/query-images", StaticFiles(directory=str(_QUERY_IMAGES_DIR)), name="query-images")
+
 # Serve evidence clips written by trace-service (same shared volume).
 _TRACES_DIR = Path("/workspace/storage/traces")
 _TRACES_DIR.mkdir(parents=True, exist_ok=True)
