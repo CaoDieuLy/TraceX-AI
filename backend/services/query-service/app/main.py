@@ -33,6 +33,7 @@ logging.root.setLevel(getattr(logging, _root_level_name))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy import func, text
 
 from .api.routers import candidates
@@ -40,6 +41,10 @@ from shared.database import SessionLocal
 from shared.models import Camera, QueryCandidate, QueryHistory, User, Video
 
 logger = logging.getLogger(__name__)
+
+
+class TranslateToVietnameseRequest(BaseModel):
+    texts: list[str]
 
 
 @asynccontextmanager
@@ -90,6 +95,15 @@ app.include_router(candidates.router, prefix="/api/v1", tags=["candidates"])
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "service": "query-service", "version": "2.0.0"}
+
+
+@app.post("/api/v1/translate/to-vietnamese")
+def translate_to_vietnamese_batch(request: TranslateToVietnameseRequest):
+    """Translate UI display strings to Vietnamese using query-service's model."""
+    from .services.translation import translate_to_vietnamese_cached
+
+    texts = [str(text or "") for text in request.texts[:1000]]
+    return {"items": [translate_to_vietnamese_cached(text) for text in texts]}
 
 
 # ── Runtime log-level toggle ──────────────────────────────────────────────

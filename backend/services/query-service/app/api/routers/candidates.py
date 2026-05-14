@@ -53,7 +53,12 @@ from shared.models import (
 )
 from shared.tracklet_time import tracklet_time_seconds, tracklet_time_window
 from app.config import settings
-from app.services.translation import detect_vietnamese, translate_to_english, warmup as warmup_translation
+from app.services.translation import (
+    detect_vietnamese,
+    translate_to_english,
+    translate_to_vietnamese_cached,
+    warmup as warmup_translation,
+)
 from app.services.query_metadata_parse import (
     parse_query_metadata,
     ParsedQueryMetadata,
@@ -1396,7 +1401,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             rep = mc["rep"]
             candidate_id = mc["candidate_id"]
             tracklet_count = len(mc["group"])
-            description = rep.appearance_summary or ""
+            description = translate_to_vietnamese_cached(rep.appearance_summary or "")
             tracklet_summaries = []
             for member in mc["group"]:
                 window = tracklet_time_window(member)

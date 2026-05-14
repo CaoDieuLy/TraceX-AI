@@ -543,8 +543,25 @@ type CandidateTrackletApi = {
   appearance_summary_conf: number | null;
   bev_x: number | null;
   bev_y: number | null;
-  actions: Array<{ action_label: string; kinetics_label: string | null; confidence: number }>;
+  actions: Array<{
+    action_label: string;
+    action_label_vi?: string | null;
+    kinetics_label: string | null;
+    kinetics_label_vi?: string | null;
+    confidence: number;
+  }>;
   embedding: { has_embedding: boolean; dim: number | null; model: string };
+  display?: {
+    gender?: string | null;
+    age_range?: string | null;
+    hair?: string | null;
+    upper?: string | null;
+    lower?: string | null;
+    shoes?: string | null;
+    bag?: string | null;
+    hat?: string | null;
+    mask?: string | null;
+  };
 };
 
 type CandidateDetailApi = {
@@ -613,7 +630,9 @@ function mapTracklet(t: CandidateTrackletApi): CandidateTracklet {
     bevY: t.bev_y,
     actions: (t.actions ?? []).map((a) => ({
       actionLabel: a.action_label,
+      actionLabelVi: a.action_label_vi ?? null,
       kineticsLabel: a.kinetics_label,
+      kineticsLabelVi: a.kinetics_label_vi ?? null,
       confidence: a.confidence,
     })),
     embedding: {
@@ -621,6 +640,19 @@ function mapTracklet(t: CandidateTrackletApi): CandidateTracklet {
       dim: t.embedding?.dim ?? null,
       model: t.embedding?.model ?? "SigLIP2-So400m",
     },
+    display: t.display
+      ? {
+          gender: t.display.gender ?? null,
+          ageRange: t.display.age_range ?? null,
+          hair: t.display.hair ?? null,
+          upper: t.display.upper ?? null,
+          lower: t.display.lower ?? null,
+          shoes: t.display.shoes ?? null,
+          bag: t.display.bag ?? null,
+          hat: t.display.hat ?? null,
+          mask: t.display.mask ?? null,
+        }
+      : undefined,
   };
 }
 

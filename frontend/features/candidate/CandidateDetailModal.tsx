@@ -244,6 +244,16 @@ function TrackletRow({
 
   const timeLabel = fmtTimeRange(tracklet.timeStart, tracklet.timeEnd, tracklet.durationSeconds);
   const topActions = tracklet.actions.slice(0, 3);
+  const bagValue =
+    tracklet.display?.bag ??
+    (tracklet.bagPresence === "yes"
+      ? joinNonNull([tracklet.bagType, tracklet.bagDesc]) || "yes"
+      : tracklet.bagPresence);
+  const hatValue =
+    tracklet.display?.hat ??
+    (tracklet.hatPresence === "yes"
+      ? joinNonNull([tracklet.hatColor, tracklet.hatType]) || "yes"
+      : tracklet.hatPresence);
 
   return (
     <article className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row">
@@ -299,23 +309,15 @@ function TrackletRow({
         ) : null}
 
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600 sm:grid-cols-3">
-          <Attr label="Gender" value={tracklet.gender} conf={tracklet.genderConf} />
-          <Attr label="Age" value={tracklet.ageRange} conf={tracklet.ageRangeConf} />
-          <Attr label="Hair" value={joinNonNull([tracklet.hairStyle, tracklet.hairColor])} conf={tracklet.hairStyleConf} />
-          <Attr label="Upper" value={joinNonNull([tracklet.upperColor, tracklet.upperType])} conf={tracklet.upperConf} />
-          <Attr label="Lower" value={joinNonNull([tracklet.lowerColor, tracklet.lowerType])} conf={tracklet.lowerConf} />
-          <Attr label="Shoes" value={joinNonNull([tracklet.shoesColor, tracklet.shoesType])} conf={tracklet.shoesConf} />
-          <Attr
-            label="Bag"
-            value={tracklet.bagPresence === "yes" ? joinNonNull([tracklet.bagType, tracklet.bagDesc]) || "yes" : tracklet.bagPresence}
-            conf={tracklet.bagConf}
-          />
-          <Attr
-            label="Hat"
-            value={tracklet.hatPresence === "yes" ? joinNonNull([tracklet.hatColor, tracklet.hatType]) || "yes" : tracklet.hatPresence}
-            conf={tracklet.hatConf}
-          />
-          <Attr label="Mask" value={tracklet.maskPresence} conf={tracklet.maskConf} />
+          <Attr label="Giới tính" value={tracklet.display?.gender ?? tracklet.gender} conf={tracklet.genderConf} />
+          <Attr label="Tuổi" value={tracklet.display?.ageRange ?? tracklet.ageRange} conf={tracklet.ageRangeConf} />
+          <Attr label="Tóc" value={tracklet.display?.hair ?? joinNonNull([tracklet.hairStyle, tracklet.hairColor])} conf={tracklet.hairStyleConf} />
+          <Attr label="Áo" value={tracklet.display?.upper ?? joinNonNull([tracklet.upperColor, tracklet.upperType])} conf={tracklet.upperConf} />
+          <Attr label="Quần/váy" value={tracklet.display?.lower ?? joinNonNull([tracklet.lowerColor, tracklet.lowerType])} conf={tracklet.lowerConf} />
+          <Attr label="Giày" value={tracklet.display?.shoes ?? joinNonNull([tracklet.shoesColor, tracklet.shoesType])} conf={tracklet.shoesConf} />
+          <Attr label="Túi" value={bagValue} conf={tracklet.bagConf} />
+          <Attr label="Mũ" value={hatValue} conf={tracklet.hatConf} />
+          <Attr label="Khẩu trang" value={tracklet.display?.mask ?? tracklet.maskPresence} conf={tracklet.maskConf} />
           <Attr
             label="BEV"
             value={
@@ -329,14 +331,14 @@ function TrackletRow({
 
         {topActions.length ? (
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Actions</span>
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Hành động</span>
             {topActions.map((a) => (
               <span
                 key={`${tracklet.trackletId}-${a.actionLabel}`}
                 className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700"
-                title={a.kineticsLabel ?? ""}
+                title={a.kineticsLabelVi ?? a.kineticsLabel ?? ""}
               >
-                {a.actionLabel} · {(a.confidence * 100).toFixed(0)}%
+                {a.actionLabelVi ?? a.actionLabel} · {(a.confidence * 100).toFixed(0)}%
               </span>
             ))}
           </div>

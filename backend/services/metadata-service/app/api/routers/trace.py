@@ -15,6 +15,7 @@ import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request
 
 from ...core.dependencies import get_current_user
+from ...services.translation_display import localize_candidate_detail_payload
 from shared.models import User
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,8 @@ def candidate_detail(
     current_user: User = Depends(get_current_user),
 ) -> Any:
     """Return full candidate detail (all tracklets + appearance + actions + embedding meta)."""
-    return _forward("POST", "/trace/candidate-detail", json=body, timeout=60.0)
+    payload = _forward("POST", "/trace/candidate-detail", json=body, timeout=60.0)
+    return localize_candidate_detail_payload(payload)
 
 
 @router.post("/select")

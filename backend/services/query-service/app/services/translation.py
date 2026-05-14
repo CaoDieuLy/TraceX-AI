@@ -39,6 +39,65 @@ _seamless_model = None
 _seamless_processor = None
 _seamless_device = None
 
+_COMMON_VI_TRANSLATIONS = {
+    "unknown": "không rõ",
+    "none": "không có",
+    "null": "không rõ",
+    "n/a": "không rõ",
+    "yes": "có",
+    "no": "không",
+    "person": "người",
+    "man": "nam",
+    "male": "nam",
+    "woman": "nữ",
+    "female": "nữ",
+    "boy": "nam",
+    "girl": "nữ",
+    "white": "trắng",
+    "black": "đen",
+    "red": "đỏ",
+    "blue": "xanh dương",
+    "green": "xanh lá",
+    "yellow": "vàng",
+    "gray": "xám",
+    "grey": "xám",
+    "brown": "nâu",
+    "orange": "cam",
+    "purple": "tím",
+    "pink": "hồng",
+    "beige": "be",
+    "silver": "bạc",
+    "gold": "vàng",
+    "dress": "váy",
+    "shirt": "áo",
+    "t-shirt": "áo thun",
+    "jacket": "áo khoác",
+    "coat": "áo khoác",
+    "pants": "quần dài",
+    "trousers": "quần dài",
+    "shorts": "quần ngắn",
+    "skirt": "váy",
+    "shoes": "giày",
+    "sneakers": "giày thể thao",
+    "sandals": "dép",
+    "boots": "ủng",
+    "backpack": "ba lô",
+    "handbag": "túi xách",
+    "suitcase": "vali",
+    "bag": "túi",
+    "cap": "mũ lưỡi trai",
+    "hat": "mũ",
+    "helmet": "mũ bảo hiểm",
+    "hood": "mũ áo",
+    "mask": "khẩu trang",
+    "long": "dài",
+    "short": "ngắn",
+    "standing": "đứng",
+    "walking": "đi bộ",
+    "running": "chạy",
+    "sitting": "ngồi",
+}
+
 
 def _get_model_cache_dir() -> Path:
     cache = Path(os.getenv("TRANSLATION_MODEL_PATH", "/workspace/models/translation"))
@@ -160,6 +219,11 @@ def translate_to_vietnamese(text: Optional[str]) -> str:
     """Translate English text → Vietnamese using SeamlessM4T v2."""
     if not text:
         return text or ""
+    normalized = " ".join(str(text).strip().lower().replace("·", " ").split())
+    if normalized in _COMMON_VI_TRANSLATIONS:
+        return _COMMON_VI_TRANSLATIONS[normalized]
+    if detect_vietnamese(text):
+        return text
     model, processor, device = _load_seamless()
     if model is None:
         return text
@@ -177,3 +241,9 @@ def translate_to_vietnamese(text: Optional[str]) -> str:
     except Exception as exc:
         logger.warning("translate_to_vietnamese failed: %s", exc)
         return text
+
+
+@lru_cache(maxsize=4096)
+def translate_to_vietnamese_cached(text: str) -> str:
+    """Cached English → Vietnamese translation for UI display strings."""
+    return translate_to_vietnamese(text)

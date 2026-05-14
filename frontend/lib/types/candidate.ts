@@ -1,6 +1,8 @@
 export type CandidateTrackletAction = {
   actionLabel: string;
+  actionLabelVi?: string | null;
   kineticsLabel: string | null;
+  kineticsLabelVi?: string | null;
   confidence: number;
 };
 
@@ -8,6 +10,18 @@ export type CandidateTrackletEmbeddingInfo = {
   hasEmbedding: boolean;
   dim: number | null;
   model: string;
+};
+
+export type CandidateTrackletDisplay = {
+  gender: string | null;
+  ageRange: string | null;
+  hair: string | null;
+  upper: string | null;
+  lower: string | null;
+  shoes: string | null;
+  bag: string | null;
+  hat: string | null;
+  mask: string | null;
 };
 
 export type CandidateTracklet = {
@@ -75,6 +89,7 @@ export type CandidateTracklet = {
 
   actions: CandidateTrackletAction[];
   embedding: CandidateTrackletEmbeddingInfo;
+  display?: CandidateTrackletDisplay;
 };
 
 export type CandidateDetail = {

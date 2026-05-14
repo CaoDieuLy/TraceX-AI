@@ -18,6 +18,7 @@ from shared.models import (
 )
 from shared.tracklet_time import tracklet_time_window
 from sqlalchemy.orm import contains_eager
+from ...services.translation_display import translate_texts_to_vietnamese
 
 router = APIRouter(tags=["history"])
 
@@ -180,6 +181,10 @@ def get_history_candidates(
                 "time_end": window[1].isoformat() if window else None,
             })
 
+    description_map = translate_texts_to_vietnamese([
+        c.appearance_summary or "" for c in candidates
+    ])
+
     results = []
     for c in candidates:
         thumbnail_url = c.preview_url or ""
@@ -189,7 +194,8 @@ def get_history_candidates(
                 thumbnail_url = f"/candidates/{tid}/preview"
         summaries = tracklet_summaries.get(c.candidate_id, [])
         tracklet_count = len(summaries)
-        description = c.appearance_summary or ""
+        raw_description = c.appearance_summary or ""
+        description = description_map.get(raw_description, raw_description)
         results.append({
             "id": c.candidate_id,
             "thumbnail_url": thumbnail_url,
