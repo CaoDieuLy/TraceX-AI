@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import { buildTrace, getCandidateDetail, resolveMediaUrl, selectCandidate } from "@/lib/api";
 import type { CandidateDetail, CandidateTracklet } from "@/lib/types";
@@ -15,6 +15,7 @@ type Props = {
 
 export function CandidateDetailModal({ open, queryId, candidateId, onClose }: Props) {
   const router = useRouter();
+  const pathname = usePathname();
   const [detail, setDetail] = useState<CandidateDetail | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +72,12 @@ export function CandidateDetailModal({ open, queryId, candidateId, onClose }: Pr
       }
       const result = await buildTrace(queryId, candidateId, { mergeVideos: false });
       onClose();
-      router.push(`/trace/${result.evidenceId}?query=${encodeURIComponent(queryId)}&candidate=${encodeURIComponent(candidateId)}`);
+      const candidatesPath = `/history/${encodeURIComponent(queryId)}/candidates`;
+      const tracePath = `/trace/${result.evidenceId}?query=${encodeURIComponent(queryId)}&candidate=${encodeURIComponent(candidateId)}`;
+      if (typeof window !== "undefined" && pathname !== candidatesPath) {
+        window.history.pushState(null, "", candidatesPath);
+      }
+      router.push(tracePath);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Không thể tạo trace.");
     } finally {

@@ -111,19 +111,23 @@ def get_history_candidates(
         .limit(limit)
     ).all()
 
-    # Pick one representative tracklet per candidate for the thumbnail URL.
+    # Pick one representative tracklet per candidate for the thumbnail URL and
+    # keep the tracklet count so history cards match fresh search result cards.
     rep_tracklets: dict[str, str] = {}
+    tracklet_counts: dict[str, int] = {}
     if candidates:
         cand_ids = [c.candidate_id for c in candidates]
-        for cand_id, tracklet_id in session.execute(
+        for cand_id, tracklet_id, tracklet_count in session.execute(
             select(
                 QueryCandidateTracklet.candidate_id,
                 func.min(QueryCandidateTracklet.tracklet_id),
+                func.count(QueryCandidateTracklet.tracklet_id),
             )
             .where(QueryCandidateTracklet.candidate_id.in_(cand_ids))
             .group_by(QueryCandidateTracklet.candidate_id)
         ).all():
             rep_tracklets[cand_id] = tracklet_id
+            tracklet_counts[cand_id] = int(tracklet_count)
 
     results = []
     for c in candidates:
@@ -132,14 +136,19 @@ def get_history_candidates(
             tid = rep_tracklets.get(c.candidate_id)
             if tid:
                 thumbnail_url = f"/candidates/{tid}/preview"
+        tracklet_count = tracklet_counts.get(c.candidate_id, 0)
+        description = c.appearance_summary or ""
+        if tracklet_count > 1:
+            description = f"[{tracklet_count} tracklets] {description}".strip()
         results.append({
             "id": c.candidate_id,
             "thumbnail_url": thumbnail_url,
-            "description": c.appearance_summary or "",
+            "description": description,
             "query_id": query_id,
             "is_selected": c.is_selected,
             "rank_position": c.rank_position,
             "fusion_score": c.fusion_score,
+            "tracklet_count": tracklet_count,
         })
 
     return {

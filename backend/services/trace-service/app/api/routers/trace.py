@@ -241,24 +241,33 @@ def get_trace_status(
 ) -> TraceStatusResponse:
     """Get trace status by evidence ID.
 
-    Computes progress live from `evidence_tracklets.video_clip_url`: empty
-    string ⇒ pending, non-empty ⇒ rendered. Status flips from `pending` to
-    `rendering` once the first clip lands, then `completed` once they all
-    have URLs. As a self-healing measure, a still-pending evidence row is
-    re-enqueued for rendering (the worker dedupes in-flight IDs so this is
-    cheap).
+    Computes progress live from `evidence_tracklets.video_clip_url` and the
+    actual `/static/traces/...` file on disk. A non-empty URL is still pending
+    if its MP4 has not been produced yet. As a self-healing measure, pending
+    evidence is re-enqueued for rendering (the worker dedupes in-flight IDs).
     """
     evidence = session.get(EvidenceVideo, evidence_id)
     if not evidence:
         raise HTTPException(status_code=404, detail="Evidence not found")
 
+    service = _build_trace_service(session)
     rows = (
-        session.query(EvidenceTracklet.video_clip_url)
+        session.query(EvidenceTracklet)
         .filter(EvidenceTracklet.evidence_video_id == evidence_id)
         .all()
     )
     total = len(rows)
-    rendered = sum(1 for (url,) in rows if url)
+    rendered = 0
+    cleared_stale_url = False
+    for row in rows:
+        if service.is_clip_url_ready(row.video_clip_url):
+            rendered += 1
+        elif row.video_clip_url:
+            row.video_clip_url = ""
+            cleared_stale_url = True
+    if cleared_stale_url:
+        session.commit()
+
     if total == 0 or rendered == total:
         status_str = "completed" if total > 0 else "pending"
     elif rendered == 0:
@@ -287,6 +296,7 @@ def get_trace_status(
 def get_trace_timeline(
     evidence_id: int,
     session: SessionDep,
+    background_tasks: BackgroundTasks,
 ) -> TraceTimelineResponse:
     """Get trace timeline with camera path."""
     service = _build_trace_service(session)
@@ -296,6 +306,11 @@ def get_trace_timeline(
         raise HTTPException(status_code=404, detail="Evidence not found")
 
     segments = service.get_trace_segments(evidence_id)
+    if session.dirty:
+        session.commit()
+    if any(not seg.get("video_clip_url") for seg in segments):
+        from ...services.render_worker import render_evidence_clips
+        background_tasks.add_task(render_evidence_clips, evidence.id)
 
     # Build camera path
     camera_path = [seg["camera_id"] for seg in segments if seg["camera_id"]]

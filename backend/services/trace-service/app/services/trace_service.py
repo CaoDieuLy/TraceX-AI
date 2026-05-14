@@ -5,7 +5,9 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from sqlalchemy import and_, func, select
@@ -37,6 +39,34 @@ def _neighbor_cameras(primary_cam: str, radius: int = _CAM_NEIGHBOR_RADIUS) -> l
 
 logger = logging.getLogger(__name__)
 
+_TRACE_STATIC_PREFIX = "/static/traces/"
+
+
+def _trace_clip_path_from_url(url: str | None) -> Path | None:
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    path = urlparse(raw).path if "://" in raw else raw.split("?", 1)[0]
+    if not path.startswith(_TRACE_STATIC_PREFIX):
+        return None
+    relative = unquote(path[len(_TRACE_STATIC_PREFIX):]).lstrip("/")
+    if not relative:
+        return None
+    rel_path = Path(relative)
+    if ".." in rel_path.parts:
+        return None
+    return Path(os.getenv("TRACES_DIR", "/workspace/storage/traces")) / rel_path
+
+
+def _trace_clip_url_ready(url: str | None) -> bool:
+    path = _trace_clip_path_from_url(url)
+    if path is None:
+        return False
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
 from ..config import settings
 from ..core.models import (
     Camera,
@@ -55,6 +85,10 @@ class TraceService:
 
     def __init__(self, session: Session):
         self.session = session
+
+    @staticmethod
+    def is_clip_url_ready(url: str | None) -> bool:
+        return _trace_clip_url_ready(url)
 
     def deselect_other_candidates(self, query_id: UUID) -> None:
         """Deselect all other candidates for a query."""
@@ -281,9 +315,6 @@ class TraceService:
                             tracklet.tracklet_id, exc,
                         )
 
-            if clip_url is None and render_clips:
-                clip_url = self._get_video_clip_url(tracklet)
-
             segment = {
                 "segment_order": idx + 1,
                 "tracklet_id": tracklet.tracklet_id,
@@ -441,6 +472,7 @@ class TraceService:
             if time_start and time_end:
                 duration = (time_end - time_start).total_seconds()
 
+            clip_ready = self.is_clip_url_ready(et.video_clip_url)
             segments.append({
                 "segment_order": et.segment_order,
                 "tracklet_id": et.tracklet_id,
@@ -449,9 +481,15 @@ class TraceService:
                 "time_end": time_end,
                 "duration_seconds": duration,
                 "thumbnail_url": et.thumbnail_url,
-                "video_clip_url": et.video_clip_url or (self._get_video_clip_url(tracklet) if tracklet else None),
+                "video_clip_url": et.video_clip_url if clip_ready else None,
                 "confidence": et.confidence,
             })
+            if et.video_clip_url and not clip_ready:
+                logger.warning(
+                    "[trace] clearing non-ready clip url for evidence_tracklet=%s url=%s",
+                    et.id, et.video_clip_url,
+                )
+                et.video_clip_url = ""
 
         return segments
 
@@ -562,27 +600,6 @@ class TraceService:
                 return str(local)
 
         return None
-
-    def _get_video_clip_url(self, tracklet: Tracklet | None) -> str | None:
-        """Get video clip URL for a tracklet.
-
-        Args:
-            tracklet: Tracklet instance
-
-        Returns:
-            Video clip URL or None
-        """
-        if not tracklet or not tracklet.video:
-            return None
-
-        video = tracklet.video
-        if not video.storage_path:
-            return None
-
-        # Construct clip URL based on tracklet timing
-        base_url = settings.storage_base_url.rstrip("/")
-        clip_url = f"{base_url}/videos/{video.id}/clips/{tracklet.id}.mp4"
-        return clip_url
 
     def _generate_merged_video_url(self, query_id: UUID | str, candidate_id: UUID | str) -> str:
         """Generate URL for merged trace video.
