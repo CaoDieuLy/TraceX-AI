@@ -77,7 +77,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const view = searchParams.get("view");
-  const { resetSearch } = useSearch() ;
+  const { resetSearch } = useSearch();
   const [sessionUser, setSessionUser] = useState<AuthUser | null>(null);
   const [darkMode, setDarkMode] = useState(false);
   const [collapsed, setCollapsed] = useState(false);

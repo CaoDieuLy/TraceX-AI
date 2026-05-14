@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -207,7 +208,12 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     clearFilters();
   }, [clearFilters]);
 
+  const isFirstTopKRender = useRef(true);
   useEffect(() => {
+    if (isFirstTopKRender.current) {
+      isFirstTopKRender.current = false;
+      return;
+    }
     if (!hasSearched) {
       return;
     }
@@ -238,9 +244,10 @@ export function SearchProvider({ children }: { children: ReactNode }) {
       .finally(() => {
         setIsLoading(false);
       });
-    // Only refetch for Top n change after user already searched.
+    // Only refetch on Top-N change; intentionally exclude hasSearched/query from deps
+    // so clicking "Gửi" doesn't double-fire (runSearch already handles that path).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topK, hasSearched]);
+  }, [topK]);
 
 
   const value = useMemo(
