@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 
+import { cameraIdToLocationLabel, cameraIdsToLocationLabels } from "@/lib/config";
 import type { TrackletSummary, VideoItem } from "@/lib/types";
 
 type VideoCardProps = {
@@ -23,16 +24,8 @@ function formatTimeRange(start: string | null, end: string | null): string | nul
   return a ?? b ?? null;
 }
 
-function uniqueCameras(tracklets: TrackletSummary[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const t of tracklets) {
-    if (t.cameraId && !seen.has(t.cameraId)) {
-      seen.add(t.cameraId);
-      result.push(t.cameraId);
-    }
-  }
-  return result;
+function uniqueLocations(tracklets: TrackletSummary[]): string[] {
+  return cameraIdsToLocationLabels(tracklets.map((t) => t.cameraId));
 }
 
 function overallTimeRange(tracklets: TrackletSummary[]): string | null {
@@ -68,22 +61,22 @@ export function VideoCard({ video, onClick, rank }: VideoCardProps) {
 
   const tracklets = video.tracklets ?? [];
   const trackletCount = video.trackletCount ?? tracklets.length;
-  const cameras = uniqueCameras(tracklets);
+  const locations = uniqueLocations(tracklets);
   const isMulti = trackletCount > 1;
 
-  let cameraLine: string | null = null;
+  let locationLine: string | null = null;
   let timeLine: string | null = null;
   let countLine: string | null = null;
   if (tracklets.length > 0) {
     if (isMulti) {
       countLine = `${trackletCount} tracklets`;
-      cameraLine = cameras.length ? `Cam: ${cameras.join(", ")}` : null;
+      locationLine = locations.length ? `Vị trí: ${locations.join(", ")}` : null;
       timeLine = overallTimeRange(tracklets);
     } else {
       const t = tracklets[0];
-      const cam = t.cameraId ? `Cam ${t.cameraId}` : null;
+      const loc = cameraIdToLocationLabel(t.cameraId);
       const time = formatTimeRange(t.timeStart, t.timeEnd);
-      cameraLine = [cam, time].filter(Boolean).join(" · ") || null;
+      locationLine = [loc, time].filter(Boolean).join(" · ") || null;
     }
   }
 
@@ -109,8 +102,8 @@ export function VideoCard({ video, onClick, rank }: VideoCardProps) {
         {countLine ? (
           <p className="truncate text-xs font-semibold text-blue-700 dark:text-blue-300">{countLine}</p>
         ) : null}
-        {cameraLine ? (
-          <p className="truncate text-xs text-ink-secondary dark:text-slate-400">{cameraLine}</p>
+        {locationLine ? (
+          <p className="truncate text-xs text-ink-secondary dark:text-slate-400">{locationLine}</p>
         ) : null}
         {timeLine ? (
           <p className="truncate text-xs text-ink-secondary dark:text-slate-400">{timeLine}</p>

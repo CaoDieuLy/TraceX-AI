@@ -37,3 +37,31 @@ export function summarizeSelectedLocations(locationIds: string[]): string {
   if (selectedOptions.length === 1) return selectedOptions[0].label;
   return `${selectedOptions[0].label} +${selectedOptions.length - 1}`;
 }
+
+const CAMERA_TO_LOCATION_LABEL: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  for (const option of LOCATION_OPTIONS) {
+    for (const cam of option.cameraIds) {
+      if (!(cam in map)) map[cam] = option.label;
+    }
+  }
+  return map;
+})();
+
+export function cameraIdToLocationLabel(cameraId: string | null | undefined): string | null {
+  if (!cameraId) return null;
+  return CAMERA_TO_LOCATION_LABEL[cameraId] ?? cameraId;
+}
+
+export function cameraIdsToLocationLabels(cameraIds: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const cam of cameraIds) {
+    const label = cameraIdToLocationLabel(cam);
+    if (label && !seen.has(label)) {
+      seen.add(label);
+      result.push(label);
+    }
+  }
+  return result;
+}
