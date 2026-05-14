@@ -63,6 +63,12 @@ class FrameDetection:
     confidence: float
     laplacian_score: float
     crop_bgr: Optional[np.ndarray] = None
+    # Marker for downstream code (embedding pool, ReID rep selection) to optionally
+    # down-weight this observation. NOT yet consumed — currently set by the
+    # detection stage but no consumer reads it. Wire in carefully: in hospital
+    # CCTV, edge-clipped/non-upright crops are common and tracker must still keep
+    # the ID through them, so any consumer should down-weight rather than reject.
+    is_low_quality_crop: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,7 @@ class TrackletObservation:
     confidence: float
     laplacian_score: float
     crop_bgr: Optional[np.ndarray] = None
+    is_low_quality_crop: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,13 +123,66 @@ def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-def _crop_from_bbox(image: np.ndarray, bbox: tuple) -> Optional[np.ndarray]:
+def _crop_from_bbox(image: np.ndarray, bbox: tuple, *, padding_ratio: float = 0.08) -> Optional[np.ndarray]:
+    """Crop image at bbox, optionally expanded by padding_ratio on each side
+    (clamped to image bounds). Padding gives ReID models a bit of context
+    (shoulders, hair outline) which improves embedding quality. Set
+    padding_ratio=0.0 to disable.
+    """
     h, w = image.shape[:2]
-    x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(w, bbox[2]), min(h, bbox[3])
+    bw = bbox[2] - bbox[0]
+    bh = bbox[3] - bbox[1]
+    pad_x = int(round(bw * padding_ratio))
+    pad_y = int(round(bh * padding_ratio))
+    x1 = max(0, bbox[0] - pad_x)
+    y1 = max(0, bbox[1] - pad_y)
+    x2 = min(w, bbox[2] + pad_x)
+    y2 = min(h, bbox[3] + pad_y)
     if x2 <= x1 or y2 <= y1:
         return None
     crop = image[y1:y2, x1:x2]
     return crop.copy() if crop.size > 0 else None
+
+
+def _crop_laplacian_variance(crop_bgr: Optional[np.ndarray]) -> float:
+    """Variance-of-Laplacian on grayscale crop. Higher = sharper.
+    Returns 0.0 for missing / degenerate crops so the quality scorer rejects them.
+    """
+    if crop_bgr is None or crop_bgr.size == 0:
+        return 0.0
+    if crop_bgr.shape[0] < 4 or crop_bgr.shape[1] < 4:
+        return 0.0
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    return float(round(cv2.Laplacian(gray, cv2.CV_64F).var(), 6))
+
+
+def _is_low_quality_crop(
+    bbox: tuple,
+    frame_h: int,
+    frame_w: int,
+    *,
+    # Balanced for AICity-style demo (mostly walking persons, aspect ~2.0-3.0)
+    # while leaving headroom for slight pose variation and bending. Flag only
+    # when aspect drops below 0.9 (clearly non-upright → likely half body) or
+    # exceeds 4.5 (thin sliver). Hospital CCTV with many seated patients would
+    # need a lower min_aspect (~0.7) — make per-camera.
+    min_aspect: float = 0.9,
+    max_aspect: float = 4.5,
+    edge_margin_px: int = 5,
+) -> bool:
+    """True when the bbox is unreliable for ReID embedding even though it's
+    still useful for tracker continuity. Triggers on extreme aspect ratios
+    (truly degenerate boxes) and frame-edge clipping (person cropped by FOV)."""
+    bw = max(bbox[2] - bbox[0], 1)
+    bh = max(bbox[3] - bbox[1], 1)
+    aspect = bh / bw
+    if aspect < min_aspect or aspect > max_aspect:
+        return True
+    if bbox[0] < edge_margin_px or bbox[1] < edge_margin_px:
+        return True
+    if bbox[2] > frame_w - edge_margin_px or bbox[3] > frame_h - edge_margin_px:
+        return True
+    return False
 
 
 def _head_bbox(bbox: tuple, head_ratio: float = 0.35, shrink_x: float = 0.08) -> tuple:
@@ -410,6 +470,7 @@ class BodyPartAdaptiveTracker:
             confidence=det.confidence,
             laplacian_score=det.laplacian_score,
             crop_bgr=det.crop_bgr,
+            is_low_quality_crop=det.is_low_quality_crop,
         )
 
     def track(

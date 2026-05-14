@@ -281,8 +281,12 @@ _NMS_IOU_THRESH = _get_env_float("PERSON_NMS_IOU_THRESH", 0.55)
 def _sanitize_dets_inplace(
     dets_per_frame: list[list[dict]],
     frames: list[np.ndarray],
-    min_w: int = 6,
-    min_h: int = 12,
+    # Balanced defaults for AICity-style demo data. min_w=14 still rejects
+    # detector-noise slivers while keeping narrow side-view profiles; min_h=18
+    # rejects truly tiny boxes that ReID can't handle. Should be moved to a
+    # per-camera config once we have hospital-scene calibration data.
+    min_w: int = 14,
+    min_h: int = 18,
 ) -> list[list[dict]]:
     """Clip bboxes into frame bounds, drop bboxes smaller than min_w/min_h, then
     apply class-agnostic NMS at PERSON_NMS_IOU_THRESH (default 0.55) to suppress
@@ -2109,6 +2113,7 @@ def _process_video_sync(
     from .tracking_pipeline import (
         VideoFrameSampler, BodyPartAdaptiveTracker, TrackletQualityScorer,
         TrackletFragmentMerger, FrameDetection, _crop_from_bbox,
+        _crop_laplacian_variance, _is_low_quality_crop,
     )
     start = time.time()
     camera_id = camera_id or "Camera_0000"
@@ -2138,22 +2143,39 @@ def _process_video_sync(
 
     detections_by_frame: dict[int, list[FrameDetection]] = {}
     total_raw = 0
+    total_low_quality = 0
     for sf, raw_dets in zip(sampled_frames, all_batch_dets):
+        frame_h, frame_w = sf.image.shape[:2]
         frame_dets: list[FrameDetection] = []
         for d in raw_dets:
             bbox = tuple(int(x) for x in d["bbox"])
             crop = _tcrop(sf.image, bbox)
+            # B1: laplacian on the person crop, not the full frame — the full-frame
+            # value was dominated by background detail (lan can, foliage) and did not
+            # reflect whether the person itself was sharp enough for ReID.
+            crop_lap = _crop_laplacian_variance(crop)
+            # B3: flag half-body / edge-clipped crops. The tracker still receives them
+            # (so it can keep an ID through occlusion), but the embedding pool should
+            # drop them when building the appearance vector.
+            low_q = _is_low_quality_crop(bbox, frame_h, frame_w)
+            if low_q:
+                total_low_quality += 1
             frame_dets.append(FrameDetection(
                 frame_index=sf.frame_index,
                 timestamp_second=sf.timestamp_second,
                 bbox=bbox,
                 confidence=float(d["score"]),
-                laplacian_score=sf.laplacian_score,
+                laplacian_score=crop_lap,
                 crop_bgr=crop,
+                is_low_quality_crop=low_q,
             ))
         if frame_dets:
             detections_by_frame[sf.frame_index] = frame_dets
             total_raw += len(frame_dets)
+    if total_raw:
+        logger.warning("[pipeline] %s: %d/%d detections flagged low-quality crop (%.1f%%)",
+                       video_id, total_low_quality, total_raw,
+                       100.0 * total_low_quality / total_raw)
 
     logger.warning("[pipeline] %s: %d detections across %d frames", video_id, total_raw, len(detections_by_frame))
 
@@ -2184,7 +2206,13 @@ def _process_video_sync(
         min_frames=2,
         min_density=0.03,
         min_duration_s=0.25,
-        min_laplacian=5.0,
+        # Laplacian is now computed on the person crop (see _detect_persons step
+        # above). 30.0 is a balanced floor for AICity-style demo footage: still
+        # well below the camera_0002 GT 1st percentile (~110), so legitimate
+        # crops are not rejected, but enough to reject genuinely broken/black
+        # crops. Hospital CCTV (IR/night/compression) will likely need a lower
+        # per-camera value.
+        min_laplacian=30.0,
     )
     quality_results = {t.track_id: scorer.score(t) for t in local_tracklets}
     accepted = [t for t in local_tracklets if quality_results[t.track_id].accepted]
