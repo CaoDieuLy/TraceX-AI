@@ -274,9 +274,20 @@ export function HomeView() {
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.36)]">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
-            {isLastPage ? "Hết kết quả" : `Top ${startRank}–${endRank}`}
-          </p>
+          <div className="flex items-center gap-3">
+            {gridPage > 0 ? (
+              <button
+                type="button"
+                onClick={() => setGridPage(gridPage - 1)}
+                className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 shadow-[0_8px_20px_rgba(15,23,42,0.08)] transition duration-200 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-700"
+              >
+                Trước
+              </button>
+            ) : null}
+            <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
+              {isLastPage ? "Hết kết quả" : `Top ${startRank}–${endRank}`}
+            </p>
+          </div>
           <button
             type="button"
             disabled={isLastPage || isLoading}
