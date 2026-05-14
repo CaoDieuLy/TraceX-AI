@@ -270,7 +270,7 @@ export function HomeView() {
           Không tìm thấy kết quả phù hợp.
         </p>
       ) : null}
-      <VideoGrid items={pageItems} onItemClick={handleCandidateClick} />
+      <VideoGrid items={pageItems} startRank={startRank} onItemClick={handleCandidateClick} />
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.36)]">
         <div className="flex flex-wrap items-center justify-between gap-4">

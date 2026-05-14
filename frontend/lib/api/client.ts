@@ -221,7 +221,7 @@ export async function searchVideos(
   const queryId = payload.query_id ?? null;
   const items = payload.results.map((item) => ({
     id: item.id,
-    title: `Candidate ${item.id}`,
+    title: "",
     description: item.description,
     thumbnailUrl: isLikelyImageUrl(item.thumbnail_url)
       ? resolveMediaUrl(item.thumbnail_url, apiBaseUrl)
@@ -351,12 +351,13 @@ export async function getHistoryCandidates(
   );
   const items: VideoItem[] = payload.results.map((row) => ({
     id: row.id,
-    title: `Candidate ${row.id}`,
+    title: "",
     description: row.description,
     thumbnailUrl: isLikelyImageUrl(row.thumbnail_url)
       ? resolveMediaUrl(row.thumbnail_url, apiBaseUrl)
       : placeholderThumbnail(row.id),
     queryId: row.query_id,
+    rank: row.rank_position,
   }));
   return {
     queryId: payload.query_id,
