@@ -114,7 +114,7 @@ export function HistoryCandidatesView({ queryId }: Props) {
                 disabled={loadingMore}
                 className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-bold text-white shadow-[0_12px_28px_rgba(15,23,42,0.22)] transition duration-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-blue-600 dark:shadow-[0_16px_32px_rgba(37,99,235,0.28)] dark:hover:bg-blue-500"
               >
-                {loadingMore ? "Đang tải..." : "Tải thêm 10 candidate"}
+                {loadingMore ? "Đang tải..." : `Tải thêm ${GRID_BATCH_SIZE} candidate`}
               </button>
             </div>
           ) : null}

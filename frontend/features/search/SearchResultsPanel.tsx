@@ -5,6 +5,7 @@ import { useState } from "react";
 import { VideoCard } from "@/components/video/VideoCard";
 import { CandidateDetailModal } from "@/features/candidate/CandidateDetailModal";
 import { useSearch } from "@/features/search/SearchContext";
+import { GRID_BATCH_SIZE } from "@/lib/config";
 import type { VideoItem } from "@/lib/types";
 
 export function SearchResultsPanel() {
@@ -36,7 +37,7 @@ export function SearchResultsPanel() {
         </div>
       ) : isLoading && results.length === 0 ? (
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {Array.from({ length: 10 }).map((_, i) => (
+          {Array.from({ length: GRID_BATCH_SIZE }).map((_, i) => (
             <div
               key={i}
               className="aspect-video animate-pulse rounded-2xl bg-slate-200"
