@@ -195,6 +195,8 @@ export function SearchProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const resetSearch = useCallback(() => {
+    setQuery("");
+    setImageState(null);
     setResults([]);
     setHasSearched(false);
     setError(null);

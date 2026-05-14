@@ -5,6 +5,7 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
 
 import { loadSessionUser, type AuthUser } from "@/lib/auth";
+import { useSearch } from "@/features/search/SearchContext";
 
 function NavIcon({ active, children }: { active: boolean; children: ReactNode }) {
   return (
@@ -60,7 +61,7 @@ function NavItem({ active, collapsed, href, label, onClick, children }: NavItemP
   );
   if (href) {
     return (
-      <Link href={href} className={navItemClass(active, collapsed)} aria-label={label}>
+      <Link href={href} onClick={onClick} className={navItemClass(active, collapsed)} aria-label={label}>
         {content}
       </Link>
     );
@@ -76,6 +77,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const view = searchParams.get("view");
+  const { resetSearch } = useSearch() ;
   const [sessionUser, setSessionUser] = useState<AuthUser | null>(null);
   const [darkMode, setDarkMode] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -165,7 +167,7 @@ export function Sidebar() {
         <nav className="flex flex-1 flex-col gap-2">
           {canAccessHome ? (
             <>
-              <NavItem href="/home" label="Tạo mới" active={isNew} collapsed={collapsed}>
+              <NavItem href="/home" onClick={resetSearch} label="Tạo mới" active={isNew} collapsed={collapsed}>
                 <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
                   <path d="M5 12h14M12 5v14" />
                 </svg>
@@ -238,7 +240,7 @@ export function Sidebar() {
       <nav className="fixed inset-x-3 bottom-3 z-50 flex items-center justify-around rounded-3xl border border-slate-200 bg-white/95 p-2 shadow-[0_18px_40px_rgba(15,23,42,0.18)] backdrop-blur transition-colors dark:border-slate-800 dark:bg-slate-950/95 md:hidden">
         {canAccessHome ? (
           <>
-            <NavItem href="/home" label="Tạo mới" active={isNew} collapsed>
+            <NavItem href="/home" onClick={resetSearch} label="Tạo mới" active={isNew} collapsed>
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
                 <path d="M5 12h14M12 5v14" />
               </svg>
