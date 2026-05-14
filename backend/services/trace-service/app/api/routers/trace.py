@@ -608,36 +608,32 @@ def remove_candidate_tracklet(
     if candidate.query_id != query_id:
         raise HTTPException(status_code=400, detail="Candidate does not belong to this query")
 
-    link = session.scalar(
-        select(QueryCandidateTracklet).where(
-            QueryCandidateTracklet.candidate_id == candidate_id,
-            QueryCandidateTracklet.tracklet_id == tracklet_id,
-        )
+    membership_rows = (
+        session.query(QueryCandidateTracklet)
+        .filter(QueryCandidateTracklet.candidate_id == candidate_id)
+        .order_by(QueryCandidateTracklet.id.asc())
+        .with_for_update()
+        .all()
     )
+    link = next((row for row in membership_rows if row.tracklet_id == tracklet_id), None)
     if not link:
         raise HTTPException(status_code=404, detail="Tracklet is not part of this candidate")
+    if len(membership_rows) <= 1:
+        raise HTTPException(status_code=400, detail="Candidate must keep at least one tracklet")
 
     session.delete(link)
     session.flush()
 
-    remaining_rows = (
-        session.query(QueryCandidateTracklet)
-        .filter(QueryCandidateTracklet.candidate_id == candidate_id)
-        .order_by(QueryCandidateTracklet.id.asc())
-        .all()
-    )
+    remaining_rows = [row for row in membership_rows if row.id != link.id]
     remaining_count = len(remaining_rows)
 
-    if remaining_rows:
-        first_tracklet_id = remaining_rows[0].tracklet_id
-        candidate.preview_url = f"/candidates/{first_tracklet_id}/preview"
-        first_tracklet = session.scalar(
-            select(Tracklet).where(Tracklet.tracklet_id == first_tracklet_id)
-        )
-        if first_tracklet and first_tracklet.appearance_summary:
-            candidate.appearance_summary = first_tracklet.appearance_summary
-    else:
-        candidate.preview_url = ""
+    first_tracklet_id = remaining_rows[0].tracklet_id
+    candidate.preview_url = f"/candidates/{first_tracklet_id}/preview"
+    first_tracklet = session.scalar(
+        select(Tracklet).where(Tracklet.tracklet_id == first_tracklet_id)
+    )
+    if first_tracklet and first_tracklet.appearance_summary:
+        candidate.appearance_summary = first_tracklet.appearance_summary
 
     query.updated_at = datetime.now(timezone.utc)
     session.commit()

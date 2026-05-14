@@ -65,6 +65,10 @@ export function CandidateDetailModal({
 
   const handleRemoveTracklet = async (trackletId: string) => {
     if (!queryId || !candidateId || removingTrackletId) return;
+    if (detail && detail.tracklets.length <= 1) {
+      setError("Candidate phải giữ lại ít nhất 1 tracklet.");
+      return;
+    }
     setRemovingTrackletId(trackletId);
     setError(null);
     try {
@@ -174,6 +178,8 @@ function CandidateBody({
   removingTrackletId: string | null;
   onRemoveTracklet: (trackletId: string) => void;
 }) {
+  const canRemoveTracklets = detail.tracklets.length > 1;
+
   return (
     <div className="flex flex-col gap-4">
       <ScoreStrip detail={detail} />
@@ -184,6 +190,7 @@ function CandidateBody({
               tracklet={t}
               index={idx}
               isRemoving={removingTrackletId === t.trackletId}
+              canRemove={canRemoveTracklets}
               onRemove={() => onRemoveTracklet(t.trackletId)}
             />
           </li>
@@ -221,11 +228,13 @@ function TrackletRow({
   tracklet,
   index,
   isRemoving,
+  canRemove,
   onRemove,
 }: {
   tracklet: CandidateTracklet;
   index: number;
   isRemoving: boolean;
+  canRemove: boolean;
   onRemove: () => void;
 }) {
   const cropSrc = useMemo(() => {
@@ -274,10 +283,11 @@ function TrackletRow({
             <button
               type="button"
               onClick={onRemove}
-              disabled={isRemoving}
+              disabled={isRemoving || !canRemove}
+              title={canRemove ? "Loại tracklet khỏi candidate" : "Candidate phải giữ lại ít nhất 1 tracklet"}
               className="rounded-full border border-red-200 bg-red-50 px-3 py-1 text-[11px] font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isRemoving ? "Đang loại..." : "Loại khỏi candidate"}
+              {isRemoving ? "Đang loại..." : canRemove ? "Loại khỏi candidate" : "Giữ lại tracklet cuối"}
             </button>
           </div>
         </header>
