@@ -1228,10 +1228,10 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             "vector_text_quality" if query_vec else "text_quality",
         )
 
-        # Persist the full ranked set for history, but return only the requested
-        # page to the active search UI. The history page has its own pagination,
-        # so users can come back later and browse every candidate found for the
-        # query without forcing the search page to render them all at once.
+        # Persist the top MAX_CANDIDATES ranked set for history, but return only
+        # the requested page to the active search UI. The history page has its
+        # own pagination, so users can come back later and browse every saved
+        # candidate without forcing the search page to render them all at once.
         ranked_candidates = merged[: settings.max_candidates]
         paged = ranked_candidates[offset:offset + top_k]
         for rank_idx, item in enumerate(ranked_candidates, start=1):
