@@ -84,7 +84,7 @@ export function HistoryView() {
         <p className="text-xs font-black uppercase tracking-[0.16em] text-blue-700 dark:text-blue-400">Search Intelligence</p>
         <h1 className="mt-3 text-3xl font-black tracking-normal text-slate-950 dark:text-white md:text-5xl">Lịch sử truy vấn</h1>
         <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-slate-600 dark:text-slate-300">
-          Chỉ hiển thị 20 truy vấn gần nhất. Video đã truy vết chỉ giữ lại cho 4 truy vấn gần nhất.
+          Chỉ hiển thị 20 truy vấn gần nhất. Mỗi truy vấn lưu một kết quả trace mới nhất.
         </p>
       </div>
       {historyLoading ? <p className="mb-4 text-sm text-slate-500 dark:text-slate-400">Đang tải lịch sử...</p> : null}
@@ -118,12 +118,21 @@ export function HistoryView() {
                   </div>
                   <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 md:text-base">{row.queryText}</p>
                   <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                    Đã xem {row.candidateCount} candidate{row.candidateCount === 1 ? "" : "s"}
+                    Tìm thấy {row.candidateCount} candidate{row.candidateCount === 1 ? "" : "s"}
                     {row.selectedCandidateId ? " · đã chọn 1" : ""}
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
-                  {hasCandidates ? (
+                  {row.hasEvidence ? (
+                    <button
+                      type="button"
+                      disabled={isEvidenceLoading}
+                      onClick={() => void handleViewEvidence(row)}
+                      className="rounded-xl border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-700/60 dark:bg-blue-950/45 dark:text-blue-300 dark:hover:bg-blue-900/40"
+                    >
+                      {isEvidenceLoading ? "Đang mở..." : "Xem trace"}
+                    </button>
+                  ) : hasCandidates ? (
                     <Link
                       href={`/history/${encodeURIComponent(row.queryId)}/candidates`}
                       className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-200 dark:hover:border-blue-500/60 dark:hover:text-blue-300"
@@ -139,15 +148,14 @@ export function HistoryView() {
                       Xem kết quả
                     </button>
                   )}
-                  <button
-                    type="button"
-                    disabled={!row.hasEvidence || isEvidenceLoading}
-                    onClick={() => void handleViewEvidence(row)}
-                    className="rounded-xl border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-700/60 dark:bg-blue-950/45 dark:text-blue-300 dark:hover:bg-blue-900/40"
-                    title={row.hasEvidence ? "Xem video đã truy vết" : "Chưa có video truy vết (chỉ lưu 4 truy vấn gần nhất)"}
-                  >
-                    {isEvidenceLoading ? "Đang mở..." : "Xem video truy vết"}
-                  </button>
+                  {row.hasEvidence && hasCandidates ? (
+                    <Link
+                      href={`/history/${encodeURIComponent(row.queryId)}/candidates`}
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-200 dark:hover:border-blue-500/60 dark:hover:text-blue-300"
+                    >
+                      Đổi candidate
+                    </Link>
+                  ) : null}
                 </div>
               </div>
             </li>

@@ -474,6 +474,35 @@ class TraceService:
         )
         return count
 
+    def delete_query_evidence(self, query_id: UUID | str) -> int:
+        """Delete all evidence videos for a query before writing a new trace.
+
+        TraceX keeps one trace result per query. A user can choose another
+        candidate and trace again, but that new result replaces the previous
+        evidence for the same query.
+        """
+        from pathlib import Path
+        import shutil
+
+        traces_root = Path(os.getenv("TRACES_DIR", "/workspace/storage/traces"))
+
+        rows = (
+            self.session.query(EvidenceVideo)
+            .filter(EvidenceVideo.query_id == str(query_id))
+            .all()
+        )
+        for ev in rows:
+            clip_dir = traces_root / str(ev.query_id) / str(ev.query_candidate_id)
+            if clip_dir.exists():
+                try:
+                    shutil.rmtree(clip_dir)
+                except OSError as exc:
+                    logger.warning(
+                        "delete_query_evidence: failed to remove %s: %s", clip_dir, exc,
+                    )
+            self.session.delete(ev)
+        return len(rows)
+
     def prune_user_evidence_keep_recent(self, user_id: int, keep: int = 4) -> int:
         """Keep only the `keep` most recent evidence videos per user; delete the rest.
 

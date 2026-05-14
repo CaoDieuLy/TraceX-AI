@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -87,6 +87,8 @@ def _verify_query_owner(
 @router.get("/{query_id}/candidates")
 def get_history_candidates(
     query_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=50),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict:
@@ -95,10 +97,18 @@ def get_history_candidates(
     re-running the ranking pipeline."""
     query = _verify_query_owner(session, query_id, current_user.id)
 
+    total_count = session.scalar(
+        select(func.count())
+        .select_from(QueryCandidate)
+        .where(QueryCandidate.query_id == query_id)
+    ) or 0
+
     candidates = session.scalars(
         select(QueryCandidate)
         .where(QueryCandidate.query_id == query_id)
         .order_by(QueryCandidate.rank_position.asc())
+        .offset(offset)
+        .limit(limit)
     ).all()
 
     # Pick one representative tracklet per candidate for the thumbnail URL.
@@ -136,6 +146,10 @@ def get_history_candidates(
         "results": results,
         "query_id": query_id,
         "selected_candidate_id": query.selected_candidate_id,
+        "total_count": int(total_count),
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(results) < int(total_count),
     }
 
 

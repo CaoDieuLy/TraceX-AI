@@ -59,11 +59,19 @@ type HistoryCandidatesApiResponse = {
   results: HistoryCandidateApi[];
   query_id: string;
   selected_candidate_id: string | null;
+  total_count?: number;
+  offset?: number;
+  limit?: number;
+  has_more?: boolean;
 };
 
 export type HistoryCandidatesResult = {
   queryId: string;
   selectedCandidateId: string | null;
+  totalCount: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
   items: VideoItem[];
 };
 
@@ -332,10 +340,14 @@ export async function getSearchHistory(): Promise<SearchHistoryItem[]> {
   return payload.items.map(mapHistoryItem);
 }
 
-export async function getHistoryCandidates(queryId: string): Promise<HistoryCandidatesResult> {
+export async function getHistoryCandidates(
+  queryId: string,
+  offset = 0,
+  limit = 10,
+): Promise<HistoryCandidatesResult> {
   const apiBaseUrl = getApiBaseUrl();
   const payload = await apiFetch<HistoryCandidatesApiResponse>(
-    `/history/${encodeURIComponent(queryId)}/candidates`,
+    `/history/${encodeURIComponent(queryId)}/candidates?offset=${offset}&limit=${limit}`,
   );
   const items: VideoItem[] = payload.results.map((row) => ({
     id: row.id,
@@ -349,6 +361,10 @@ export async function getHistoryCandidates(queryId: string): Promise<HistoryCand
   return {
     queryId: payload.query_id,
     selectedCandidateId: payload.selected_candidate_id,
+    totalCount: payload.total_count ?? items.length,
+    offset: payload.offset ?? offset,
+    limit: payload.limit ?? limit,
+    hasMore: Boolean(payload.has_more),
     items,
   };
 }

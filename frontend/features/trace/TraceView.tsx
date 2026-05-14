@@ -67,6 +67,8 @@ export function TraceView({ evidenceId, queryId, candidateId }: Props) {
 
   const segments = trace?.segments ?? [];
   const active = segments[activeIdx];
+  const readyCount = segments.filter((segment) => Boolean(segment.videoClipUrl)).length;
+  const pendingCount = Math.max(segments.length - readyCount, 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -79,10 +81,10 @@ export function TraceView({ evidenceId, queryId, candidateId }: Props) {
           </h1>
         </div>
         <Link
-          href={queryId ? "/home" : "/home"}
+          href={queryId ? `/history/${encodeURIComponent(queryId)}/candidates` : "/home"}
           className="rounded-xl border border-surface-muted bg-white px-4 py-2 text-sm font-medium text-ink-secondary shadow-card transition hover:border-accent hover:text-ink"
         >
-          ← Quay lại
+          ← {queryId ? "Chọn candidate khác" : "Quay lại"}
         </Link>
       </header>
 
@@ -93,6 +95,7 @@ export function TraceView({ evidenceId, queryId, candidateId }: Props) {
 
       {!isLoading && !error && trace ? (
         <>
+          <RenderProgress readyCount={readyCount} pendingCount={pendingCount} totalCount={segments.length} />
           <CameraTimeline segments={segments} activeIdx={activeIdx} onSelect={setActiveIdx} />
           {active ? <SegmentPlayer segment={active} /> : (
             <p className="rounded-xl border border-dashed border-slate-300 px-4 py-6 text-sm text-slate-500">
@@ -103,6 +106,65 @@ export function TraceView({ evidenceId, queryId, candidateId }: Props) {
         </>
       ) : null}
     </div>
+  );
+}
+
+function RenderProgress({
+  readyCount,
+  pendingCount,
+  totalCount,
+}: {
+  readyCount: number;
+  pendingCount: number;
+  totalCount: number;
+}) {
+  if (!totalCount) return null;
+  const percent = Math.round((readyCount / totalCount) * 100);
+  const isComplete = pendingCount === 0;
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Tiến độ video trace</p>
+          <p className="mt-1 text-sm font-semibold text-slate-900">
+            {readyCount}/{totalCount} video sẵn sàng
+          </p>
+        </div>
+        <span className={[
+          "rounded-full border px-3 py-1 text-xs font-semibold",
+          isComplete
+            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+            : "border-amber-200 bg-amber-50 text-amber-700",
+        ].join(" ")}>
+          {isComplete ? "Đã ghép xong" : `Đang ghép ${pendingCount} video`}
+        </span>
+      </div>
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className={isComplete ? "h-full bg-emerald-500" : "h-full bg-sky-500 transition-all"}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      <p className="mt-3 text-sm text-slate-500">
+        {isComplete
+          ? "Tất cả video đã sẵn sàng để xem."
+          : "Video nào ghép xong sẽ xem được ngay. Trang này tự cập nhật, bạn không cần tải lại."}
+      </p>
+    </section>
+  );
+}
+
+function SegmentStatusBadge({ ready }: { ready: boolean }) {
+  return (
+    <span className={[
+      "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+      ready
+        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+        : "border-amber-200 bg-amber-50 text-amber-700",
+    ].join(" ")}>
+      {!ready ? <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" /> : null}
+      {ready ? "Sẵn sàng" : "Đang ghép"}
+    </span>
   );
 }
 
@@ -121,6 +183,7 @@ function CameraTimeline({
       <ol className="flex items-stretch gap-3">
         {segments.map((s, i) => {
           const isActive = i === activeIdx;
+          const ready = Boolean(s.videoClipUrl);
           return (
             <li key={`${s.segmentOrder}-${s.trackletId}`} className="flex items-center gap-3">
               <button
@@ -135,6 +198,7 @@ function CameraTimeline({
                 <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
                   Step {s.segmentOrder}
                 </span>
+                <SegmentStatusBadge ready={ready} />
                 <span className="font-mono text-sm text-slate-900">{s.cameraId ?? "—"}</span>
                 <span className="text-[11px] text-slate-500">{fmtTime(s.timeStart)}</span>
                 {s.durationSeconds != null ? (
@@ -163,11 +227,16 @@ function SegmentPlayer({ segment }: { segment: TraceSegment }) {
           className="aspect-video w-full bg-black"
         />
       ) : (
-        <div className="flex aspect-video w-full items-center justify-center text-sm text-white/70">
-          Không có video cho segment này.
+        <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-white/75">
+          <span className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white/80" />
+          <span className="font-semibold text-white">Video segment này đang được ghép</span>
+          <span className="max-w-md text-white/60">
+            Khi render xong, player sẽ tự hiện video. Bạn có thể chọn segment đã sẵn sàng ở danh sách bên dưới.
+          </span>
         </div>
       )}
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 bg-white/95 px-4 py-3 text-xs text-slate-600">
+        <SegmentStatusBadge ready={Boolean(url)} />
         <span className="font-mono text-sm text-slate-900">{segment.cameraId ?? "—"}</span>
         <span>{fmtRange(segment.timeStart, segment.timeEnd)}</span>
         {segment.durationSeconds != null ? <span>· {segment.durationSeconds.toFixed(1)}s</span> : null}
@@ -197,6 +266,7 @@ function SegmentList({
       {segments.map((s, i) => {
         const isActive = i === activeIdx;
         const thumb = s.thumbnailUrl ? resolveMediaUrl(s.thumbnailUrl) : null;
+        const ready = Boolean(s.videoClipUrl);
         return (
           <li key={`${s.segmentOrder}-${s.trackletId}-row`}>
             <button
@@ -207,14 +277,29 @@ function SegmentList({
               }`}
             >
               <span className="w-8 shrink-0 text-center text-xs font-semibold text-slate-500">#{s.segmentOrder}</span>
-              <div className="h-16 w-24 shrink-0 overflow-hidden rounded-lg bg-slate-100">
+              <div className="relative h-16 w-24 shrink-0 overflow-hidden rounded-lg bg-slate-100">
                 {thumb ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={thumb} alt={s.trackletId} className="h-full w-full object-cover" />
+                  <img
+                    src={thumb}
+                    alt={s.trackletId}
+                    className={[
+                      "h-full w-full object-cover",
+                      ready ? "" : "opacity-60",
+                    ].join(" ")}
+                  />
+                ) : null}
+                {!ready ? (
+                  <div className="absolute inset-0 flex items-center justify-center bg-slate-950/35 text-[10px] font-semibold text-white">
+                    Đang ghép
+                  </div>
                 ) : null}
               </div>
               <div className="flex flex-1 flex-col gap-0.5">
-                <p className="font-mono text-sm text-slate-900">{s.cameraId ?? "—"}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-mono text-sm text-slate-900">{s.cameraId ?? "—"}</p>
+                  <SegmentStatusBadge ready={ready} />
+                </div>
                 <p className="text-xs text-slate-500">{fmtRange(s.timeStart, s.timeEnd)}</p>
                 <p className="font-mono text-[11px] text-slate-400">{s.trackletId}</p>
               </div>

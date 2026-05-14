@@ -40,8 +40,8 @@ class SearchRequest(BaseModel):
     user_id: int = 1  # injected by metadata-service from JWT; fallback=1 for direct calls
     # When the frontend paginates (offset > 0) it can pass back the qid returned by
     # the first call so we reuse the same query_history row instead of creating a
-    # new one per page. Candidates are then *appended* (UPSERT) so the persisted
-    # count grows to match what the user has actually scrolled to.
+    # new one per page. The full ranked set is persisted for history, while each
+    # response still returns only the requested page.
     query_id: str | None = None
 
 from shared.database import SessionLocal
@@ -184,6 +184,22 @@ def _jdump(obj: Any) -> str:
         return json.dumps(obj, ensure_ascii=False, default=str)
     except Exception:
         return repr(obj)
+
+
+def _candidate_id_for_group(query_id: str, group: list[Tracklet]) -> str:
+    """Stable query-scoped candidate id for a merged tracklet group."""
+    tracklet_ids = sorted(str(t.tracklet_id) for t in group if t.tracklet_id)
+    key = "|".join(tracklet_ids) or str(len(group))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"tracex:{query_id}:candidate:{key}"))
+
+
+def _candidate_key_for_group(group: list[Tracklet]) -> str:
+    tracklet_ids = sorted(str(t.tracklet_id) for t in group if t.tracklet_id)
+    if len(tracklet_ids) == 1:
+        return tracklet_ids[0][:255]
+    key = "|".join(tracklet_ids) or str(len(group))
+    suffix = uuid.uuid5(uuid.NAMESPACE_URL, f"tracex:candidate-key:{key}").hex[:12]
+    return f"{len(tracklet_ids)}-tracklets:{suffix}"
 
 
 def _ensure_translation_warmed_up():
@@ -1062,10 +1078,10 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         merged: list[dict] = []
         for group in groups:
             rep = group[0]
-            # Candidate IDs are query-scoped persisted records. Reusing a
-            # singleton tracklet_id collides with earlier queries and makes the
-            # returned candidate impossible to select/trace for the current qid.
-            candidate_id = str(uuid.uuid4())
+            # Candidate IDs are query-scoped and stable across pagination calls.
+            # History persists the full ranked set on the first page, so page 2
+            # must return the same IDs instead of minting fresh UUIDs.
+            candidate_id = _candidate_id_for_group(qid, group)
             text_score = float(text_score_map.get(rep.tracklet_id, 0.0))
             quality_score = float(rep.quality_score or 0.0)
 
@@ -1211,17 +1227,16 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             "vector_text_quality" if query_vec else "text_quality",
         )
 
-        # Only persist the slice the user is actually viewing (paged). Earlier
-        # versions wrote every merged candidate (~200) up front, which made
-        # /history overstate how many candidates the user had actually seen.
-        # When the frontend paginates with the same `query_id`, subsequent
-        # calls append the next page via UPSERT.
+        # Persist the full ranked set for history, but return only the requested
+        # page to the active search UI. The history page has its own pagination,
+        # so users can come back later and browse every candidate found for the
+        # query without forcing the search page to render them all at once.
         paged = merged[offset:offset + top_k]
-        for page_idx, item in enumerate(paged):
-            rank_idx = offset + page_idx + 1
+        for rank_idx, item in enumerate(merged, start=1):
             rep = item["rep"]
             candidate_id = item["candidate_id"]
-            db.execute(pg_insert(QueryCandidate).values(
+            candidate_key = _candidate_key_for_group(item["group"])
+            candidate_insert = pg_insert(QueryCandidate).values(
                 query_id=qid,
                 candidate_id=candidate_id,
                 fusion_score=item["fusion_score"],
@@ -1233,18 +1248,44 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 gender=rep.gender or "unknown",
                 top_color=rep.upper_color or "unknown",
                 bottom_color=rep.lower_color or "unknown",
-            ).on_conflict_do_nothing(index_elements=["candidate_id"]))
+                candidate_key=candidate_key,
+                preview_url=f"/candidates/{rep.tracklet_id}/preview",
+            )
+            db.execute(candidate_insert.on_conflict_do_update(
+                index_elements=["candidate_id"],
+                set_={
+                    "query_id": qid,
+                    "fusion_score": item["fusion_score"],
+                    "vector_score": item["vector_score"],
+                    "text_score": item["text_score"],
+                    "rank_position": rank_idx,
+                    "primary_camera_id": rep.camera_id or "",
+                    "appearance_summary": rep.appearance_summary or "",
+                    "gender": rep.gender or "unknown",
+                    "top_color": rep.upper_color or "unknown",
+                    "bottom_color": rep.lower_color or "unknown",
+                    "candidate_key": candidate_key,
+                    "preview_url": f"/candidates/{rep.tracklet_id}/preview",
+                },
+            ))
 
             for link in item["member_links"]:
-                db.execute(pg_insert(QueryCandidateTracklet).values(
+                link_insert = pg_insert(QueryCandidateTracklet).values(
                     candidate_id=candidate_id,
                     tracklet_id=link["tracklet_id"],
                     match_score=link["match_score"],
                     match_type="vector",
-                ).on_conflict_do_nothing(index_elements=["candidate_id", "tracklet_id"]))
+                )
+                db.execute(link_insert.on_conflict_do_update(
+                    index_elements=["candidate_id", "tracklet_id"],
+                    set_={
+                        "match_score": link["match_score"],
+                        "match_type": "vector",
+                    },
+                ))
 
         qh.status = "candidates_found"
-        qh.result_count = offset + len(paged)
+        qh.result_count = len(merged)
         db.commit()
         # INFO-level: one compact line per ranked candidate so health/QA can
         # spot-check ranking without parsing the per-member DEBUG payload.

@@ -7,6 +7,7 @@ import { useToast } from "@/components/ui/ToastProvider";
 import { VideoGrid } from "@/components/video/VideoGrid";
 import { CandidateDetailModal } from "@/features/candidate/CandidateDetailModal";
 import { getHistoryCandidates, type HistoryCandidatesResult } from "@/lib/api";
+import { GRID_BATCH_SIZE } from "@/lib/config";
 import type { VideoItem } from "@/lib/types";
 
 type Props = {
@@ -16,6 +17,7 @@ type Props = {
 export function HistoryCandidatesView({ queryId }: Props) {
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [data, setData] = useState<HistoryCandidatesResult | null>(null);
   const [selectedCandidate, setSelectedCandidate] = useState<
     { queryId: string; candidateId: string } | null
@@ -24,7 +26,9 @@ export function HistoryCandidatesView({ queryId }: Props) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    void getHistoryCandidates(queryId)
+    setLoadingMore(false);
+    setData(null);
+    void getHistoryCandidates(queryId, 0, GRID_BATCH_SIZE)
       .then((payload) => {
         if (cancelled) return;
         setData(payload);
@@ -41,6 +45,22 @@ export function HistoryCandidatesView({ queryId }: Props) {
       cancelled = true;
     };
   }, [queryId, showToast]);
+
+  const handleLoadMore = useCallback(async () => {
+    if (!data || loadingMore || !data.hasMore) return;
+    setLoadingMore(true);
+    try {
+      const next = await getHistoryCandidates(queryId, data.items.length, GRID_BATCH_SIZE);
+      setData({
+        ...next,
+        items: [...data.items, ...next.items],
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Không tải thêm được candidates.", "error");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [data, loadingMore, queryId, showToast]);
 
   const handleCandidateClick = useCallback((video: VideoItem) => {
     if (!video.queryId) {
@@ -82,10 +102,22 @@ export function HistoryCandidatesView({ queryId }: Props) {
       {!loading && data && data.items.length > 0 ? (
         <>
           <p className="mb-4 text-sm text-slate-500 dark:text-slate-400">
-            {data.items.length} candidate{data.items.length === 1 ? "" : "s"} đã lưu
+            Đang hiển thị {data.items.length}/{data.totalCount} candidate{data.totalCount === 1 ? "" : "s"} đã lưu
             {data.selectedCandidateId ? " · đã chọn 1" : ""}
           </p>
           <VideoGrid items={data.items} onItemClick={handleCandidateClick} />
+          {data.hasMore ? (
+            <div className="mt-6 flex justify-center">
+              <button
+                type="button"
+                onClick={() => void handleLoadMore()}
+                disabled={loadingMore}
+                className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-bold text-white shadow-[0_12px_28px_rgba(15,23,42,0.22)] transition duration-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-blue-600 dark:shadow-[0_16px_32px_rgba(37,99,235,0.28)] dark:hover:bg-blue-500"
+              >
+                {loadingMore ? "Đang tải..." : "Tải thêm 10 candidate"}
+              </button>
+            </div>
+          ) : null}
         </>
       ) : null}
 

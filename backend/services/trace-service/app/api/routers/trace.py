@@ -137,8 +137,9 @@ def build_trace(
     if candidate.query_id != str(request.query_id):
         raise HTTPException(status_code=400, detail="Candidate does not belong to this query")
 
-    # Delete old evidence for this candidate (cache overwrite behavior)
-    service.delete_old_evidence(request.candidate_id)
+    # Keep one trace result per query. Tracing another candidate replaces the
+    # previous evidence for the same query.
+    service.delete_query_evidence(request.query_id)
 
     # QueryCandidateTracklet already defines the candidate membership. The
     # 24h trace window is anchored at the first real tracklet time, not at the
@@ -183,16 +184,11 @@ def build_trace(
         time_window_end=window_end,
     )
 
-    # Cap evidence-video storage per user — keep only the 4 most recent so we
-    # don't accumulate unbounded rendered clips on disk. Older evidence rows
-    # are deleted (cascade also removes their evidence_tracklets); the source
-    # query_history rows are kept so history list is unaffected.
-    service.prune_user_evidence_keep_recent(query.user_id, keep=4)
-
     # Mark the query as completed so /history can show a "Đã truy vết" badge
     # even before the background render finishes — the evidence row already
     # exists at this point.
     query.status = "completed"
+    query.selected_candidate_id = str(request.candidate_id)
     query.updated_at = datetime.now(timezone.utc)
 
     session.commit()
@@ -548,14 +544,16 @@ def continue_trace(
 
     # Get previous evidence
     previous_evidence = session.query(EvidenceVideo).filter(
-        EvidenceVideo.query_candidate_id == str(request.candidate_id)
+        EvidenceVideo.query_id == str(request.query_id),
+        EvidenceVideo.query_candidate_id == str(request.candidate_id),
     ).order_by(EvidenceVideo.created_at.desc()).first()
 
     if not previous_evidence:
         raise HTTPException(status_code=404, detail="No previous trace found. Please build trace first.")
 
-    # Delete old evidence
-    service.delete_old_evidence(request.candidate_id)
+    # Delete old evidence for this query; the replacement below becomes the
+    # single saved trace result for the query.
+    service.delete_query_evidence(request.query_id)
 
     # Build new trace with a window anchored at the first real tracklet time.
     base_tracklets = service.get_candidate_tracklets(candidate_id=request.candidate_id)
@@ -588,8 +586,9 @@ def continue_trace(
         time_window_end=window_end,
     )
 
-    # Same per-user retention cap as /trace/build.
-    service.prune_user_evidence_keep_recent(query.user_id, keep=4)
+    query.status = "completed"
+    query.selected_candidate_id = str(request.candidate_id)
+    query.updated_at = datetime.now(timezone.utc)
 
     session.commit()
 
