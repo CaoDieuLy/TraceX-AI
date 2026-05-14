@@ -12,8 +12,12 @@ from shared.models import (
     QueryCandidate,
     QueryCandidateTracklet,
     QueryHistory,
+    Tracklet,
     User,
+    Video,
 )
+from shared.tracklet_time import tracklet_time_window
+from sqlalchemy.orm import contains_eager
 
 router = APIRouter(tags=["history"])
 
@@ -133,22 +137,39 @@ def get_history_candidates(
     ).all()
 
     # Pick one representative tracklet per candidate for the thumbnail URL and
-    # keep the tracklet count so history cards match fresh search result cards.
+    # collect tracklet summaries (camera + time window) so history cards match
+    # fresh search result cards.
     rep_tracklets: dict[str, str] = {}
-    tracklet_counts: dict[str, int] = {}
+    tracklet_summaries: dict[str, list[dict]] = {}
     if candidates:
         cand_ids = [c.candidate_id for c in candidates]
-        for cand_id, tracklet_id, tracklet_count in session.execute(
+        # First pick rep tracklet (min tracklet_id) per candidate for thumbnail.
+        for cand_id, tracklet_id in session.execute(
             select(
                 QueryCandidateTracklet.candidate_id,
                 func.min(QueryCandidateTracklet.tracklet_id),
-                func.count(QueryCandidateTracklet.tracklet_id),
             )
             .where(QueryCandidateTracklet.candidate_id.in_(cand_ids))
             .group_by(QueryCandidateTracklet.candidate_id)
         ).all():
             rep_tracklets[cand_id] = tracklet_id
-            tracklet_counts[cand_id] = int(tracklet_count)
+
+        # Then load all tracklets+video for these candidates to build summaries.
+        rows = session.execute(
+            select(QueryCandidateTracklet.candidate_id, Tracklet)
+            .join(Tracklet, QueryCandidateTracklet.tracklet_id == Tracklet.tracklet_id)
+            .join(Video, Tracklet.video_id == Video.video_id)
+            .options(contains_eager(Tracklet.video))
+            .where(QueryCandidateTracklet.candidate_id.in_(cand_ids))
+        ).all()
+        for cand_id, tracklet in rows:
+            window = tracklet_time_window(tracklet)
+            tracklet_summaries.setdefault(cand_id, []).append({
+                "tracklet_id": tracklet.tracklet_id,
+                "camera_id": tracklet.camera_id,
+                "time_start": window[0].isoformat() if window else None,
+                "time_end": window[1].isoformat() if window else None,
+            })
 
     results = []
     for c in candidates:
@@ -157,10 +178,9 @@ def get_history_candidates(
             tid = rep_tracklets.get(c.candidate_id)
             if tid:
                 thumbnail_url = f"/candidates/{tid}/preview"
-        tracklet_count = tracklet_counts.get(c.candidate_id, 0)
+        summaries = tracklet_summaries.get(c.candidate_id, [])
+        tracklet_count = len(summaries)
         description = c.appearance_summary or ""
-        if tracklet_count > 1:
-            description = f"[{tracklet_count} tracklets] {description}".strip()
         results.append({
             "id": c.candidate_id,
             "thumbnail_url": thumbnail_url,
@@ -170,6 +190,7 @@ def get_history_candidates(
             "rank_position": c.rank_position,
             "fusion_score": c.fusion_score,
             "tracklet_count": tracklet_count,
+            "tracklets": summaries,
         })
 
     return {

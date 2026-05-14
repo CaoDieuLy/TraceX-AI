@@ -2,12 +2,21 @@ import type { VideoClip, VideoItem } from "@/lib/types";
 import { loadAccessToken } from "@/lib/auth";
 import { parseJsonOrThrow, readApiErrorMessage } from "@/lib/api/errors";
 
+type TrackletSummaryApi = {
+  tracklet_id: string;
+  camera_id: string | null;
+  time_start: string | null;
+  time_end: string | null;
+};
+
 type SearchApiResponse = {
   results: Array<{
     id: string;
     thumbnail_url: string;
     description: string;
     query_id?: string;
+    tracklet_count?: number;
+    tracklets?: TrackletSummaryApi[];
   }>;
   query_id?: string;
 };
@@ -53,6 +62,8 @@ type HistoryCandidateApi = {
   is_selected: boolean;
   rank_position: number;
   fusion_score: number;
+  tracklet_count?: number;
+  tracklets?: TrackletSummaryApi[];
 };
 
 type HistoryCandidatesApiResponse = {
@@ -227,6 +238,13 @@ export async function searchVideos(
       ? resolveMediaUrl(item.thumbnail_url, apiBaseUrl)
       : placeholderThumbnail(item.id),
     queryId: item.query_id ?? queryId ?? undefined,
+    trackletCount: item.tracklet_count,
+    tracklets: item.tracklets?.map((t) => ({
+      trackletId: t.tracklet_id,
+      cameraId: t.camera_id,
+      timeStart: t.time_start,
+      timeEnd: t.time_end,
+    })),
   }));
   return { queryId, items };
 }
@@ -358,6 +376,13 @@ export async function getHistoryCandidates(
       : placeholderThumbnail(row.id),
     queryId: row.query_id,
     rank: row.rank_position,
+    trackletCount: row.tracklet_count,
+    tracklets: row.tracklets?.map((t) => ({
+      trackletId: t.tracklet_id,
+      cameraId: t.camera_id,
+      timeStart: t.time_start,
+      timeEnd: t.time_end,
+    })),
   }));
   return {
     queryId: payload.query_id,

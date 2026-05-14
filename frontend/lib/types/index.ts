@@ -1,4 +1,4 @@
-import type { VideoClip, VideoItem } from "./video";
+import type { TrackletSummary, VideoClip, VideoItem } from "./video";
 import type {
   BuildTraceResult,
   CandidateDetail,
@@ -11,6 +11,7 @@ import type {
 export type {
   VideoItem,
   VideoClip,
+  TrackletSummary,
   BuildTraceResult,
   CandidateDetail,
   CandidateTracklet,

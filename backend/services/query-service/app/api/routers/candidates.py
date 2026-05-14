@@ -1363,12 +1363,21 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             candidate_id = mc["candidate_id"]
             tracklet_count = len(mc["group"])
             description = rep.appearance_summary or ""
-            if tracklet_count > 1:
-                description = f"[{tracklet_count} tracklets] {description}".strip()
+            tracklet_summaries = []
+            for member in mc["group"]:
+                window = tracklet_time_window(member)
+                tracklet_summaries.append({
+                    "tracklet_id": member.tracklet_id,
+                    "camera_id": member.camera_id,
+                    "time_start": window[0].isoformat() if window else None,
+                    "time_end": window[1].isoformat() if window else None,
+                })
             results.append({
                 "id": candidate_id,
                 "thumbnail_url": f"/candidates/{rep.tracklet_id}/preview",
                 "description": description,
+                "tracklet_count": tracklet_count,
+                "tracklets": tracklet_summaries,
                 "actions": mc["actions"],
                 "matched_actions": mc["matched_actions"],
                 "matched_metadata": mc["matched_metadata"],
