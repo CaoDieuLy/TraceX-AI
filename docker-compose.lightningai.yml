@@ -268,6 +268,11 @@ services:
       - MAX_SEGMENTS_PER_TRACE=${MAX_SEGMENTS_PER_TRACE:-50}
       - MCPT_SECRETS_ROOT=${MCPT_SECRETS_ROOT:-/workspace/secrets}
       - DRIVE_CACHE_MAX_BYTES=${DRIVE_CACHE_MAX_BYTES:-21474836480}
+      # Trace clip rendering is CPU/IO bound. Keep this conservative so
+      # metadata embedding and query ranking can continue in parallel.
+      - TRACE_CLIP_PARALLEL_WORKERS=${TRACE_CLIP_PARALLEL_WORKERS:-2}
+      - TRACE_CLIP_FFMPEG_THREADS=${TRACE_CLIP_FFMPEG_THREADS:-2}
+      - TRACE_CLIP_VALIDATE_TIMEOUT_SECONDS=${TRACE_CLIP_VALIDATE_TIMEOUT_SECONDS:-0}
       # AI model cache
       - HF_HOME=/workspace/models/huggingface
       - TORCH_HOME=/workspace/models/torch
