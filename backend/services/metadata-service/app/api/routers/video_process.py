@@ -101,12 +101,14 @@ VLM_BATCH_STABLE_STEPS = _get_positive_env_int("VLM_BATCH_STABLE_STEPS", 3)
 VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
     "VLM_BATCH_MAX_NEW_TOKENS_PER_CROP", 512
 )
-# D: 0.90 quá khắt cho hospital CCTV (đồng phục giống nhau, lighting đổi qua
-# frame). 0.85 mean + component_floor 0.82 (= 0.85 - 0.03) vẫn an toàn — không
-# tạo bridge giữa người khác nhau. Max gap nới lên 120s vì người trong hospital
-# thường stay lâu trong khung hình rồi quay lại.
-FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.85)
-FRAGMENT_MERGE_MAX_GAP_SECONDS = _get_env_float("FRAGMENT_MERGE_MAX_GAP_SECONDS", 120.0)
+# Bench cam_0002 + production review: 0.85 đang merge nhầm các tracklet
+# có đồng phục giống nhau (nhân viên/hồ sơ bệnh nhân tương tự). Nâng lên 0.90
+# để chỉ merge khi appearance thực sự rất gần. Hệ quả: số merged tracklets
+# tăng (kỳ vọng 30-50%), nhưng độ tinh khiết group tăng đáng kể.
+# Component margin 0.03 → 0.05 → floor = 0.85 (cùng giá trị threshold cũ),
+# vẫn cho phép expand group qua các fragment trung gian.
+FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.90)
+FRAGMENT_MERGE_MAX_GAP_SECONDS = _get_env_float("FRAGMENT_MERGE_MAX_GAP_SECONDS", 180.0)
 FRAGMENT_MERGE_COMPONENT_MARGIN = _get_env_float("FRAGMENT_MERGE_COMPONENT_MARGIN", 0.03)
 FRAGMENT_MERGE_MAX_SPEED_PX_PER_S = _get_env_float("FRAGMENT_MERGE_MAX_SPEED_PX_PER_S", 800.0)
 FRAGMENT_MERGE_SPATIAL_BYPASS_MARGIN = _get_env_float("FRAGMENT_MERGE_SPATIAL_BYPASS_MARGIN", 0.05)
@@ -2361,9 +2363,13 @@ def _process_video_sync(
         new_track_threshold=0.30,
         min_track_frames=2,
         min_track_density=0.03,
-        # B: scene đông người (13+ dets/frame) — margin 0.20 tạo quá nhiều
-        # track mới khi 2 người gần nhau. Hạ xuống 0.10 để giảm fragment.
-        discriminative_margin=0.10,
+        # Bench cam_0002 (sweep margin 0.10 → 0.30 trên 25 GT person):
+        #   0.10 → impurity 4.81%, contam 19.87%, IDS 580, frag/GT 83.12
+        #   0.20 → impurity 2.01%, contam 10.58%, IDS 265, frag/GT 82.44  ★
+        #   0.30 → impurity 0.59% nhưng max track length -83%, concurrency -51%
+        # 0.20 là sweet spot: giảm merge nhầm 58%, IDS 54%, frag/GT gần như
+        # giữ nguyên, không phá vỡ track dài (max length giữ ở 648 frame).
+        discriminative_margin=0.20,
         # FPS-scaled pixel thresholds
         max_head_center_distance=120.0 * _fps_ratio_4,
         max_foot_distance=150.0 * _fps_ratio_4,
@@ -2384,9 +2390,9 @@ def _process_video_sync(
     # noise/false-positive.
     scorer = TrackletQualityScorer(
         min_confidence=0.35,
-        min_frames=4,           # ≥1.3s ở 3 FPS — đủ cho 1 cử động ngắn
+        min_frames=3,           # ≥1s ở 3 FPS — đủ cho 1 cử động ngắn
         min_density=0.15,       # 1 obs / 6.6 frames = ~2.2s — tracklet liên tục
-        min_duration_s=1.0,     # bỏ tracklet < 1s (thường là FP detection burst)
+        min_duration_s=0.7,     # bỏ tracklet < 1s (thường là FP detection burst)
         min_laplacian=30.0,
     )
     quality_results = {t.track_id: scorer.score(t) for t in local_tracklets}
