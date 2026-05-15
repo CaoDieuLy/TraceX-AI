@@ -107,7 +107,7 @@ VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
 # tăng (kỳ vọng 30-50%), nhưng độ tinh khiết group tăng đáng kể.
 # Component margin 0.03 → 0.05 → floor = 0.85 (cùng giá trị threshold cũ),
 # vẫn cho phép expand group qua các fragment trung gian.
-FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.89)
+FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.90)
 FRAGMENT_MERGE_MAX_GAP_SECONDS = _get_env_float("FRAGMENT_MERGE_MAX_GAP_SECONDS", 180.0)
 FRAGMENT_MERGE_COMPONENT_MARGIN = _get_env_float("FRAGMENT_MERGE_COMPONENT_MARGIN", 0.02)
 FRAGMENT_MERGE_MAX_SPEED_PX_PER_S = _get_env_float("FRAGMENT_MERGE_MAX_SPEED_PX_PER_S", 800.0)
