@@ -779,7 +779,9 @@ class BodyPartAdaptiveTracker:
         Curve:
           n = 1   → 1.30 × base   (short, lenient: Kalman noisy)
           n = 20  → 1.00 × base   (converged: use base)
-          n ≥ 60  → 0.80 × base   (long, very trusted: catch small jumps)
+          n ≥ 60  → 0.95 × base   (long: chỉ siết nhẹ — multiplier 0.80 trước đây
+                                   chặt 1 track dài thành 30+ segments khi
+                                   người đi qua góc khuất tạm thời)
 
         Differences vs v1 (1.6 / 1.0 / 0.65 step):
           • Continuous — no cliff edge at bucket boundaries.
@@ -799,10 +801,10 @@ class BodyPartAdaptiveTracker:
             t = (n - 1) / 19.0
             return base * (1.30 - 0.30 * t)
         if n <= 60:
-            # Linear 1.00 → 0.80 as n goes 20 → 60
+            # Linear 1.00 → 0.95 as n goes 20 → 60 (nới từ 0.80)
             t = (n - 20) / 40.0
-            return base * (1.00 - 0.20 * t)
-        return base * 0.80
+            return base * (1.00 - 0.05 * t)
+        return base * 0.95
 
     def _split_pass(
         self, obs: list[TrackletObservation],
@@ -1145,6 +1147,27 @@ class TrackletFragmentMerger:
         component_similarity_margin: float = 0.03,
         max_speed_px_per_s: float = 800.0,
         spatial_bypass_margin: float = 0.05,
+        # E — motion-only post-merge pass. After SigLIP union-find, run an
+        # extra pass merging tracklet pairs with short gap + plausible
+        # trajectory continuation, ignoring appearance. Catches over-fragmented
+        # tracks where G8 post-hoc split chopped one person mid-walk.
+        #
+        # R6: gap_s 3.0 (was 5.0) — beyond 3s extrapolation is too noisy,
+        # let SigLIP handle longer gaps.
+        # R1: max_extrap_ratio replaces absolute px — error must be ≤
+        # this × bbox height of ti's last observation. Scales với độ xa
+        # tới camera (person 60px height → 30px budget; 200px → 100px).
+        # R2: max_velocity_angle_deg — angle giữa velocity tail của ti và
+        # velocity head của tj. Cross-walk handoff sẽ có angle >60°.
+        # R3: min_velocity_px_per_s — dưới ngưỡng này coi như "đứng yên",
+        # extrapolation không đáng tin, dùng tight foot-point gate thay thế.
+        # R4: min_obs_each_side — cả ti và tj phải có ≥ obs này để velocity
+        # reliable.
+        motion_merge_max_gap_seconds: float = 3.0,
+        motion_merge_max_extrap_ratio: float = 0.5,
+        motion_merge_max_velocity_angle_deg: float = 60.0,
+        motion_merge_min_velocity_px_per_s: float = 20.0,
+        motion_merge_min_obs_each_side: int = 3,
     ):
         self.sim_thresh     = similarity_threshold
         self.max_gap_s      = max_gap_seconds
@@ -1152,6 +1175,11 @@ class TrackletFragmentMerger:
         self.component_floor = max(0.0, similarity_threshold - component_similarity_margin)
         self.max_speed_px_per_s = max_speed_px_per_s
         self.spatial_bypass_thresh = min(1.0, similarity_threshold + spatial_bypass_margin)
+        self.motion_merge_max_gap_s = motion_merge_max_gap_seconds
+        self.motion_merge_max_extrap_ratio = motion_merge_max_extrap_ratio
+        self.motion_merge_max_velocity_angle_rad = math.radians(motion_merge_max_velocity_angle_deg)
+        self.motion_merge_min_velocity = motion_merge_min_velocity_px_per_s
+        self.motion_merge_min_obs = motion_merge_min_obs_each_side
 
     def merge(
         self,
@@ -1268,6 +1296,128 @@ class TrackletFragmentMerger:
                     continue
 
                 union(i, j)
+
+        # ── E: motion-only post-pass (hardened) ───────────────────────────────
+        # SigLIP threshold 0.85 vẫn từ chối nhiều pair cùng người do crop bị
+        # ngược sáng / partial body. Chạy thêm pass merge các cặp có:
+        #   • Gap ≤ motion_merge_max_gap_s (3s)                          R6
+        #   • Cả ti, tj có ≥ motion_merge_min_obs obs                    R4
+        #   • Velocity tail của ti và head của tj cùng hướng (≤60°)      R2
+        #   • Foot-point extrapolation error ≤ ratio × bbox_height       R1
+        #   • Speed cap toàn cục max_speed_px_per_s
+        # Nếu velocity quá thấp (đứng yên), fallback: tight foot-point   R3
+        # gate (dist ≤ 0.3 × bbox_height).
+        # Mọi merge được log để audit (R7).
+        if self.motion_merge_max_gap_s > 0.0:
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            n_motion_merges = 0
+
+            def _foot_velocity_tail(obs: tuple) -> tuple[float, float, float]:
+                """Velocity tại đuôi tracklet, từ 2 obs cuối. Trả (vx, vy, speed)."""
+                if len(obs) < 2:
+                    return 0.0, 0.0, 0.0
+                a, b = obs[-2], obs[-1]
+                dt = b.timestamp_second - a.timestamp_second
+                if dt <= 1e-6:
+                    return 0.0, 0.0, 0.0
+                fa = _foot_point(a.bbox)
+                fb = _foot_point(b.bbox)
+                vx = (fb[0] - fa[0]) / dt
+                vy = (fb[1] - fa[1]) / dt
+                return vx, vy, math.hypot(vx, vy)
+
+            def _foot_velocity_head(obs: tuple) -> tuple[float, float, float]:
+                """Velocity tại đầu tracklet, từ 2 obs đầu."""
+                if len(obs) < 2:
+                    return 0.0, 0.0, 0.0
+                a, b = obs[0], obs[1]
+                dt = b.timestamp_second - a.timestamp_second
+                if dt <= 1e-6:
+                    return 0.0, 0.0, 0.0
+                fa = _foot_point(a.bbox)
+                fb = _foot_point(b.bbox)
+                vx = (fb[0] - fa[0]) / dt
+                vy = (fb[1] - fa[1]) / dt
+                return vx, vy, math.hypot(vx, vy)
+
+            def _angle_between(v1: tuple, v2: tuple) -> float:
+                """Góc giữa 2 vector (rad), trong [0, π]. Trả 0 nếu vector rỗng."""
+                n1 = math.hypot(v1[0], v1[1])
+                n2 = math.hypot(v2[0], v2[1])
+                if n1 < 1e-6 or n2 < 1e-6:
+                    return 0.0
+                cos_a = (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)
+                return math.acos(max(-1.0, min(1.0, cos_a)))
+
+            for i in range(n):
+                ti = tracklets[order[i]]
+                # R4: skip tracklets quá ngắn để velocity reliable
+                if len(ti.observations) < self.motion_merge_min_obs:
+                    continue
+                ti_end_t = ends_t[i]
+                ti_end_bbox = ti.observations[-1].bbox
+                ti_end_foot = _foot_point(ti_end_bbox)
+                ti_h = max(ti_end_bbox[3] - ti_end_bbox[1], 1.0)
+                vx_i, vy_i, speed_i = _foot_velocity_tail(ti.observations)
+
+                # R1: extrap budget scale theo bbox height
+                max_extrap = self.motion_merge_max_extrap_ratio * ti_h
+
+                for j in range(i + 1, n):
+                    if find(i) == find(j):
+                        continue
+                    tj = tracklets[order[j]]
+                    # R4: skip stub-stub
+                    if len(tj.observations) < self.motion_merge_min_obs:
+                        continue
+
+                    tj_start_t = starts_t[j]
+                    gap_t = tj_start_t - ti_end_t
+                    if gap_t < 0.0 or gap_t > self.motion_merge_max_gap_s:
+                        continue
+
+                    tj_start_bbox = tj.observations[0].bbox
+                    tj_start_foot = _foot_point(tj_start_bbox)
+
+                    # Speed cap toàn cục
+                    raw_dist = _dist(ti_end_foot, tj_start_foot)
+                    if raw_dist > max(gap_t, 0.25) * self.max_speed_px_per_s:
+                        continue
+
+                    if speed_i < self.motion_merge_min_velocity:
+                        # R3: ti đứng yên — không tin extrapolation, chỉ chấp
+                        # nhận khi foot-point gần như chồng nhau (0.3× height)
+                        if raw_dist > 0.3 * ti_h:
+                            continue
+                    else:
+                        # R2: velocity angle check. So velocity tail ti vs
+                        # velocity head tj. Cross-walk handoff sẽ có góc lớn.
+                        vx_j, vy_j, speed_j = _foot_velocity_head(tj.observations)
+                        if speed_j >= self.motion_merge_min_velocity:
+                            ang = _angle_between((vx_i, vy_i), (vx_j, vy_j))
+                            if ang > self.motion_merge_max_velocity_angle_rad:
+                                continue
+
+                        # R1: extrap error ≤ ratio × bbox_h
+                        pred_x = ti_end_foot[0] + vx_i * gap_t
+                        pred_y = ti_end_foot[1] + vy_i * gap_t
+                        err = _dist((pred_x, pred_y), tj_start_foot)
+                        if err > max_extrap:
+                            continue
+
+                    # R7: log audit — mức INFO để dễ filter ra
+                    _log.info(
+                        "[motion-merge] %s ↔ %s | gap=%.2fs dist=%.0fpx speed_i=%.0fpx/s",
+                        tracklets[order[i]].track_id,
+                        tracklets[order[j]].track_id,
+                        gap_t, raw_dist, speed_i,
+                    )
+                    n_motion_merges += 1
+                    union(i, j)
+
+            if n_motion_merges > 0:
+                _log.info("[motion-merge] total %d pairs merged via motion-only pass", n_motion_merges)
 
         # ── Build merged tracklets ────────────────────────────────────────────
         root_to_members: dict[int, list[int]] = defaultdict(list)
