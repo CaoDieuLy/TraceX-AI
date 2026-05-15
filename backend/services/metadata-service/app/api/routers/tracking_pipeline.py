@@ -165,9 +165,9 @@ def _is_low_quality_crop(
     # when aspect drops below 0.9 (clearly non-upright → likely half body) or
     # exceeds 4.5 (thin sliver). Hospital CCTV with many seated patients would
     # need a lower min_aspect (~0.7) — make per-camera.
-    min_aspect: float = 0.9,
+    min_aspect: float = 0.8,
     max_aspect: float = 4.5,
-    edge_margin_px: int = 5,
+    edge_margin_px: int = 4,
 ) -> bool:
     """True when the bbox is unreliable for ReID embedding even though it's
     still useful for tracker continuity. Triggers on extreme aspect ratios
@@ -1163,7 +1163,7 @@ class TrackletFragmentMerger:
         # extrapolation không đáng tin, dùng tight foot-point gate thay thế.
         # R4: min_obs_each_side — cả ti và tj phải có ≥ obs này để velocity
         # reliable.
-        motion_merge_max_gap_seconds: float = 3.0,
+        motion_merge_max_gap_seconds: float = 4.0,
         motion_merge_max_extrap_ratio: float = 0.5,
         motion_merge_max_velocity_angle_deg: float = 60.0,
         motion_merge_min_velocity_px_per_s: float = 20.0,

@@ -107,7 +107,7 @@ VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
 # tăng (kỳ vọng 30-50%), nhưng độ tinh khiết group tăng đáng kể.
 # Component margin 0.03 → 0.05 → floor = 0.85 (cùng giá trị threshold cũ),
 # vẫn cho phép expand group qua các fragment trung gian.
-FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.90)
+FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.88)
 FRAGMENT_MERGE_MAX_GAP_SECONDS = _get_env_float("FRAGMENT_MERGE_MAX_GAP_SECONDS", 180.0)
 FRAGMENT_MERGE_COMPONENT_MARGIN = _get_env_float("FRAGMENT_MERGE_COMPONENT_MARGIN", 0.02)
 FRAGMENT_MERGE_MAX_SPEED_PX_PER_S = _get_env_float("FRAGMENT_MERGE_MAX_SPEED_PX_PER_S", 800.0)
@@ -408,7 +408,7 @@ def _detect_persons_rtdetr(
     return all_dets
 
 
-_NMS_IOU_THRESH = _get_env_float("PERSON_NMS_IOU_THRESH", 0.55)
+_NMS_IOU_THRESH = _get_env_float("PERSON_NMS_IOU_THRESH", 0.65)
 
 
 def _sanitize_dets_inplace(
@@ -418,8 +418,8 @@ def _sanitize_dets_inplace(
     # detector-noise slivers while keeping narrow side-view profiles; min_h=18
     # rejects truly tiny boxes that ReID can't handle. Should be moved to a
     # per-camera config once we have hospital-scene calibration data.
-    min_w: int = 14,
-    min_h: int = 18,
+    min_w: int = 12,
+    min_h: int = 16,
 ) -> list[list[dict]]:
     """Clip bboxes into frame bounds, drop bboxes smaller than min_w/min_h, then
     apply class-agnostic NMS at PERSON_NMS_IOU_THRESH (default 0.55) to suppress
@@ -472,9 +472,9 @@ def _sanitize_dets_inplace(
     return out
 
 
-def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.25) -> list[list[dict]]:
+def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.22) -> list[list[dict]]:
     """Person detection: RT-DETR primary (fast), GDINO fallback."""
-    rtdetr_threshold = float(os.getenv("RTDETR_PERSON_THRESHOLD", str(max(threshold, 0.2))))
+    rtdetr_threshold = float(os.getenv("RTDETR_PERSON_THRESHOLD", str(min(threshold, 0.22))))
     rtdetr_result = _detect_persons_rtdetr(frames, threshold=rtdetr_threshold)
     if rtdetr_result is not None:
         rtdetr_result = _sanitize_dets_inplace(rtdetr_result, frames)
@@ -620,7 +620,7 @@ def _process_single_video(entry: BatchVideoEntry) -> dict:
     all_detections: list[dict] = []
 
     sampled_imgs = [frame for _, frame in sampled]
-    batch_dets = _detect_persons_batch(sampled_imgs, threshold=0.25)
+    batch_dets = _detect_persons_batch(sampled_imgs, threshold=0.22)
     for (frame_idx, _frame), dets in zip(sampled, batch_dets):
         for det in dets:
             det["frame_idx"] = frame_idx
@@ -1230,69 +1230,6 @@ Do NOT include any confidence fields — the system computes confidence from
 your token logits, not from your self-report.
 Return only the JSON object, no surrounding text."""
 
-_VLM_BATCH_PROMPT_TEMPLATE = """You are analyzing {n} person crops from surveillance cameras.
-The images above show persons labeled (1) to ({n}) in order.
-
-**Critical rules:**
-- Describe visible appearance from each crop, and make limited attribute inferences ONLY from visible cues inside that crop.
-- Use "unknown" only when visible cues are insufficient, occluded, cut off by the bbox, blurry, or not present (or "no" for *_presence fields when clearly absent).
-- Do NOT infer from scene/camera/location context, surrounding people, or assumptions outside the crop.
-- Do NOT copy attributes from one person to another in the same batch.
-
-**Field formats (when visible):**
-- gender: "man" or "woman" when visible cues in the crop support the inference; otherwise "unknown"
-- age_range: "child | teenager | young_adult | middle_aged | elderly" estimated only from visible body/face/hair/posture/clothing cues in the crop; otherwise "unknown"
-- *_color: a single concrete color word in English, lowercase (dominant color if multiple); use "unknown" only when the item is not visible enough
-- upper_type: garment noun for the upper body (e.g. "shirt", "t-shirt", "jacket", "hoodie", "sweater", "blouse", "dress", "robe", "gown", "ao_dai", "jumpsuit")
-- lower_type: garment noun for the legs (e.g. "pants", "jeans", "shorts", "skirt"). For one-piece outfits see ONE-PIECE rule below.
-- shoes_type: footwear noun (e.g. "sneakers", "boots", "sandals", "heels", "slippers")
-- bag_type: bag noun (e.g. "backpack", "handbag", "shoulder_bag", "suitcase", "tote", "none")
-- hat_type: head-covering noun — see HEAD COVERING rule below
-- *_desc: 2-3 word literal description of what is visible (e.g. "white striped t-shirt")
-- *_presence (bag/hat/mask): "yes" if clearly visible, "no" if clearly not present, "unknown" if uncertain
-- hair_style: "short | long | ponytail | bald | bun | covered" (use "covered" when hat/scarf hides hair)
-- hair_color: concrete color word, "unknown" if hair not visible
-- appearance_summary: one short sentence stating only directly visible features
-
-**ONE-PIECE OUTFITS (dress, robe, hospital gown, jumpsuit, áo dài, overall):**
-When the person wears a single garment covering both upper and lower body:
-- upper_type = the one-piece kind ("dress", "robe", "gown", "jumpsuit", "overall", "ao_dai")
-- upper_color = the garment's dominant color
-- upper_desc = short description (e.g. "long red dress", "white hospital gown")
-- lower_type = repeat the SAME one-piece kind as upper_type (signals continuation of same garment)
-- lower_color = same color as upper_color
-- lower_desc = "" (empty string — do not duplicate upper_desc)
-
-**HEAD COVERING (hat_*):**
-hat_presence = "yes" for ANY head covering visible. Choose hat_type from what you see:
-- rigid hats → "cap", "beanie", "hat", "helmet"
-- hood attached to a garment → "hood"
-- cloth wrapped around the head → "headscarf" (covers hijab, turban, head wrap, religious veil, cloth tied around hair)
-- If the head covering extends down to cover shoulders or part of the torso, note it in hat_desc (e.g. "headscarf covering shoulders"). Still describe the visible part of the inner clothing in upper_*.
-
-**LAYERED CLOTHING:**
-If there is an outer layer (coat, cardigan, shawl, cape, vest) over the inner top:
-- upper_type / upper_color describe the OUTERMOST visible layer.
-- upper_desc may mention the inner layer if visible (e.g. "black coat over white shirt").
-
-Return ONLY a JSON array with exactly {n} objects in order (index 0 = person 1).
-Each object must have EXACTLY these fields and no others:
-
-{{
-  "gender": "...",
-  "age_range": "...",
-  "upper_color": "...", "upper_type": "...", "upper_desc": "...",
-  "lower_color": "...", "lower_type": "...", "lower_desc": "...",
-  "shoes_color": "...", "shoes_type": "...", "shoes_desc": "...",
-  "bag_presence": "...", "bag_type": "...", "bag_desc": "...",
-  "hat_presence": "...", "hat_color": "...", "hat_type": "...", "hat_desc": "...",
-  "mask_presence": "...",
-  "hair_style": "...", "hair_color": "...",
-  "appearance_summary": "..."
-}}
-
-Do NOT include any confidence fields. Return only the JSON array, no surrounding text."""
-
 
 _GENDER_NORM   = {"male": "man", "man": "man", "female": "woman", "woman": "woman"}
 _AGE_NORM      = {
@@ -1452,63 +1389,6 @@ def _compute_value_logprob_confs(
     return confs
 
 
-def _compute_value_logprob_confs_batch(
-    generated_token_ids: "torch.Tensor",
-    scores: list,
-    tokenizer: Any,
-    n: int,
-) -> list[dict[str, float]]:
-    """Like _compute_value_logprob_confs but partitions matches across n objects
-    in a JSON array. The k-th occurrence of each "key": "value" pair is assigned
-    to object k (0-indexed). Returns a list of n dicts.
-    """
-    import torch as _torch
-
-    token_logprobs: list[float] = []
-    for step, score_tensor in enumerate(scores):
-        if step >= len(generated_token_ids):
-            break
-        try:
-            logp = _torch.log_softmax(score_tensor.float(), dim=-1)
-            tok_id = int(generated_token_ids[step])
-            token_logprobs.append(float(logp[..., tok_id].squeeze().item()))
-        except Exception:
-            token_logprobs.append(0.0)
-
-    decoded = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
-
-    cum_char_to_tok: list[int] = []
-    for tok_idx in range(len(generated_token_ids)):
-        piece = tokenizer.decode(generated_token_ids[tok_idx:tok_idx + 1], skip_special_tokens=True)
-        for _ in piece:
-            cum_char_to_tok.append(tok_idx)
-    while len(cum_char_to_tok) < len(decoded):
-        cum_char_to_tok.append(len(generated_token_ids) - 1)
-
-    pattern = re.compile(r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.)*)"')
-    per_object: list[dict[str, float]] = [dict() for _ in range(n)]
-    key_seen_count: dict[str, int] = {}
-
-    for match in pattern.finditer(decoded):
-        key = match.group(1)
-        occurrence = key_seen_count.get(key, 0)
-        key_seen_count[key] = occurrence + 1
-        if occurrence >= n:
-            continue  # extra occurrences (shouldn't happen with valid output)
-        val_start = match.start(2)
-        val_end   = match.end(2)
-        if val_end <= val_start:
-            continue
-        tok_lo = cum_char_to_tok[val_start] if val_start < len(cum_char_to_tok) else 0
-        tok_hi = cum_char_to_tok[val_end - 1] if (val_end - 1) < len(cum_char_to_tok) else tok_lo
-        span = token_logprobs[tok_lo:tok_hi + 1]
-        if not span:
-            continue
-        mean_logp = sum(span) / len(span)
-        per_object[occurrence][key] = max(0.0, min(1.0, float(_torch.tensor(mean_logp).exp().item())))
-
-    return per_object
-
 
 def _attach_logit_confs(attrs: dict, logit_confs: dict[str, float]) -> dict:
     """Merge logit-derived confidences into a parsed attrs dict.
@@ -1531,16 +1411,16 @@ def _attach_logit_confs(attrs: dict, logit_confs: dict[str, float]) -> dict:
     return attrs
 
 
-def _extract_json_array(raw: str) -> list[dict]:
-    """Extract the first complete JSON array from model output."""
+def _extract_json_object(raw: str) -> dict:
+    """Extract the first complete JSON object from model output."""
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, count=1, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned, count=1).strip()
 
-    start = cleaned.find("[")
+    start = cleaned.find("{")
     if start == -1:
-        raise ValueError(f"JSON array not found: {cleaned[:200]}")
+        raise ValueError(f"JSON object not found: {cleaned[:200]}")
 
     depth = 0
     in_string = False
@@ -1559,18 +1439,18 @@ def _extract_json_array(raw: str) -> list[dict]:
 
         if ch == '"':
             in_string = True
-        elif ch == "[":
+        elif ch == "{":
             depth += 1
-        elif ch == "]":
+        elif ch == "}":
             depth -= 1
             if depth == 0:
                 payload = cleaned[start:idx + 1]
                 parsed = json.loads(payload)
-                if not isinstance(parsed, list):
-                    raise ValueError(f"Expected JSON array, got {type(parsed).__name__}")
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"Expected JSON object, got {type(parsed).__name__}")
                 return parsed
 
-    raise ValueError(f"JSON array incomplete: {cleaned[:200]}")
+    raise ValueError(f"JSON object incomplete: {cleaned[:200]}")
 
 
 def _caption_crop_vlm(crop: "Image.Image") -> dict:
@@ -1609,12 +1489,7 @@ def _caption_crop_vlm(crop: "Image.Image") -> dict:
         gen_ids = output_ids[0][input_len:]
         raw = processor.decode(gen_ids, skip_special_tokens=True).strip()
 
-        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if not json_match:
-            logger.warning("[vlm] JSON not found in output: %s", raw[:200])
-            return _default_attributes()
-
-        attrs = _parse_vlm_attrs(json.loads(json_match.group()))
+        attrs = _parse_vlm_attrs(_extract_json_object(raw))
 
         # Token-level confidences from the model's own logits.
         try:
@@ -1639,7 +1514,13 @@ def _vlm_progress_bar(done: int, total: int, width: int = 25) -> str:
 
 
 def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag: str = "") -> list:
-    """Adaptive Qwen2-VL captioning with OOM-aware batch backoff."""
+    """Adaptive Qwen2-VL captioning with independent per-crop prompts.
+
+    Each batch item has its own single-image prompt and its own generated JSON
+    object. This keeps GPU batching benefits without asking Qwen to reason over
+    multiple people in one long JSON-array prompt, which can mix attributes
+    between crops and makes parsing more fragile.
+    """
     model = get_model("qwen2vl")
     processor = get_model("qwen2vl_processor")
     if model is None or processor is None:
@@ -1661,7 +1542,7 @@ def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag:
             elapsed = time.perf_counter() - _vlm_t0
             eta = (elapsed / done * (total - done)) if done else 0
             logger.info(
-                "[vlm] %s %s  %.0fs elapsed  ETA %.0fs  batch=%d current=%d start=%d max=%d tokens/crop=%d",
+                "[vlm] %s %s  %.0fs elapsed  ETA %.0fs  batch=%d current=%d start=%d max=%d tokens/crop=%d mode=independent",
                 tag,
                 _vlm_progress_bar(done, total),
                 elapsed,
@@ -1698,19 +1579,29 @@ def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag:
 
         inputs = None
         output_ids = None
+        scores = []
         try:
-            prompt = _VLM_BATCH_PROMPT_TEMPLATE.format(n=n)
-            content = [{"type": "image", "image": c} for c in batch]
-            content.append({"type": "text", "text": prompt})
+            texts = []
+            for crop in batch:
+                messages = [{"role": "user", "content": [
+                    {"type": "image", "image": crop},
+                    {"type": "text", "text": _VLM_PROMPT},
+                ]}]
+                texts.append(processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                ))
 
-            messages = [{"role": "user", "content": content}]
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=[text], images=batch, return_tensors="pt").to(device)
+            inputs = processor(
+                text=texts,
+                images=batch,
+                return_tensors="pt",
+                padding=True,
+            ).to(device)
 
             with torch.no_grad():
                 gen = model.generate(
                     **inputs,
-                    max_new_tokens=VLM_BATCH_MAX_NEW_TOKENS_PER_CROP * n,
+                    max_new_tokens=VLM_BATCH_MAX_NEW_TOKENS_PER_CROP,
                     do_sample=False,
                     temperature=None,
                     top_p=None,
@@ -1722,38 +1613,83 @@ def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag:
             scores = list(gen.scores or [])
 
             input_len = inputs["input_ids"].shape[1]
-            gen_ids = output_ids[0][input_len:]
-            raw = processor.decode(gen_ids, skip_special_tokens=True).strip()
+            tokenizer = getattr(processor, "tokenizer", processor)
+            batch_attrs: list[dict | None] = []
+            fallback_rows: list[int] = []
 
-            parsed_list = _extract_json_array(raw)
-            if not isinstance(parsed_list, list) or len(parsed_list) != n:
-                raise ValueError(f"Expected {n} objects, got {len(parsed_list) if isinstance(parsed_list, list) else type(parsed_list)}")
+            for row_idx, crop in enumerate(batch):
+                gen_ids = output_ids[row_idx][input_len:]
+                raw = processor.decode(gen_ids, skip_special_tokens=True).strip()
 
-            logger.debug("[vlm] batch(%d) OK at offset %d", n, i)
+                try:
+                    attrs = _parse_vlm_attrs(_extract_json_object(raw))
+                except Exception as parse_exc:
+                    logger.warning(
+                        "[vlm] %s output parse failed at %d/%d (batch=%d row=%d): %s",
+                        tag,
+                        i + row_idx,
+                        total,
+                        n,
+                        row_idx,
+                        parse_exc,
+                    )
+                    batch_attrs.append(None)
+                    fallback_rows.append(row_idx)
+                    continue
 
-            # Logit-derived per-object confidence. In batch mode every key
-            # appears n times in `decoded` (once per object). We re-walk the
-            # decoded string and partition matches by object — the k-th
-            # occurrence of each key belongs to object k. _compute_value_logprob_confs
-            # returns a flat dict; we instead handle batch here directly.
-            try:
-                tokenizer = getattr(processor, "tokenizer", processor)
-                batch_logit_confs = _compute_value_logprob_confs_batch(
-                    gen_ids.detach().cpu(), scores, tokenizer, n,
+                try:
+                    row_scores = [
+                        score_tensor[row_idx] if getattr(score_tensor, "ndim", 0) > 1 else score_tensor
+                        for score_tensor in scores
+                    ]
+                    logit_confs = _compute_value_logprob_confs(
+                        gen_ids.detach().cpu(), row_scores, tokenizer,
+                    )
+                    _attach_logit_confs(attrs, logit_confs)
+                except Exception as conf_exc:
+                    logger.warning(
+                        "[vlm] logit-conf compute failed (batch=%d row=%d): %s",
+                        n,
+                        row_idx,
+                        conf_exc,
+                    )
+
+                batch_attrs.append(attrs)
+
+            had_fallback_rows = bool(fallback_rows)
+            if had_fallback_rows:
+                logger.warning(
+                    "[vlm] %s batch(%d) at offset %d needs %d single-crop parse fallback(s)",
+                    tag,
+                    n,
+                    i,
+                    len(fallback_rows),
                 )
-            except Exception as conf_exc:
-                logger.warning("[vlm] logit-conf compute failed (batch=%d): %s", n, conf_exc)
-                batch_logit_confs = [{} for _ in range(n)]
+                try:
+                    del gen
+                    del inputs
+                    del output_ids
+                    del scores
+                except Exception:
+                    pass
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                for row_idx in fallback_rows:
+                    batch_attrs[row_idx] = _caption_crop_vlm(batch[row_idx])
+            else:
+                logger.debug("[vlm] independent batch(%d) OK at offset %d", n, i)
 
-            for k, obj in enumerate(parsed_list):
-                attrs = _parse_vlm_attrs(obj)
-                if k < len(batch_logit_confs):
-                    _attach_logit_confs(attrs, batch_logit_confs[k])
-                results.append(attrs)
+            results.extend(attrs if attrs is not None else _default_attributes() for attrs in batch_attrs)
             i += n
-            stable_windows += 1
+            if had_fallback_rows:
+                stable_windows = 0
+                if len(fallback_rows) == n and current_batch_size > 1:
+                    current_batch_size = max(1, current_batch_size // 2)
+            else:
+                stable_windows += 1
             _log_progress(len(results), n)
-            _maybe_grow_batch()
+            if not had_fallback_rows:
+                _maybe_grow_batch()
 
         except RuntimeError as exc:
             msg = str(exc).lower()
@@ -1816,6 +1752,7 @@ def _caption_crops_vlm_batch(crops: list, batch_size: int = VLM_BATCH_SIZE, tag:
             try:
                 del inputs
                 del output_ids
+                del scores
             except Exception:
                 pass
             if device.type == "cuda":
@@ -1897,7 +1834,7 @@ def process_video(req: ProcessVideoRequest) -> ProcessVideoResponse:
     all_detections: list[dict] = []
 
     sampled_imgs = [frame for _, frame in sampled]
-    batch_dets = _detect_persons_batch(sampled_imgs, threshold=0.25)
+    batch_dets = _detect_persons_batch(sampled_imgs, threshold=0.22)
     for (frame_idx, _frame), dets in zip(sampled, batch_dets):
         for det in dets:
             det["frame_idx"] = frame_idx
@@ -2336,7 +2273,7 @@ def _process_video_sync(
     t_det_start = time.time()
     detector = "RT-DETR" if get_model("rtdetr") is not None else "GDINO-fallback"
     logger.info("[pipeline] %s: running %s detection on %d frames...", video_id, detector, len(sampled_frames))
-    all_batch_dets = _detect_persons_batch([sf.image for sf in sampled_frames], threshold=0.25)
+    all_batch_dets = _detect_persons_batch([sf.image for sf in sampled_frames], threshold=0.22)
     logger.warning("[pipeline] %s: %s done in %.1fs", video_id, detector, time.time() - t_det_start)
 
     # B1: build (sf, det) work items, run crop + crop-Laplacian in parallel.
@@ -2426,7 +2363,7 @@ def _process_video_sync(
         #   0.30 → impurity 0.59% nhưng max track length -83%, concurrency -51%
         # 0.20 là sweet spot: giảm merge nhầm 58%, IDS 54%, frag/GT gần như
         # giữ nguyên, không phá vỡ track dài (max length giữ ở 648 frame).
-        discriminative_margin=0.20,
+        discriminative_margin=0.15,
         # FPS-scaled pixel thresholds
         max_head_center_distance=120.0 * _fps_ratio_4,
         max_foot_distance=150.0 * _fps_ratio_4,
@@ -2447,10 +2384,10 @@ def _process_video_sync(
     # noise/false-positive.
     scorer = TrackletQualityScorer(
         min_confidence=0.35,
-        min_frames=3,           # ≥1s ở 3 FPS — đủ cho 1 cử động ngắn
-        min_density=0.2,       # 1 obs / 6.6 frames = ~2.2s — tracklet liên tục
-        min_duration_s=0.65,     # bỏ tracklet < 0.65s (thường là FP detection burst)
-        min_laplacian=30.0,
+        min_frames=2,           # ≥1s ở 3 FPS — đủ cho 1 cử động ngắn
+        min_density=0.15,       # 1 obs / 6.6 frames = ~2.2s — tracklet liên tục
+        min_duration_s=0.4,     # bỏ tracklet < 0.65s (thường là FP detection burst)
+        min_laplacian=25.0,
     )
     quality_results = {t.track_id: scorer.score(t) for t in local_tracklets}
     accepted = [t for t in local_tracklets if quality_results[t.track_id].accepted]
@@ -2565,7 +2502,7 @@ def _process_video_sync(
 
     # ── VLM: Qwen2-VL-7B trên ~25 merged tracklets ───────────────────────────
     logger.info(
-        "[vlm] %s: captioning %d merged tracklets (start_batch=%d, max_batch=%d, tokens/crop=%d)",
+        "[vlm] %s: captioning %d merged tracklets (independent_batch_start=%d, max_batch=%d, tokens/crop=%d)",
         video_id,
         len(all_rep_crops),
         VLM_BATCH_SIZE,
