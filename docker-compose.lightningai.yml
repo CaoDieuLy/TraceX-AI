@@ -139,6 +139,22 @@ services:
       - TORCH_HOME=/workspace/models/torch
       - TRANSFORMERS_OFFLINE=0
       - HF_TOKEN=${HF_TOKEN:-}
+      # O1 — RT-DETR profiling. Set to 1 to log per-stage timing
+      # (preprocess wait / H2D / forward / post-process) at the end of each video.
+      - RTDETR_PROFILE=${RTDETR_PROFILE:-1}
+      # O3b — GPU-side preprocessing (resize + rescale on GPU instead of HF
+      # processor on CPU). Cuts preprocess_wait from ~36ms/frame to ~3ms.
+      # Bit-equality verified on synthetic + structured frames (max diff 0.003
+      # in fp16). Set to 0 to fall back to legacy CPU path if needed.
+      - RTDETR_GPU_PREPROCESS=${RTDETR_GPU_PREPROCESS:-1}
+      # Pipeline frame-sampling rate. Offline benchmark on camera_0002 GT
+      # showed purity peaks at 3 FPS (92.6%) vs 4 FPS (87.2%) and 6 FPS
+      # (82.9%) — counter-intuitive but consistent: lower FPS = larger
+      # inter-frame motion = less ambiguous cost matrix when people are
+      # close together. Tracker thresholds auto-scale to this value.
+      # Caveat: very short actions (<1.5s falls) may lose VideoMAE frames;
+      # raise to 4-6 if fall-detection accuracy matters more than raw purity.
+      - PIPELINE_SAMPLE_FPS=${PIPELINE_SAMPLE_FPS:-3}
       - QWEN2VL_MODEL_ID=${QWEN2VL_MODEL_ID:-}
       - VLM_BATCH_SIZE=${VLM_BATCH_SIZE:-4}
       - VLM_BATCH_MAX_SIZE=${VLM_BATCH_MAX_SIZE:-8}

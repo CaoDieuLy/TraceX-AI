@@ -18,6 +18,7 @@ Tables written (v3.3 schema):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -603,7 +604,10 @@ def ingest_move_and_process(
             tmp_path = _Path(tmp.name)
             tmp.write(video_bytes)
         try:
-            sampled = VideoFrameSampler(sample_fps=4).sample(str(tmp_path))
+            # Must match PIPELINE_SAMPLE_FPS used by _process_video_sync —
+            # the pre-decoded frames are passed straight through.
+            ingest_fps = int(os.environ.get("PIPELINE_SAMPLE_FPS", "6"))
+            sampled = VideoFrameSampler(sample_fps=ingest_fps).sample(str(tmp_path))
         finally:
             tmp_path.unlink(missing_ok=True)
         return sampled

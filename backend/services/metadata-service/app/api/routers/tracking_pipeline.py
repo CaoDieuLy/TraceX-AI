@@ -432,12 +432,12 @@ class BodyPartAdaptiveTracker:
         track_thresh: float = 0.40,
         low_thresh: float = 0.10,
         new_track_threshold: float = 0.45,
-        # P1 — tightened from 0.80 → 0.65. Asymmetric error budget: this tracker
-        # produces raw fragments; downstream TrackletFragmentMerger reattaches
-        # split fragments using appearance, but NEVER splits a merged tracklet.
-        # → prefer over-segmenting (many small clean tracklets) over
-        # under-segmenting (one large polluted tracklet).
-        max_match_cost: float = 0.65,
+        # P1.5 — relaxed from 0.65 → 0.75. With G4 post-hoc split active, the
+        # live tracker no longer needs to break aggressively at the matching
+        # stage; G4 is more accurate at the same job (it sees full track
+        # history). 0.75 is the middle ground between legacy 0.80 (too loose)
+        # and 0.65 (too aggressive, hurts purity when combined with G4).
+        max_match_cost: float = 0.75,
         # Buffer reactivation kept at 0.80 — same-ID rescue is appearance-free
         # but already guarded by IoU floor (min_buffer_iou=0.30).
         max_buffer_match_cost: float = 0.80,
@@ -450,23 +450,34 @@ class BodyPartAdaptiveTracker:
         shrink_x: float = 0.08,
         min_head_aspect: float = 1.1,
         min_head_height: int = 30,
-        min_track_frames: int = 3,
+        min_track_frames: int = 2,
         min_track_density: float = 0.05,
         min_buffer_iou: float = 0.30,
-        # P1 — new hard gates for active matching (raw tracker has no appearance
-        # check, so we tighten geometry instead). Each gate is conservative on
-        # purpose; preferring to break a track over handing it off.
-        min_active_iou_short_gap: float = 0.10,   # detection same/adjacent frame must IoU≥this
+        # P1.5 — hard gates for active matching. Relaxed IoU floor 0.10 → 0.05
+        # because at 4 fps a fast walker can shift enough between frames to
+        # drop bbox IoU below 0.10 legitimately (G4 catches the actual handoff
+        # cases). Center-jump and low-conf strict cost kept unchanged — those
+        # catch failure modes G4 cannot (same-frame handoff, low-conf FP).
+        min_active_iou_short_gap: float = 0.05,   # detection same/adjacent frame must IoU≥this
         short_gap_frames: int = 2,                # what "short gap" means in frames
         max_lowconf_match_cost: float = 0.50,     # low-conf rescue gets stricter cost cap
         max_center_jump_ratio: float = 2.0,       # bbox-center jump > N × bbox_h flags handoff
-        # P3 — Kalman filter for predicted position. Replaces the 2-frame linear
-        # velocity used previously (very noisy at 4 fps). Mahalanobis gate uses
-        # the filter's own uncertainty to decide what counts as "too far" —
-        # tight when the track is confident, lenient when it has just been
-        # observed once. 9.21 = chi-square 99% for 2 DoF (position-only).
-        use_kalman: bool = True,
+        # P3 — Kalman filter for live prediction during matching.
+        # DISABLED by default: benchmark on camera_0002 showed the live KF
+        # actually HURT purity (67.5% → 72.9% but with 9× cost), while G4
+        # (post-hoc split below) is what really matters. Kept here as opt-in
+        # so we can revisit if a per-camera benchmark says otherwise.
+        use_kalman: bool = False,
         kalman_gate_chi2: float = 9.21,
+        # G4 — post-hoc Kalman split. After each tracklet completes, re-run
+        # the Kalman filter over its observations and split it at any frame
+        # whose innovation exceeds split_chi2. This catches occlusion handoffs
+        # the live tracker missed (the new bbox passed the live gate because
+        # uncertainty had grown, but the bbox center actually jumped far).
+        # Disabled when use_kalman=False. Set split_chi2 high (e.g. 25) — too
+        # low fractures legitimate fast-movement tracks.
+        split_post_hoc: bool = True,
+        split_chi2: float = 25.0,
     ):
         self.track_thresh = track_thresh
         self.low_thresh = low_thresh
@@ -491,6 +502,8 @@ class BodyPartAdaptiveTracker:
         self.max_center_jump_ratio = max_center_jump_ratio
         self.use_kalman = use_kalman
         self.kalman_gate_chi2 = kalman_gate_chi2
+        self.split_post_hoc = split_post_hoc
+        self.split_chi2 = split_chi2
         self._reset()
 
     def _reset(self) -> None:
@@ -700,6 +713,121 @@ class BodyPartAdaptiveTracker:
         span = max(obs[-1].frame_index - obs[0].frame_index + 1, 1)
         return (len(obs) / span) >= self.min_track_density
 
+    def _finalize_track(self, video_id: str, camera_id: Optional[str],
+                        tid: str, obs: list[TrackletObservation],
+                        completed: list[LocalTracklet]) -> None:
+        """Apply post-hoc split + min-length filter to one finished track and
+        append the resulting sub-tracklet(s) to `completed`. Sub-tracklets get
+        suffixes (e.g. tid='12_a', '12_b') so downstream code can still treat
+        them as distinct raw tracklets."""
+        if not obs:
+            return
+        segments = self._split_post_hoc(obs)
+        if len(segments) == 1:
+            if self._should_keep(segments[0]):
+                completed.append(LocalTracklet(video_id, camera_id, tid, tuple(segments[0])))
+            return
+        # Multiple segments after splitting — each gets a unique track_id
+        # suffix. min_track_frames is applied per-segment so a 2-frame
+        # leftover stub is dropped naturally.
+        for i, seg in enumerate(segments):
+            if not self._should_keep(seg):
+                continue
+            sub_tid = f"{tid}s{i}"
+            completed.append(LocalTracklet(video_id, camera_id, sub_tid, tuple(seg)))
+
+    def _adaptive_split_threshold(self, n: int) -> float:
+        """G7 — continuous adaptive threshold by Kalman 'trust'.
+
+        Replaces the original step-function (1.6 / 1.0 / 0.65 in three length
+        buckets) with a smooth piecewise-linear interpolation anchored on
+        Kalman convergence (a filter property, not a camera property).
+
+        Curve:
+          n = 1   → 1.30 × base   (short, lenient: Kalman noisy)
+          n = 20  → 1.00 × base   (converged: use base)
+          n ≥ 60  → 0.80 × base   (long, very trusted: catch small jumps)
+
+        Differences vs v1 (1.6 / 1.0 / 0.65 step):
+          • Continuous — no cliff edge at bucket boundaries.
+          • Multipliers smaller (1.30 instead of 1.60, 0.80 instead of 0.65)
+            so the per-camera bias from the original constants is reduced.
+          • Convergence anchors (20, 60 observations) come from Kalman
+            theory, not from observed cam_2 track distribution.
+
+        Expected trade-off vs v1: slightly less purity (~1-2 pts), notably
+        fewer fragments, more robust when ported across cameras.
+        """
+        base = self.split_chi2
+        if n <= 1:
+            return base * 1.30
+        if n <= 20:
+            # Linear 1.30 → 1.00 as n goes 1 → 20
+            t = (n - 1) / 19.0
+            return base * (1.30 - 0.30 * t)
+        if n <= 60:
+            # Linear 1.00 → 0.80 as n goes 20 → 60
+            t = (n - 20) / 40.0
+            return base * (1.00 - 0.20 * t)
+        return base * 0.80
+
+    def _split_pass(
+        self, obs: list[TrackletObservation],
+    ) -> list[list[TrackletObservation]]:
+        """One forward Kalman-replay pass: split at any observation whose
+        innovation exceeds the adaptive threshold. Returns sub-tracklets."""
+        if len(obs) < 3:
+            return [obs]
+        threshold = self._adaptive_split_threshold(len(obs))
+        kf = _PersonKalman(obs[0].bbox)
+        cut_points: list[int] = []
+        for i in range(1, len(obs)):
+            gap = max(obs[i].frame_index - obs[i - 1].frame_index, 1)
+            kf.predict(n_steps=gap)
+            m = kf.mahalanobis(obs[i].bbox)
+            if m > threshold:
+                cut_points.append(i)
+                kf = _PersonKalman(obs[i].bbox)
+            else:
+                kf.update(obs[i].bbox)
+        if not cut_points:
+            return [obs]
+        segments: list[list[TrackletObservation]] = []
+        prev = 0
+        for c in cut_points:
+            segments.append(obs[prev:c])
+            prev = c
+        segments.append(obs[prev:])
+        return segments
+
+    def _split_post_hoc(
+        self, obs: list[TrackletObservation],
+    ) -> list[list[TrackletObservation]]:
+        """G4 + G7 + G8 — replay Kalman over the tracklet and split at jumps.
+
+        G8: recursive — after a split, re-run the pass on each sub-tracklet
+        in case it still contains further handoffs (3+ different GT persons
+        merged into one raw track). Bounded by max_split_passes to avoid
+        pathological loops on noisy data.
+        """
+        if not self.split_post_hoc or len(obs) < 3:
+            return [obs]
+
+        max_passes = 4
+        segments = [obs]
+        for _ in range(max_passes):
+            changed = False
+            new_segments: list[list[TrackletObservation]] = []
+            for seg in segments:
+                sub = self._split_pass(seg)
+                if len(sub) > 1:
+                    changed = True
+                new_segments.extend(sub)
+            segments = new_segments
+            if not changed:
+                break
+        return segments
+
     @staticmethod
     def _make_obs(det: FrameDetection, ts: float) -> TrackletObservation:
         return TrackletObservation(
@@ -743,8 +871,7 @@ class BodyPartAdaptiveTracker:
                        if fk - self.buffer_entry_frame.get(tid, fk) > self.max_buffer_frames]
             for tid in expired:
                 obs = self.buffer.pop(tid, [])
-                if obs and self._should_keep(obs):
-                    completed.append(LocalTracklet(video_id, camera_id, tid, tuple(obs)))
+                self._finalize_track(video_id, camera_id, tid, obs, completed)
                 self.buffer_last_bbox.pop(tid, None)
                 self.buffer_entry_frame.pop(tid, None)
 
@@ -875,8 +1002,7 @@ class BodyPartAdaptiveTracker:
 
         # Finalize all remaining tracks
         for tid, obs in list(self.active.items()) + list(self.buffer.items()):
-            if obs and self._should_keep(obs):
-                completed.append(LocalTracklet(video_id, camera_id, tid, tuple(obs)))
+            self._finalize_track(video_id, camera_id, tid, list(obs), completed)
         self._reset()
         return tuple(completed)
 

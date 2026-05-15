@@ -225,23 +225,25 @@ def evaluate(tracker_factory, label: str, with_crops: bool = False,
 # ─────────────────────────────────────────────────────────────────────────
 
 def baseline_tracker():
-    """Pre-P1 settings — the values were the defaults before today's edit."""
+    """Pre-P1 settings — pin split_post_hoc OFF so we measure the pre-edit
+    tracker behaviour without G4."""
     return BodyPartAdaptiveTracker(
         track_thresh=0.30,
         low_thresh=0.10,
         new_track_threshold=0.30,
-        max_match_cost=0.80,          # legacy
-        max_lowconf_match_cost=0.80,  # legacy = same as high
-        min_active_iou_short_gap=0.0, # disabled
-        max_center_jump_ratio=1e9,    # disabled
+        max_match_cost=0.80,
+        max_lowconf_match_cost=0.80,
+        min_active_iou_short_gap=0.0,
+        max_center_jump_ratio=1e9,
         min_track_frames=2,
         min_track_density=0.03,
         use_kalman=False,
+        split_post_hoc=False,
     )
 
 
 def p1_tracker():
-    """P1 — tightened geometry, no Kalman."""
+    """P1 — tightened geometry only."""
     return BodyPartAdaptiveTracker(
         track_thresh=0.30,
         low_thresh=0.10,
@@ -249,11 +251,13 @@ def p1_tracker():
         min_track_frames=2,
         min_track_density=0.03,
         use_kalman=False,
+        split_post_hoc=False,
     )
 
 
 def p3_tracker():
-    """P3 — P1 + dedicated SORT-style Kalman filter + Mahalanobis gate."""
+    """P3 — P1 + dedicated SORT-style Kalman filter + Mahalanobis gate.
+    Post-hoc split disabled here so we measure the pure Kalman tracker."""
     return BodyPartAdaptiveTracker(
         track_thresh=0.30,
         low_thresh=0.10,
@@ -261,6 +265,54 @@ def p3_tracker():
         min_track_frames=2,
         min_track_density=0.03,
         use_kalman=True,
+        split_post_hoc=False,
+    )
+
+
+def p4_tracker():
+    """P4 — P3 + G6 (min_track_frames=3) + G4 (post-hoc Kalman split)."""
+    return BodyPartAdaptiveTracker(
+        track_thresh=0.30,
+        low_thresh=0.10,
+        new_track_threshold=0.30,
+        min_track_frames=3,
+        min_track_density=0.03,
+        use_kalman=True,
+        split_post_hoc=True,
+        split_chi2=25.0,
+    )
+
+
+def baseline_plus_g4():
+    """BASELINE + G4 only (no live Kalman) — isolates G4 contribution."""
+    return BodyPartAdaptiveTracker(
+        track_thresh=0.30, low_thresh=0.10, new_track_threshold=0.30,
+        max_match_cost=0.80, max_lowconf_match_cost=0.80,
+        min_active_iou_short_gap=0.0, max_center_jump_ratio=1e9,
+        min_track_frames=2, min_track_density=0.03,
+        use_kalman=False, split_post_hoc=True, split_chi2=25.0,
+    )
+
+
+def p1_plus_g4():
+    """Old P1 + G4 — pin the old strict P1 values for an apples-to-apples
+    comparison after we relaxed P1 → P1.5."""
+    return BodyPartAdaptiveTracker(
+        track_thresh=0.30, low_thresh=0.10, new_track_threshold=0.30,
+        min_track_frames=2, min_track_density=0.03,
+        max_match_cost=0.65,                 # old P1
+        min_active_iou_short_gap=0.10,       # old P1
+        use_kalman=False, split_post_hoc=True, split_chi2=25.0,
+    )
+
+
+def p15_g4_g7_g8():
+    """P1.5 (relaxed) + G4 + G7 (adaptive chi2) + G8 (recursive split).
+    Uses the new defaults — exercise the production code path."""
+    return BodyPartAdaptiveTracker(
+        track_thresh=0.30, low_thresh=0.10, new_track_threshold=0.30,
+        min_track_frames=2, min_track_density=0.03,
+        # All P1.5 + G4/G7/G8 settings come from the constructor defaults.
     )
 
 
@@ -285,15 +337,16 @@ if __name__ == "__main__":
     cached_dets = build_detections(gt_by_frame, with_crops=True)
     print(f"  done: {sum(len(v) for v in cached_dets[0].values())} dets with crops")
 
-    base = evaluate(baseline_tracker, "BASELINE (pre-P1)", cached_dets=cached_dets)
-    p1   = evaluate(p1_tracker,       "P1 (tightened geometry)", cached_dets=cached_dets)
-    p3   = evaluate(p3_tracker,       "P3 (P1 + Kalman filter)", cached_dets=cached_dets)
-    if base and p1:
-        print("\n══════ BASELINE → P1 ══════")
-        diff(base, p1)
-    if p1 and p3:
-        print("\n══════ P1 → P3 ══════")
-        diff(p1, p3)
-    if base and p3:
-        print("\n══════ BASELINE → P3 (total gain) ══════")
-        diff(base, p3)
+    base    = evaluate(baseline_tracker, "BASELINE (pre-P1)", cached_dets=cached_dets)
+    base_g4 = evaluate(baseline_plus_g4,  "BASELINE + G4", cached_dets=cached_dets)
+    p1_g4   = evaluate(p1_plus_g4,        "P1 + G4 (old strict P1)", cached_dets=cached_dets)
+    p15     = evaluate(p15_g4_g7_g8,      "P1.5 + G4 + G7 + G8 ★", cached_dets=cached_dets)
+    if p1_g4 and p15:
+        print("\n══════ P1 + G4 → P1.5 + G4 + G7 + G8 ══════")
+        diff(p1_g4, p15)
+    if base_g4 and p15:
+        print("\n══════ BASELINE + G4 → P1.5 + G4 + G7 + G8 ══════")
+        diff(base_g4, p15)
+    if base and p15:
+        print("\n══════ BASELINE → P1.5 + G4 + G7 + G8 (total gain) ══════")
+        diff(base, p15)

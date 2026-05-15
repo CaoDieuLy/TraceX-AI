@@ -76,3 +76,5 @@ frontend/next-env.d.ts
 # Core dumps
 core.*
 core
+# Large benchmark video — keep local only
+camera_0002/video.mp4

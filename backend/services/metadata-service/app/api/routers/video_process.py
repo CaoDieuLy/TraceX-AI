@@ -197,8 +197,17 @@ def _detect_persons_rtdetr(
     """RT-DETR R50 person detection — primary detector when loaded.
     Returns None if not available (caller falls back to GDINO).
     batch_size=128 on A100 80GB (256 causes OOM).
-    CPU preprocessing is pipelined with GPU inference via ThreadPoolExecutor.
+
+    Has two preprocessing paths:
+      • O3b GPU path (default): stack numpy → torch GPU resize + rescale, no PIL
+        or HF processor on the hot path. Cuts preprocess_wait ~36 ms/frame → ~3 ms.
+      • Legacy CPU path: HF processor with PIL. Used as fallback when
+        RTDETR_GPU_PREPROCESS=0 or processor config doesn't match expectations.
+
+    O1 (debug): logs cumulative time spent in each sub-stage. Toggle via env
+    var RTDETR_PROFILE=1.
     """
+    import time
     from concurrent.futures import ThreadPoolExecutor
     model = get_model("rtdetr")
     processor = get_model("rtdetr_processor")
@@ -208,29 +217,122 @@ def _detect_persons_rtdetr(
     person_ids: set = get_model("rtdetr_person_ids") or {0, 1}
     device = _get_device()
     dtype = torch.float16
+    profile_on = os.environ.get("RTDETR_PROFILE", "0") == "1"
+    use_gpu_pre = os.environ.get("RTDETR_GPU_PREPROCESS", "1") == "1"
+
+    # O3b — read processor config once. If the processor config differs from
+    # what _preprocess_gpu can replicate (e.g. it wants padding or BGR), fall
+    # back to the legacy CPU path silently.
+    tgt_h = processor.size.get("height") if isinstance(processor.size, dict) else None
+    tgt_w = processor.size.get("width") if isinstance(processor.size, dict) else None
+    pre_compatible = (
+        use_gpu_pre
+        and tgt_h is not None and tgt_w is not None
+        and bool(getattr(processor, "do_resize", True))
+        and not bool(getattr(processor, "do_pad", False))
+        and bool(getattr(processor, "do_rescale", True))
+    )
+    if not pre_compatible and use_gpu_pre:
+        logger.warning(
+            "[rtdetr] GPU preprocess incompatible with processor config "
+            "(size=%s do_resize=%s do_pad=%s do_rescale=%s) — falling back to CPU path",
+            getattr(processor, "size", None),
+            getattr(processor, "do_resize", None),
+            getattr(processor, "do_pad", None),
+            getattr(processor, "do_rescale", None),
+        )
+
+    # Pre-stage normalize tensors on GPU (only used when do_normalize=True).
+    do_normalize = bool(getattr(processor, "do_normalize", False))
+    rescale_factor = float(getattr(processor, "rescale_factor", 1.0 / 255.0))
+    if do_normalize:
+        _mean_t = torch.tensor(processor.image_mean, device=device,
+                               dtype=dtype).view(1, 3, 1, 1)
+        _std_t = torch.tensor(processor.image_std, device=device,
+                              dtype=dtype).view(1, 3, 1, 1)
+    else:
+        _mean_t = _std_t = None
 
     batches = [frames[i:i + batch_size] for i in range(0, len(frames), batch_size)]
 
-    def _preprocess(batch: list) -> tuple:
+    # O1 — cumulative timers (seconds)
+    t_pre_wall = 0.0
+    t_h2d = 0.0
+    t_fwd = 0.0
+    t_post = 0.0
+    n_pre_batches = 0
+
+    def _preprocess_cpu(batch: list) -> tuple:
+        """Legacy CPU path — exact HF processor behavior."""
         sizes = [(f.shape[0], f.shape[1]) for f in batch]
         pil_imgs = [Image.fromarray(f[:, :, ::-1]) for f in batch]
         inputs = processor(images=pil_imgs, return_tensors="pt")
         return inputs, sizes
+
+    def _preprocess_gpu(batch: list) -> tuple:
+        """O3b path — stack on CPU, do resize + rescale on GPU.
+
+        Mirrors HF RTDetrImageProcessor exactly when:
+          do_resize=True, do_pad=False, do_rescale=True,
+          square resize, BGR input → convert to RGB.
+        Reads mean/std/rescale_factor from the processor at call time so
+        we follow whatever the loaded model expects.
+        """
+        sizes = [(f.shape[0], f.shape[1]) for f in batch]
+        # CPU stack only (fast, no per-frame Python overhead)
+        stacked = np.stack(batch, axis=0)                 # [B, H, W, 3] uint8 BGR
+        t = torch.from_numpy(stacked).to(device, non_blocking=True)
+        # BGR → RGB then HWC → CHW
+        t = t[..., [2, 1, 0]].permute(0, 3, 1, 2).contiguous()  # [B, 3, H, W]
+        # uint8 → float (rescale 1/255)
+        t = t.to(dtype) * rescale_factor
+        # Resize to model input
+        t = torch.nn.functional.interpolate(
+            t, size=(tgt_h, tgt_w), mode="bilinear", align_corners=False, antialias=True,
+        )
+        # Optional normalize
+        if do_normalize and _mean_t is not None:
+            t = (t - _mean_t) / _std_t
+        # Already on device & in inference dtype — return as the dict the model expects
+        return {"pixel_values": t}, sizes
+
+    _preprocess = _preprocess_gpu if pre_compatible else _preprocess_cpu
 
     all_dets: list[list[dict]] = []
     autocast_ctx = torch.autocast("cuda", dtype=dtype)
 
     def _infer_one(batch_frames: list, inputs_raw, sizes, depth: int = 0) -> list[list[dict]]:
         """Run inference on one (sub-)batch. On CUDA OOM, split in half and recurse."""
+        nonlocal t_h2d, t_fwd, t_post
         try:
-            inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
-                      for k, v in inputs_raw.items()}
+            if profile_on:
+                torch.cuda.synchronize()
+                t0 = time.time()
+            # GPU preprocess already returns tensors on device/dtype. CPU
+            # preprocess returns CPU tensors that still need a copy + cast.
+            first_val = next(iter(inputs_raw.values()))
+            if first_val.is_cuda:
+                inputs = inputs_raw
+            else:
+                inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
+                          for k, v in inputs_raw.items()}
+            if profile_on:
+                torch.cuda.synchronize()
+                t_h2d += time.time() - t0
+                t0 = time.time()
             with torch.no_grad(), autocast_ctx:
                 outputs = model(**inputs)
+            if profile_on:
+                torch.cuda.synchronize()
+                t_fwd += time.time() - t0
+                t0 = time.time()
             results = processor.post_process_object_detection(
                 outputs, threshold=threshold,
                 target_sizes=torch.tensor(sizes, device=device),
             )
+            if profile_on:
+                torch.cuda.synchronize()
+                t_post += time.time() - t0
         except torch.cuda.OutOfMemoryError as exc:
             torch.cuda.empty_cache()
             n = len(batch_frames)
@@ -240,6 +342,10 @@ def _detect_persons_rtdetr(
             mid = n // 2
             logger.warning("[rtdetr] OOM at batch_size=%d depth=%d, splitting to %d/%d",
                            n, depth, mid, n - mid)
+            # Release any GPU tensors the failed batch was holding before
+            # recursing so we don't double-allocate during the split.
+            del inputs_raw
+            torch.cuda.empty_cache()
             left_inputs, left_sizes = _preprocess(batch_frames[:mid])
             right_inputs, right_sizes = _preprocess(batch_frames[mid:])
             return (_infer_one(batch_frames[:mid], left_inputs, left_sizes, depth + 1) +
@@ -260,6 +366,8 @@ def _detect_persons_rtdetr(
             out.append(dets)
         return out
 
+    t_total = time.time() if profile_on else 0.0
+
     with ThreadPoolExecutor(max_workers=2) as ex:
         # Submit first batch preprocessing
         futures = [ex.submit(_preprocess, b) for b in batches[:2]]
@@ -269,8 +377,27 @@ def _detect_persons_rtdetr(
             if idx + 2 < len(batches):
                 futures.append(ex.submit(_preprocess, batches[idx + 2]))
 
+            if profile_on:
+                t0 = time.time()
             inputs_raw, sizes = futures[idx].result()
+            if profile_on:
+                t_pre_wall += time.time() - t0
+                n_pre_batches += 1
             all_dets.extend(_infer_one(batch, inputs_raw, sizes))
+
+    if profile_on:
+        t_total = time.time() - t_total
+        n_frames = sum(len(b) for b in batches)
+        logger.warning(
+            "[rtdetr-profile] batches=%d  frames=%d  batch_size=%d  total=%.1fs (%.1fms/frame)  "
+            "preprocess_wait=%.1fs (%.1fms/frame)  h2d=%.1fs (%.1fms/frame)  "
+            "forward=%.1fs (%.1fms/frame)  post=%.1fs (%.1fms/frame)",
+            len(batches), n_frames, batch_size, t_total, 1000 * t_total / max(n_frames, 1),
+            t_pre_wall, 1000 * t_pre_wall / max(n_frames, 1),
+            t_h2d, 1000 * t_h2d / max(n_frames, 1),
+            t_fwd, 1000 * t_fwd / max(n_frames, 1),
+            t_post, 1000 * t_post / max(n_frames, 1),
+        )
 
     return all_dets
 
@@ -2118,11 +2245,19 @@ def _process_video_sync(
     start = time.time()
     camera_id = camera_id or "Camera_0000"
 
-    # Stage 1: Sample frames at 4fps (skip if pre-decoded externally)
+    # Stage 1: Sample frames at 3fps (skip if pre-decoded externally).
+    # Counter-intuitive finding from offline benchmark on camera_0002:
+    # purity peaks at 3 FPS (92.6% vs 87.2% at 4 FPS, 82.9% at 6 FPS).
+    # Lower FPS gives larger inter-frame motion, which makes the cost matrix
+    # less ambiguous when multiple people are close together — handoffs drop.
+    # Detection cost also drops 25% vs 4 FPS (1800 frames vs 2400 for 10min).
+    # Trade-off: very short actions (~1s falls) may have fewer frames for
+    # VideoMAE; see PIPELINE_SAMPLE_FPS override for per-camera tuning.
+    sample_fps = int(os.environ.get("PIPELINE_SAMPLE_FPS", "3"))
     if presampled_frames is not None:
         sampled_frames = presampled_frames
     else:
-        sampler = VideoFrameSampler(sample_fps=4)
+        sampler = VideoFrameSampler(sample_fps=sample_fps)
         try:
             sampled_frames = sampler.sample(video_path)
         except Exception as e:
@@ -2131,7 +2266,7 @@ def _process_video_sync(
     if not sampled_frames:
         raise HTTPException(status_code=400, detail="No frames extracted from video")
 
-    logger.warning("[pipeline] %s: %d frames sampled at 4fps", video_id, len(sampled_frames))
+    logger.warning("[pipeline] %s: %d frames sampled at %dfps", video_id, len(sampled_frames), sample_fps)
 
     # Stage 2: Batch detect — RT-DETR primary, GDINO fallback
     from .tracking_pipeline import _crop_from_bbox as _tcrop
@@ -2189,13 +2324,30 @@ def _process_video_sync(
             processing_time_s=time.time() - start,
         )
 
-    # Stage 3: Track with BodyPartAdaptiveTracker
+    # Stage 3: Track with BodyPartAdaptiveTracker.
+    # Pixel-per-frame thresholds scale with FPS (lower FPS → people move more
+    # between frames → larger gate). Buffer counts scale to keep wall-clock
+    # seconds constant. Defaults below correspond to the legacy 4 FPS config.
+    # min_track_frames=2 (the legacy value) — benchmark on camera_0002 showed
+    # G6 (raising to 3) does not improve purity once G4 post-hoc split is on.
+    _fps_ratio_4 = 4.0 / max(sample_fps, 1)        # 3fps→1.33, 4fps→1.0, 6fps→0.67
+    _fps_ratio_self = sample_fps / 4.0             # 3fps→0.75, 4fps→1.0, 6fps→1.5
     tracker = BodyPartAdaptiveTracker(
         track_thresh=0.30,
         low_thresh=0.10,
         new_track_threshold=0.30,
         min_track_frames=2,
         min_track_density=0.03,
+        # FPS-scaled pixel thresholds
+        max_head_center_distance=120.0 * _fps_ratio_4,
+        max_foot_distance=150.0 * _fps_ratio_4,
+        max_predicted_distance=180.0 * _fps_ratio_4,
+        max_center_jump_ratio=2.0 * _fps_ratio_4,
+        # IoU expectation grows with FPS (adjacent frames more similar)
+        min_active_iou_short_gap=min(0.05 * _fps_ratio_4, 0.20),
+        # Buffer counts scaled to ~5s short / ~75s long at any FPS
+        track_buffer=max(int(round(20 * _fps_ratio_self)), 8),
+        max_buffer_frames=max(int(round(300 * _fps_ratio_self)), 100),
     )
     local_tracklets = tracker.track(video_id, camera_id, detections_by_frame)
     logger.warning("[pipeline] %s: %d raw tracklets from tracker", video_id, len(local_tracklets))
