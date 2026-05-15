@@ -468,7 +468,7 @@ def _sanitize_dets_inplace(
 
 def _detect_persons_batch(frames: list[np.ndarray], threshold: float = 0.25) -> list[list[dict]]:
     """Person detection: RT-DETR primary (fast), GDINO fallback."""
-    rtdetr_threshold = float(os.getenv("RTDETR_PERSON_THRESHOLD", str(max(threshold, 0.4))))
+    rtdetr_threshold = float(os.getenv("RTDETR_PERSON_THRESHOLD", str(max(threshold, 0.2))))
     rtdetr_result = _detect_persons_rtdetr(frames, threshold=rtdetr_threshold)
     if rtdetr_result is not None:
         rtdetr_result = _sanitize_dets_inplace(rtdetr_result, frames)
@@ -2276,37 +2276,56 @@ def _process_video_sync(
     all_batch_dets = _detect_persons_batch([sf.image for sf in sampled_frames], threshold=0.25)
     logger.warning("[pipeline] %s: %s done in %.1fs", video_id, detector, time.time() - t_det_start)
 
+    # B1: build (sf, det) work items, run crop + crop-Laplacian in parallel.
+    # cv2 releases the GIL inside cvtColor + Laplacian + slicing, so threads
+    # actually run concurrently. Saves ~2-5s/video on dense scenes.
+    work_items: list[tuple[int, int, np.ndarray, tuple, int, int, float]] = []
+    for sf_idx, (sf, raw_dets) in enumerate(zip(sampled_frames, all_batch_dets)):
+        frame_h, frame_w = sf.image.shape[:2]
+        for d_idx, d in enumerate(raw_dets):
+            bbox = tuple(int(x) for x in d["bbox"])
+            work_items.append((sf_idx, d_idx, sf.image, bbox, frame_h, frame_w, float(d["score"])))
+
+    def _build_one(item):
+        sf_idx, d_idx, image, bbox, frame_h, frame_w, score = item
+        crop = _tcrop(image, bbox)
+        crop_lap = _crop_laplacian_variance(crop)
+        low_q = _is_low_quality_crop(bbox, frame_h, frame_w)
+        return sf_idx, d_idx, bbox, crop, crop_lap, low_q, score
+
+    # Bucket results back per source frame. Preserve original det order via d_idx.
+    per_frame: dict[int, list] = {}
+    if work_items:
+        with ThreadPoolExecutor(max_workers=min(8, len(work_items))) as ex:
+            for sf_idx, d_idx, bbox, crop, crop_lap, low_q, score in ex.map(_build_one, work_items):
+                per_frame.setdefault(sf_idx, []).append((d_idx, bbox, crop, crop_lap, low_q, score))
+
     detections_by_frame: dict[int, list[FrameDetection]] = {}
     total_raw = 0
     total_low_quality = 0
-    for sf, raw_dets in zip(sampled_frames, all_batch_dets):
-        frame_h, frame_w = sf.image.shape[:2]
+    for sf_idx, sf in enumerate(sampled_frames):
+        items = per_frame.get(sf_idx)
+        if not items:
+            continue
+        items.sort(key=lambda x: x[0])  # restore original detection order
         frame_dets: list[FrameDetection] = []
-        for d in raw_dets:
-            bbox = tuple(int(x) for x in d["bbox"])
-            crop = _tcrop(sf.image, bbox)
-            # B1: laplacian on the person crop, not the full frame — the full-frame
-            # value was dominated by background detail (lan can, foliage) and did not
-            # reflect whether the person itself was sharp enough for ReID.
-            crop_lap = _crop_laplacian_variance(crop)
-            # B3: flag half-body / edge-clipped crops. The tracker still receives them
-            # (so it can keep an ID through occlusion), but the embedding pool should
-            # drop them when building the appearance vector.
-            low_q = _is_low_quality_crop(bbox, frame_h, frame_w)
+        for _d_idx, bbox, crop, crop_lap, low_q, score in items:
             if low_q:
                 total_low_quality += 1
+            # B1 (legacy comment): laplacian on the person crop, not the full frame.
+            # B3 (legacy comment): is_low_quality_crop flags half-body / edge-clipped
+            # crops; tracker still receives them so it can keep an ID through occlusion.
             frame_dets.append(FrameDetection(
                 frame_index=sf.frame_index,
                 timestamp_second=sf.timestamp_second,
                 bbox=bbox,
-                confidence=float(d["score"]),
+                confidence=score,
                 laplacian_score=crop_lap,
                 crop_bgr=crop,
                 is_low_quality_crop=low_q,
             ))
-        if frame_dets:
-            detections_by_frame[sf.frame_index] = frame_dets
-            total_raw += len(frame_dets)
+        detections_by_frame[sf.frame_index] = frame_dets
+        total_raw += len(frame_dets)
     if total_raw:
         logger.warning("[pipeline] %s: %d/%d detections flagged low-quality crop (%.1f%%)",
                        video_id, total_low_quality, total_raw,

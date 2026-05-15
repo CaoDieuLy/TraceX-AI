@@ -16,6 +16,7 @@ httpx==0.28.1
 google-api-python-client==2.156.0
 google-auth==2.36.0
 opencv-python-headless==4.10.0.84
+av==17.0.1
 python-dotenv==1.0.1
 
 # GPU model dependencies — SOTA 2026

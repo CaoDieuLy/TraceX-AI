@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
+import av
 import cv2
 import numpy as np
 
@@ -52,7 +52,6 @@ class SampledFrame:
     frame_index: int
     timestamp_second: float
     image: np.ndarray
-    laplacian_score: float
 
 
 @dataclass(frozen=True)
@@ -217,55 +216,57 @@ def _head_visible(bbox: tuple, min_aspect: float = 1.1, min_height: int = 30) ->
 # ── VideoFrameSampler ─────────────────────────────────────────────────────────
 
 class VideoFrameSampler:
-    """Sample frames at fixed FPS with Laplacian blur scoring."""
+    """Sample frames at fixed FPS using PyAV (multi-threaded HEVC/H.264 decode).
+
+    PyAV → FFmpeg lets HEVC decode go multi-threaded (thread_type="AUTO"), which
+    is the main win over cv2.VideoCapture's single-thread Python loop on H.265
+    footage. Frame selection is index-based to avoid float drift on long videos.
+    """
 
     def __init__(self, sample_fps: int = 4):
         self.sample_fps = max(1, sample_fps)
 
     def sample(self, video_path: str) -> tuple[SampledFrame, ...]:
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            raise FileNotFoundError(f"Cannot open video: {video_path}")
-
-        source_fps = float(cap.get(cv2.CAP_PROP_FPS) or self.sample_fps)
-        if source_fps <= 0:
-            source_fps = float(self.sample_fps)
-
-        # Collect sampled frames first (sequential — codec requires in-order reads)
-        raw: list[tuple[int, float, np.ndarray]] = []
-        next_emit = 0.0
-        src_idx = 0
-        sampled_idx = 0
+        try:
+            container = av.open(str(video_path))
+        except (av.AVError, FileNotFoundError) as exc:
+            raise FileNotFoundError(f"Cannot open video: {video_path}") from exc
 
         try:
-            while True:
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    break
-                ts = src_idx / source_fps
-                if ts + 1e-9 >= next_emit:
-                    raw.append((sampled_idx, round(ts, 6), frame.copy()))
+            if not container.streams.video:
+                raise FileNotFoundError(f"No video stream: {video_path}")
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"  # multi-threaded HEVC decode
+
+            avg_rate = stream.average_rate or stream.base_rate
+            source_fps = float(avg_rate) if avg_rate else float(self.sample_fps)
+            if source_fps <= 0:
+                source_fps = float(self.sample_fps)
+
+            # Index-based stride avoids cumulative float drift on long videos.
+            # stride = how many source frames per sampled frame.
+            stride = max(source_fps / self.sample_fps, 1.0)
+            next_emit_src = 0.0
+            src_idx = 0
+            sampled_idx = 0
+            frames: list[SampledFrame] = []
+
+            for frame in container.decode(stream):
+                if src_idx + 1e-9 >= next_emit_src:
+                    # to_ndarray("bgr24") returns a fresh contiguous buffer →
+                    # no .copy() needed (cv2 path used .copy() defensively).
+                    img = frame.to_ndarray(format="bgr24")
+                    ts = src_idx / source_fps
+                    frames.append(SampledFrame(
+                        frame_index=sampled_idx,
+                        timestamp_second=round(ts, 6),
+                        image=img,
+                    ))
                     sampled_idx += 1
-                    next_emit += 1.0 / self.sample_fps
+                    next_emit_src = sampled_idx * stride
                 src_idx += 1
         finally:
-            cap.release()
-
-        # Compute Laplacian in parallel — cv2 releases GIL so threads run truly concurrently
-        def _laplacian(item: tuple[int, float, np.ndarray]) -> SampledFrame:
-            idx, ts, f = item
-            gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
-            lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-            return SampledFrame(
-                frame_index=idx,
-                timestamp_second=ts,
-                image=f,
-                laplacian_score=round(lap, 6),
-            )
-
-        workers = min(8, len(raw) or 1)
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            frames = list(ex.map(_laplacian, raw))
+            container.close()
 
         return tuple(frames)
 
@@ -990,11 +991,21 @@ class BodyPartAdaptiveTracker:
                     tid: self._build_state(self.buffer[tid], self.buffer_last_bbox[tid], fk)
                     for tid in buffer_tids
                 }
+                # C3 — apply center-jump gate to buffer reactivation too. A det
+                # that drifted to a different person's location can pass the
+                # min_buffer_iou check (overlap > 0.30) yet still be a wrong
+                # match if its center jumped implausibly far given the gap.
+                # Gap measured from buffer entry frame (when track went stale).
+                buffer_gap_by_tid = {
+                    tid: max(fk - self.buffer_entry_frame.get(tid, fk), 1)
+                    for tid in buffer_tids
+                }
                 matches = self._match_frame_greedy(
                     [d.bbox for d in unmatched_high],
                     buffer_states,
                     set(buffer_tids),
                     min(self.max_buffer_match_cost, self.max_match_cost),
+                    gap_frames_by_tid=buffer_gap_by_tid,
                 )
 
                 still_unmatched: list[FrameDetection] = []
