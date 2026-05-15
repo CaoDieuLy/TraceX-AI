@@ -469,6 +469,16 @@ class BodyPartAdaptiveTracker:
         # so we can revisit if a per-camera benchmark says otherwise.
         use_kalman: bool = False,
         kalman_gate_chi2: float = 9.21,
+        # G2 — discriminative gate. After Hungarian assigns det i to track j
+        # with cost c_ij, also compute the second-best track cost c_ik (k≠j).
+        # If c_ik - c_ij < discriminative_margin the match is ambiguous (two
+        # tracks compete almost equally for the same detection — classic
+        # crossing signature) and we REJECT the match. Det becomes unmatched,
+        # tracker may break into a new fragment instead of swapping ID.
+        # Sweep on camera_0002 (3 FPS): 0.00 → 0.20 raises purity 92.7 → 97.7
+        # at the cost of 33% more fragments (which downstream appearance
+        # merger rejoins). Set to 0.0 to disable.
+        discriminative_margin: float = 0.20,
         # G4 — post-hoc Kalman split. After each tracklet completes, re-run
         # the Kalman filter over its observations and split it at any frame
         # whose innovation exceeds split_chi2. This catches occlusion handoffs
@@ -504,6 +514,7 @@ class BodyPartAdaptiveTracker:
         self.kalman_gate_chi2 = kalman_gate_chi2
         self.split_post_hoc = split_post_hoc
         self.split_chi2 = split_chi2
+        self.discriminative_margin = discriminative_margin
         self._reset()
 
     def _reset(self) -> None:
@@ -683,14 +694,27 @@ class BodyPartAdaptiveTracker:
         )
 
         results: list[Optional[tuple[str, float]]] = [None] * M
+        margin = self.discriminative_margin
 
         if M >= 2 and N >= 2:
             try:
                 from scipy.optimize import linear_sum_assignment
                 row_ind, col_ind = linear_sum_assignment(cost)
                 for r, c in zip(row_ind, col_ind):
-                    if cost[r, c] <= max_cost:
-                        results[r] = (track_ids[c], float(cost[r, c]))
+                    cost_assigned = cost[r, c]
+                    if cost_assigned > max_cost:
+                        continue
+                    # G2 — discriminative gate: assigned cost must beat the
+                    # second-best track cost for this det by at least `margin`.
+                    # When two tracks are almost equally close, the assignment
+                    # is a coin flip and likely a crossing handoff.
+                    if margin > 0.0 and N >= 2:
+                        row_copy = cost[r].copy()
+                        row_copy[c] = np.inf
+                        second_best = float(row_copy.min())
+                        if second_best - cost_assigned < margin:
+                            continue
+                    results[r] = (track_ids[c], float(cost_assigned))
                 return results
             except Exception as exc:
                 # Fall through to greedy on any scipy issue — semantics preserved.
@@ -702,9 +726,17 @@ class BodyPartAdaptiveTracker:
             if used:
                 row[used] = 1e9
             best_j = int(row.argmin())
-            if row[best_j] <= max_cost:
-                results[m] = (track_ids[best_j], float(row[best_j]))
-                used.append(best_j)
+            best_cost = row[best_j]
+            if best_cost > max_cost:
+                continue
+            if margin > 0.0 and N >= 2:
+                row2 = row.copy()
+                row2[best_j] = np.inf
+                second_best = float(row2.min())
+                if second_best - best_cost < margin:
+                    continue
+            results[m] = (track_ids[best_j], float(best_cost))
+            used.append(best_j)
         return results
 
     def _should_keep(self, obs: list[TrackletObservation]) -> bool:
