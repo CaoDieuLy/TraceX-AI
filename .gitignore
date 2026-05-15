@@ -78,3 +78,5 @@ core.*
 core
 # Large benchmark video — keep local only
 camera_0002/video.mp4
+camera_0002/ground_truth.txt
+camera_0002/ground_truth_2025_format.json
