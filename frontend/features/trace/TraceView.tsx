@@ -343,14 +343,41 @@ function pad2(value: number): string {
   return String(value).padStart(2, "0");
 }
 
-function fmtTime(iso: string | null): string {
-  if (!iso) return "—";
+function parseTime(iso: string | null): Date | null {
+  if (!iso) return null;
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function fmtDate(d: Date): string {
+  return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+}
+
+function fmtClock(d: Date): string {
   return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
+}
+
+function sameDate(a: Date, b: Date): boolean {
+  return (
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
+  );
+}
+
+function fmtTime(iso: string | null): string {
+  const d = parseTime(iso);
+  if (!d) return "—";
+  return `${fmtDate(d)} ${fmtClock(d)}`;
 }
 
 function fmtRange(start: string | null, end: string | null): string {
   if (!start && !end) return "—";
+  const a = parseTime(start);
+  const b = parseTime(end);
+  if (a && b && sameDate(a, b)) {
+    return `${fmtDate(a)} ${fmtClock(a)} → ${fmtClock(b)}`;
+  }
   return `${fmtTime(start)} → ${fmtTime(end)}`;
 }
