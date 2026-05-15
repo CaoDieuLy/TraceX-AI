@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { getTraceTimeline, resolveMediaUrl } from "@/lib/api";
+import { cameraIdToLocationLabel } from "@/lib/config";
 import type { BuildTraceResult, TraceSegment } from "@/lib/types";
 
 type Props = {
@@ -199,7 +200,7 @@ function CameraTimeline({
                   Step {s.segmentOrder}
                 </span>
                 <SegmentStatusBadge ready={ready} />
-                <span className="font-mono text-sm text-slate-900">{s.cameraId ?? "—"}</span>
+                <CameraLabel cameraId={s.cameraId} compact />
                 <span className="text-[11px] text-slate-500">{fmtTime(s.timeStart)}</span>
                 {s.durationSeconds != null ? (
                   <span className="text-[11px] text-slate-500">{s.durationSeconds.toFixed(1)}s</span>
@@ -237,7 +238,7 @@ function SegmentPlayer({ segment }: { segment: TraceSegment }) {
       )}
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 bg-white/95 px-4 py-3 text-xs text-slate-600">
         <SegmentStatusBadge ready={Boolean(url)} />
-        <span className="font-mono text-sm text-slate-900">{segment.cameraId ?? "—"}</span>
+        <CameraLabel cameraId={segment.cameraId} />
         <span>{fmtRange(segment.timeStart, segment.timeEnd)}</span>
         {segment.durationSeconds != null ? <span>· {segment.durationSeconds.toFixed(1)}s</span> : null}
         {typeof segment.confidence === "number" ? (
@@ -297,7 +298,7 @@ function SegmentList({
               </div>
               <div className="flex flex-1 flex-col gap-0.5">
                 <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-mono text-sm text-slate-900">{s.cameraId ?? "—"}</p>
+                  <CameraLabel cameraId={s.cameraId} />
                   <SegmentStatusBadge ready={ready} />
                 </div>
                 <p className="text-xs text-slate-500">{fmtRange(s.timeStart, s.timeEnd)}</p>
@@ -317,9 +318,36 @@ function SegmentList({
   );
 }
 
+function CameraLabel({ cameraId, compact = false }: { cameraId: string | null; compact?: boolean }) {
+  const location = cameraIdToLocationLabel(cameraId);
+  if (!cameraId && !location) {
+    return <span className="font-mono text-sm text-slate-900">—</span>;
+  }
+  if (compact) {
+    return (
+      <span className="flex max-w-full flex-col leading-tight">
+        {location ? <span className="truncate text-xs font-semibold text-slate-900">{location}</span> : null}
+        <span className="font-mono text-[11px] text-slate-500">{cameraId ?? "—"}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex flex-wrap items-baseline gap-x-1.5">
+      {location ? <span className="font-semibold text-slate-900">{location}</span> : null}
+      <span className="font-mono text-sm text-slate-600">{cameraId ?? "—"}</span>
+    </span>
+  );
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
 function fmtTime(iso: string | null): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString(undefined, { hour12: false });
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
 }
 
 function fmtRange(start: string | null, end: string | null): string {
