@@ -126,12 +126,24 @@ def _tracklet_display_raw(tracklet: dict[str, Any]) -> dict[str, str | None]:
     else:
         hat = hat_presence
 
+    # One-piece outfit signal: same garment word in both upper_type & lower_type.
+    # Show as a single "outfit" field instead of duplicating in upper + lower.
+    upper_type = (_clean_text(tracklet.get("upper_type")) or "").strip().lower()
+    lower_type = (_clean_text(tracklet.get("lower_type")) or "").strip().lower()
+    one_piece_kinds = {"dress", "robe", "gown", "jumpsuit", "overall", "ao_dai"}
+    if upper_type and upper_type == lower_type and upper_type in one_piece_kinds:
+        upper = _join_parts([tracklet.get("upper_color"), tracklet.get("upper_type")])
+        lower = None
+    else:
+        upper = _join_parts([tracklet.get("upper_color"), tracklet.get("upper_type")])
+        lower = _join_parts([tracklet.get("lower_color"), tracklet.get("lower_type")])
+
     return {
         "gender": _clean_text(tracklet.get("gender")),
         "age_range": _clean_text(tracklet.get("age_range")),
         "hair": _join_parts([tracklet.get("hair_style"), tracklet.get("hair_color")]),
-        "upper": _join_parts([tracklet.get("upper_color"), tracklet.get("upper_type")]),
-        "lower": _join_parts([tracklet.get("lower_color"), tracklet.get("lower_type")]),
+        "upper": upper,
+        "lower": lower,
         "shoes": _join_parts([tracklet.get("shoes_color"), tracklet.get("shoes_type")]),
         "bag": bag,
         "hat": hat,

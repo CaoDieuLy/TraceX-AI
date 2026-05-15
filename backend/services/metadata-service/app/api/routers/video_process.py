@@ -88,7 +88,7 @@ DEFAULT_SAMPLE_INTERVAL = 15
 DEFAULT_MIN_BBOX_AREA = 400
 DEFAULT_BEV_MAX_DIST = 1.5
 MAX_WORKERS = int(os.getenv("BATCH_MAX_WORKERS", "8"))
-VLM_BATCH_SIZE = _get_positive_env_int("VLM_BATCH_SIZE", 2)
+VLM_BATCH_SIZE = _get_positive_env_int("VLM_BATCH_SIZE", 4)
 VLM_BATCH_MAX_SIZE = _get_positive_env_int("VLM_BATCH_MAX_SIZE", 8)
 VLM_BATCH_GROW_STEP = _get_positive_env_int("VLM_BATCH_GROW_STEP", 1)
 VLM_BATCH_STABLE_STEPS = _get_positive_env_int("VLM_BATCH_STABLE_STEPS", 3)
@@ -99,7 +99,7 @@ VLM_BATCH_STABLE_STEPS = _get_positive_env_int("VLM_BATCH_STABLE_STEPS", 3)
 # or `hair_color`) don't get truncated, which would drop the entire crop's
 # attrs to defaults via the JSON-regex fallback.
 VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
-    "VLM_BATCH_MAX_NEW_TOKENS_PER_CROP", 512
+    "VLM_BATCH_MAX_NEW_TOKENS_PER_CROP", 448
 )
 # Bench cam_0002 + production review: 0.85 đang merge nhầm các tracklet
 # có đồng phục giống nhau (nhân viên/hồ sơ bệnh nhân tương tự). Nâng lên 0.90
@@ -1169,42 +1169,61 @@ def _build_tracklet_result(
 # token-level logprobs of the generated value spans (geometric mean of
 # P(token | context)). The prompt requests only the values themselves.
 _VLM_PROMPT = """You are analyzing a person crop from a surveillance camera.
-Describe this person's visible appearance accurately using ALL visible cues.
 
-GENDER INFERENCE RULES:
-- Infer gender from clothing style (dress/skirt → woman), hair length, body silhouette, accessories.
-- Use "man" or "woman" whenever a reasonable inference is possible.
-- Use "unknown" only when truly obscured / ambiguous.
+**Critical rules:**
+- Describe visible appearance from the crop, and make limited attribute inferences ONLY from visible cues inside the crop.
+- Use "unknown" only when visible cues are insufficient, occluded, cut off by the bbox, blurry, or not present (or "no" for *_presence fields when clearly absent).
+- Do NOT infer from scene/camera/location context, surrounding people, or assumptions outside the crop.
 
-AGE INFERENCE RULES:
-- Estimate from body size, posture, hair color, clothing style.
-- Allowed values: "child" (<13), "teenager" (13-17), "young_adult" (18-35), "middle_aged" (35-55), "elderly" (55+), "unknown".
+**Field formats (when visible):**
+- gender: "man" or "woman" when visible cues in the crop support the inference; otherwise "unknown"
+- age_range: "child | teenager | young_adult | middle_aged | elderly" estimated only from visible body/face/hair/posture/clothing cues in the crop; otherwise "unknown"
+- *_color: a single concrete color word in English, lowercase (dominant color if multiple); use "unknown" only when the item is not visible enough
+- upper_type: garment noun for the upper body (e.g. "shirt", "t-shirt", "jacket", "hoodie", "sweater", "blouse", "dress", "robe", "gown", "ao_dai", "jumpsuit")
+- lower_type: garment noun for the legs (e.g. "pants", "jeans", "shorts", "skirt"). For one-piece outfits see ONE-PIECE rule below.
+- shoes_type: footwear noun (e.g. "sneakers", "boots", "sandals", "heels", "slippers")
+- bag_type: bag noun (e.g. "backpack", "handbag", "shoulder_bag", "suitcase", "tote", "none")
+- hat_type: head-covering noun — see HEAD COVERING rule below
+- *_desc: 2-3 word literal description of what is visible
+- *_presence (bag/hat/mask): "yes" if clearly visible, "no" if clearly not present, "unknown" if uncertain
+- hair_style: "short | long | ponytail | bald | bun | covered" (use "covered" when hat/scarf hides hair)
+- hair_color: concrete color word, "unknown" if hair not visible
+- appearance_summary: one short sentence stating only directly visible features
+
+**ONE-PIECE OUTFITS (dress, robe, hospital gown, jumpsuit, áo dài, overall):**
+When the person wears a single garment covering both upper and lower body:
+- upper_type = the one-piece kind ("dress", "robe", "gown", "jumpsuit", "overall", "ao_dai")
+- upper_color = the garment's dominant color
+- upper_desc = short description (e.g. "long red dress", "white hospital gown")
+- lower_type = repeat the SAME one-piece kind as upper_type
+- lower_color = same color as upper_color
+- lower_desc = "" (empty string — do not duplicate upper_desc)
+
+**HEAD COVERING (hat_*):**
+hat_presence = "yes" for ANY head covering visible. Choose hat_type from what you see:
+- rigid hats → "cap", "beanie", "hat", "helmet"
+- hood attached to a garment → "hood"
+- cloth wrapped around the head → "headscarf" (covers hijab, turban, head wrap, religious veil, cloth tied around hair)
+- If the head covering extends down to cover shoulders or part of the torso, note it in hat_desc (e.g. "headscarf covering shoulders"). Still describe the visible part of the inner clothing in upper_*.
+
+**LAYERED CLOTHING:**
+If there is an outer layer (coat, cardigan, shawl, cape, vest) over the inner top:
+- upper_type / upper_color describe the OUTERMOST visible layer.
+- upper_desc may mention the inner layer if visible (e.g. "black coat over white shirt").
 
 Return ONLY a JSON object with EXACTLY these fields and no others:
 
 {
-  "gender": "man | woman | unknown",
-  "age_range": "child | teenager | young_adult | middle_aged | elderly | unknown",
-  "upper_color": "dominant color of upper garment | unknown",
-  "upper_type": "e.g. suit jacket | hoodie | t-shirt | vest | unknown",
-  "upper_desc": "free-text 3-5 words describing upper garment",
-  "lower_color": "dominant color of lower garment | unknown",
-  "lower_type": "e.g. jeans | formal trousers | shorts | skirt | unknown",
-  "lower_desc": "free-text 3-5 words describing lower garment",
-  "shoes_color": "color | unknown",
-  "shoes_type": "e.g. sneakers | boots | sandals | unknown",
-  "shoes_desc": "free-text 3-5 words",
-  "bag_presence": "yes | no | unknown",
-  "bag_type": "backpack | handbag | suitcase | none | unknown",
-  "bag_desc": "free-text or 'none'",
-  "hat_presence": "yes | no | unknown",
-  "hat_color": "color | none | unknown",
-  "hat_type": "cap | hat | helmet | hood | none | unknown",
-  "hat_desc": "free-text or 'none'",
-  "mask_presence": "yes | no | unknown",
-  "hair_style": "short | long | ponytail | tied | bald | unknown",
-  "hair_color": "color | unknown",
-  "appearance_summary": "one concise sentence describing the person"
+  "gender": "...",
+  "age_range": "...",
+  "upper_color": "...", "upper_type": "...", "upper_desc": "...",
+  "lower_color": "...", "lower_type": "...", "lower_desc": "...",
+  "shoes_color": "...", "shoes_type": "...", "shoes_desc": "...",
+  "bag_presence": "...", "bag_type": "...", "bag_desc": "...",
+  "hat_presence": "...", "hat_color": "...", "hat_type": "...", "hat_desc": "...",
+  "mask_presence": "...",
+  "hair_style": "...", "hair_color": "...",
+  "appearance_summary": "..."
 }
 
 Do NOT include any confidence fields — the system computes confidence from
@@ -1214,24 +1233,62 @@ Return only the JSON object, no surrounding text."""
 _VLM_BATCH_PROMPT_TEMPLATE = """You are analyzing {n} person crops from surveillance cameras.
 The images above show persons labeled (1) to ({n}) in order.
 
-Use the same inference rules:
-- GENDER: from clothing style, hair, body silhouette.
-- AGE: "child | teenager | young_adult | middle_aged | elderly | unknown".
+**Critical rules:**
+- Describe visible appearance from each crop, and make limited attribute inferences ONLY from visible cues inside that crop.
+- Use "unknown" only when visible cues are insufficient, occluded, cut off by the bbox, blurry, or not present (or "no" for *_presence fields when clearly absent).
+- Do NOT infer from scene/camera/location context, surrounding people, or assumptions outside the crop.
+- Do NOT copy attributes from one person to another in the same batch.
+
+**Field formats (when visible):**
+- gender: "man" or "woman" when visible cues in the crop support the inference; otherwise "unknown"
+- age_range: "child | teenager | young_adult | middle_aged | elderly" estimated only from visible body/face/hair/posture/clothing cues in the crop; otherwise "unknown"
+- *_color: a single concrete color word in English, lowercase (dominant color if multiple); use "unknown" only when the item is not visible enough
+- upper_type: garment noun for the upper body (e.g. "shirt", "t-shirt", "jacket", "hoodie", "sweater", "blouse", "dress", "robe", "gown", "ao_dai", "jumpsuit")
+- lower_type: garment noun for the legs (e.g. "pants", "jeans", "shorts", "skirt"). For one-piece outfits see ONE-PIECE rule below.
+- shoes_type: footwear noun (e.g. "sneakers", "boots", "sandals", "heels", "slippers")
+- bag_type: bag noun (e.g. "backpack", "handbag", "shoulder_bag", "suitcase", "tote", "none")
+- hat_type: head-covering noun — see HEAD COVERING rule below
+- *_desc: 2-3 word literal description of what is visible (e.g. "white striped t-shirt")
+- *_presence (bag/hat/mask): "yes" if clearly visible, "no" if clearly not present, "unknown" if uncertain
+- hair_style: "short | long | ponytail | bald | bun | covered" (use "covered" when hat/scarf hides hair)
+- hair_color: concrete color word, "unknown" if hair not visible
+- appearance_summary: one short sentence stating only directly visible features
+
+**ONE-PIECE OUTFITS (dress, robe, hospital gown, jumpsuit, áo dài, overall):**
+When the person wears a single garment covering both upper and lower body:
+- upper_type = the one-piece kind ("dress", "robe", "gown", "jumpsuit", "overall", "ao_dai")
+- upper_color = the garment's dominant color
+- upper_desc = short description (e.g. "long red dress", "white hospital gown")
+- lower_type = repeat the SAME one-piece kind as upper_type (signals continuation of same garment)
+- lower_color = same color as upper_color
+- lower_desc = "" (empty string — do not duplicate upper_desc)
+
+**HEAD COVERING (hat_*):**
+hat_presence = "yes" for ANY head covering visible. Choose hat_type from what you see:
+- rigid hats → "cap", "beanie", "hat", "helmet"
+- hood attached to a garment → "hood"
+- cloth wrapped around the head → "headscarf" (covers hijab, turban, head wrap, religious veil, cloth tied around hair)
+- If the head covering extends down to cover shoulders or part of the torso, note it in hat_desc (e.g. "headscarf covering shoulders"). Still describe the visible part of the inner clothing in upper_*.
+
+**LAYERED CLOTHING:**
+If there is an outer layer (coat, cardigan, shawl, cape, vest) over the inner top:
+- upper_type / upper_color describe the OUTERMOST visible layer.
+- upper_desc may mention the inner layer if visible (e.g. "black coat over white shirt").
 
 Return ONLY a JSON array with exactly {n} objects in order (index 0 = person 1).
 Each object must have EXACTLY these fields and no others:
 
 {{
-  "gender": "man | woman | unknown",
+  "gender": "...",
   "age_range": "...",
   "upper_color": "...", "upper_type": "...", "upper_desc": "...",
   "lower_color": "...", "lower_type": "...", "lower_desc": "...",
   "shoes_color": "...", "shoes_type": "...", "shoes_desc": "...",
-  "bag_presence": "yes|no|unknown", "bag_type": "...", "bag_desc": "...",
-  "hat_presence": "yes|no|unknown", "hat_color": "...", "hat_type": "...", "hat_desc": "...",
-  "mask_presence": "yes|no|unknown",
+  "bag_presence": "...", "bag_type": "...", "bag_desc": "...",
+  "hat_presence": "...", "hat_color": "...", "hat_type": "...", "hat_desc": "...",
+  "mask_presence": "...",
   "hair_style": "...", "hair_color": "...",
-  "appearance_summary": "one concise sentence"
+  "appearance_summary": "..."
 }}
 
 Do NOT include any confidence fields. Return only the JSON array, no surrounding text."""
