@@ -550,6 +550,11 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
 # tracklets_embeddings.siglip_embedding. Vectors are L2-normalized so cosine =
 # dot product.
 
+# Hard floor for image-query matches. _vec_score maps raw cosine from [-1, 1]
+# into [0, 1], so the default 0.5 is roughly raw cosine >= 0.0. A separate
+# MIN_FUSION_SCORE gate below filters weak final candidates across all modes.
+_QUERY_IMAGE_MIN_VECTOR_SCORE = float(os.getenv("QUERY_IMAGE_MIN_VECTOR_SCORE", "0.5"))
+
 
 def _encode_query_text_siglip(text_query: str) -> list[float]:
     """Run the SigLIP text tower on `text_query`. Returns an L2-normalized list
@@ -927,6 +932,23 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         # prefilter stage and the metadata bonus during rerank.
         parsed_query = parse_query_metadata(search_query)
         logger.info("[query:%s] parsed_metadata=%s", qid, _jdump(_parsed_query_log_dict(parsed_query)))
+        image_query = bool(effective_query_image_source)
+        text_has_meaning = not parsed_query.is_empty()
+        if not image_query and not text_has_meaning:
+            qh.status = "candidates_found"
+            qh.result_count = 0
+            db.commit()
+            logger.info(
+                "[query:%s] empty structured text query without image; returning no candidates elapsed=%.3fs",
+                qid,
+                time.perf_counter() - request_t0,
+            )
+            return {"results": [], "query_id": qid}
+
+        # When an image is present with generic/no structured text, treat it as
+        # image-only. If text has structured meaning, keep its metadata/actions
+        # and text-overlap signal alongside image similarity.
+        active_parsed_query = parsed_query if text_has_meaning else ParsedQueryMetadata()
 
         # Stage A — Text-shortlist (SQL ILIKE on materialized attributes).
         # Recall up to 200 candidates. This is still text-based, so it can miss
@@ -934,12 +956,12 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         # the query — Stage B (SigLIP rerank below) compensates by re-scoring
         # ALL shortlisted items in a shared text↔image embedding space.
         prefilter_t0 = time.perf_counter()
-        prefilter_query = "" if effective_query_image_source else search_query
+        prefilter_query = "" if image_query else search_query
         shortlist, text_score_map = _local_prefilter(
             db, prefilter_query, camera_ids, time_from, time_to, limit=200,
-            parsed=parsed_query,
+            parsed=active_parsed_query,
         )
-        if effective_query_image_source and search_query:
+        if image_query and text_has_meaning and search_query:
             cleaned_search_query = search_query.strip().lower()
             query_tokens = {token for token in cleaned_search_query.split() if token}
             text_score_map = {
@@ -985,7 +1007,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             if query_vec:
                 query_vec_source = "image"
                 logger.info("[search] query encoded via SigLIP image tower")
-        if not query_vec and search_query:
+        if not query_vec and search_query and (not image_query or text_has_meaning):
             query_vec = _encode_query_text_siglip(search_query)
             if query_vec:
                 query_vec_source = "text"
@@ -1004,6 +1026,16 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 qid,
                 time.perf_counter() - encode_t0,
             )
+        if image_query and not query_vec and not text_has_meaning:
+            qh.status = "candidates_found"
+            qh.result_count = 0
+            db.commit()
+            logger.warning(
+                "[query:%s] image query could not be encoded; returning no candidates elapsed=%.3fs",
+                qid,
+                time.perf_counter() - request_t0,
+            )
+            return {"results": [], "query_id": qid}
 
         # Pre-compute vec-score per tracklet for the whole shortlist.
         # If the SigLIP encoder is unavailable or query is empty, all scores
@@ -1090,7 +1122,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         # Aggregated to a deduped set per candidate so a query mentioning
         # "running" can boost a candidate whose member tracklets include
         # walking + running, even when the representative tracklet was sitting.
-        query_actions = set(parsed_query.actions)
+        query_actions = set(active_parsed_query.actions)
         action_by_tracklet: dict[str, str] = {}
         if shortlist:
             tracklet_ids = [t.tracklet_id for t in shortlist]
@@ -1115,7 +1147,10 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
         #          + 0.15 * quality
         # Fallback (no query_vec): 0.7 * text_overlap + 0.3 * quality (old behaviour).
         score_t0 = time.perf_counter()
+        min_query_vector_score = _QUERY_IMAGE_MIN_VECTOR_SCORE if query_vec_source == "image" else 0.0
         merged: list[dict] = []
+        filtered_by_query_vector = 0
+        filtered_by_fusion_score = 0
         for group in groups:
             rep = group[0]
             # Candidate IDs are query-scoped and stable across pagination calls.
@@ -1134,7 +1169,13 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             top_n = sorted(member_vec_scores, reverse=True)[:3]
             vec_score = sum(top_n) / len(top_n) if top_n else 0.0
 
-            if query_vec:
+            if query_vec and min_query_vector_score > 0.0 and vec_score < min_query_vector_score:
+                filtered_by_query_vector += 1
+                continue
+
+            if query_vec_source == "image" and not text_has_meaning:
+                fusion_score = vec_score
+            elif query_vec:
                 fusion_score = (
                     0.65 * vec_score + 0.20 * text_score + 0.15 * quality_score
                 )
@@ -1183,10 +1224,10 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 return vals
 
             field_specs = [
-                ("upper_color", parsed_query.upper_color),
-                ("lower_color", parsed_query.lower_color),
-                ("shoes_color", parsed_query.shoes_color),
-                ("hat_color",   parsed_query.hat_color),
+                ("upper_color", active_parsed_query.upper_color),
+                ("lower_color", active_parsed_query.lower_color),
+                ("shoes_color", active_parsed_query.shoes_color),
+                ("hat_color",   active_parsed_query.hat_color),
             ]
             for col_name, requested in field_specs:
                 if not requested:
@@ -1199,11 +1240,11 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
 
             # Unbound colors ("red dress" with dress ambiguous, or a bare
             # color word) match if they appear in upper OR lower of any member.
-            if parsed_query.unbound_colors:
+            if active_parsed_query.unbound_colors:
                 upper_vals = _candidate_field_values("upper_color")
                 lower_vals = _candidate_field_values("lower_color")
                 unbound_hits = [
-                    v for v in parsed_query.unbound_colors
+                    v for v in active_parsed_query.unbound_colors
                     if v in upper_vals or v in lower_vals
                 ]
                 if unbound_hits:
@@ -1214,10 +1255,10 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
             # surviving tracklets with matching gender deserve a small bonus
             # to nudge them above unknown-gender tracklets that slipped past
             # the filter.
-            if parsed_query.gender:
+            if active_parsed_query.gender:
                 cand_genders = _candidate_field_values("gender")
-                if any(g in cand_genders for g in parsed_query.gender):
-                    matched_metadata["gender"] = list(parsed_query.gender)
+                if any(g in cand_genders for g in active_parsed_query.gender):
+                    matched_metadata["gender"] = list(active_parsed_query.gender)
                     metadata_bonus += METADATA_BONUS_PER_MATCH
 
             metadata_bonus_applied = 0.0
@@ -1227,10 +1268,20 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
 
             fusion_score = round(fusion_score, 4)
 
+            if settings.min_fusion_score > 0.0 and fusion_score < settings.min_fusion_score:
+                filtered_by_fusion_score += 1
+                continue
+
             # member_links: per-tracklet score within the candidate (for evidence UI).
             # Now reflects the member's own vec-similarity to the query when available,
             # not the artificial rep↔member cosine.
             member_links = []
+            score_mode = (
+                "image_vector" if query_vec_source == "image" and not text_has_meaning
+                else "image_text_quality" if query_vec_source == "image"
+                else "vector_text_quality" if query_vec
+                else "text_quality"
+            )
             for member in group:
                 if query_vec:
                     match_score = per_tracklet_vec_score.get(member.tracklet_id, 0.0)
@@ -1249,7 +1300,7 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
                 "text_score": text_score,
                 "vector_score": round(vec_score, 4) if query_vec else None,
                 "quality_score": round(quality_score, 4),
-                "score_mode": "vector_text_quality" if query_vec else "text_quality",
+                "score_mode": score_mode,
                 "action_bonus": round(action_bonus, 4),
                 "metadata_bonus": round(metadata_bonus_applied, 4),
                 "member_links": member_links,
@@ -1260,11 +1311,18 @@ def search_candidates(body: SearchRequest) -> dict[str, Any]:
 
         merged.sort(key=lambda item: (-item["fusion_score"], -item["rep"].id))
         logger.info(
-            "[query:%s] score candidates=%d elapsed=%.3fs mode=%s",
+            "[query:%s] score candidates=%d filtered_vector=%d filtered_fusion=%d min_vector=%.3f min_fusion=%.3f elapsed=%.3fs mode=%s",
             qid,
             len(merged),
+            filtered_by_query_vector,
+            filtered_by_fusion_score,
+            min_query_vector_score,
+            settings.min_fusion_score,
             time.perf_counter() - score_t0,
-            "vector_text_quality" if query_vec else "text_quality",
+            "image_vector" if query_vec_source == "image" and not text_has_meaning
+            else "image_text_quality" if query_vec_source == "image"
+            else "vector_text_quality" if query_vec
+            else "text_quality",
         )
 
         # Persist the top MAX_CANDIDATES ranked set for history, but return only
