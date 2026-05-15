@@ -107,9 +107,9 @@ VLM_BATCH_MAX_NEW_TOKENS_PER_CROP = _get_positive_env_int(
 # tăng (kỳ vọng 30-50%), nhưng độ tinh khiết group tăng đáng kể.
 # Component margin 0.03 → 0.05 → floor = 0.85 (cùng giá trị threshold cũ),
 # vẫn cho phép expand group qua các fragment trung gian.
-FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.90)
+FRAGMENT_MERGE_SIM_THRESHOLD = _get_env_float("FRAGMENT_MERGE_SIM_THRESHOLD", 0.89)
 FRAGMENT_MERGE_MAX_GAP_SECONDS = _get_env_float("FRAGMENT_MERGE_MAX_GAP_SECONDS", 180.0)
-FRAGMENT_MERGE_COMPONENT_MARGIN = _get_env_float("FRAGMENT_MERGE_COMPONENT_MARGIN", 0.03)
+FRAGMENT_MERGE_COMPONENT_MARGIN = _get_env_float("FRAGMENT_MERGE_COMPONENT_MARGIN", 0.02)
 FRAGMENT_MERGE_MAX_SPEED_PX_PER_S = _get_env_float("FRAGMENT_MERGE_MAX_SPEED_PX_PER_S", 800.0)
 FRAGMENT_MERGE_SPATIAL_BYPASS_MARGIN = _get_env_float("FRAGMENT_MERGE_SPATIAL_BYPASS_MARGIN", 0.05)
 
@@ -2391,8 +2391,8 @@ def _process_video_sync(
     scorer = TrackletQualityScorer(
         min_confidence=0.35,
         min_frames=3,           # ≥1s ở 3 FPS — đủ cho 1 cử động ngắn
-        min_density=0.15,       # 1 obs / 6.6 frames = ~2.2s — tracklet liên tục
-        min_duration_s=0.7,     # bỏ tracklet < 1s (thường là FP detection burst)
+        min_density=0.2,       # 1 obs / 6.6 frames = ~2.2s — tracklet liên tục
+        min_duration_s=0.65,     # bỏ tracklet < 0.65s (thường là FP detection burst)
         min_laplacian=30.0,
     )
     quality_results = {t.track_id: scorer.score(t) for t in local_tracklets}
