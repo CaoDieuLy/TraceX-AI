@@ -437,7 +437,7 @@ def _local_prefilter(
 
 # ── Identity merge: cosine similarity + temporal/camera guards + union-find ───
 
-_MERGE_THRESHOLD = float(os.getenv("QUERY_MERGE_THRESHOLD", "0.985"))
+_MERGE_THRESHOLD = float(os.getenv("QUERY_MERGE_THRESHOLD", "0.9"))
 # SigLIP image embeddings of arbitrary person crops cluster very tightly
 # (cosine 0.85–1.0 across different people), so the 0.85 used at ingest's
 # fragment-merge stage (where temporal/spatial guards do the heavy lifting)

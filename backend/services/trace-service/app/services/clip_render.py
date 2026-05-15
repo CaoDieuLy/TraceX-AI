@@ -36,6 +36,11 @@ _H264_PRESET = os.getenv("TRACE_CLIP_H264_PRESET", "veryfast")
 _H264_BITRATE = os.getenv("TRACE_CLIP_H264_BITRATE", "6000k")
 _FFMPEG_THREADS = max(1, int(os.getenv("TRACE_CLIP_FFMPEG_THREADS", "2")))
 _VALIDATE_TIMEOUT_SECONDS = int(os.getenv("TRACE_CLIP_VALIDATE_TIMEOUT_SECONDS", "0"))
+_MAX_BBOX_INTERP_GAP_SECONDS = max(
+    0.0,
+    float(os.getenv("TRACE_BBOX_MAX_INTERP_GAP_SECONDS", "1.0")),
+)
+_BBOX_RENDER_POLICY_VERSION = "bbox-gap-v1"
 
 
 def _slugify(value: str) -> str:
@@ -66,21 +71,31 @@ def _interp_bbox(
     frame_idx: int,
     sorted_obs_frames: list[int],
     obs_map: dict[int, list[int]],
+    *,
+    max_gap_frames: int | None = None,
 ) -> list[int] | None:
     """Linear-interpolate bbox at `frame_idx` from neighbouring observations.
 
     If frame_idx is before the first obs or after the last, clamp to the nearest.
+    If neighbouring observations are separated by a large gap, return None so
+    merged tracklets do not draw synthetic boxes while the person is absent.
     """
     if not sorted_obs_frames:
         return None
     if frame_idx <= sorted_obs_frames[0]:
+        if max_gap_frames is not None and sorted_obs_frames[0] - frame_idx > max_gap_frames:
+            return None
         return obs_map[sorted_obs_frames[0]]
     if frame_idx >= sorted_obs_frames[-1]:
+        if max_gap_frames is not None and frame_idx - sorted_obs_frames[-1] > max_gap_frames:
+            return None
         return obs_map[sorted_obs_frames[-1]]
     # Binary search would be tidier; linear scan is fine for typical N≈200
     for i in range(len(sorted_obs_frames) - 1):
         lo, hi = sorted_obs_frames[i], sorted_obs_frames[i + 1]
         if lo <= frame_idx <= hi:
+            if max_gap_frames is not None and hi - lo > max_gap_frames:
+                return None
             t = (frame_idx - lo) / max(1, (hi - lo))
             a, b = obs_map[lo], obs_map[hi]
             return [int(a[k] + t * (b[k] - a[k])) for k in range(4)]
@@ -114,11 +129,42 @@ def _finalize_tmp_mp4(tmp_path: Path, out_path: Path) -> bool:
         return False
     tmp_path.replace(out_path)
     _write_validation_marker(out_path)
+    _write_render_policy_marker(out_path)
     return True
 
 
 def _validation_marker_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".ready.json")
+
+
+def _render_policy_marker_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".render-policy.json")
+
+
+def _render_policy_signature() -> dict[str, object]:
+    return {
+        "version": _BBOX_RENDER_POLICY_VERSION,
+        "max_bbox_interp_gap_seconds": _MAX_BBOX_INTERP_GAP_SECONDS,
+    }
+
+
+def _render_policy_marker_matches(path: Path) -> bool:
+    marker_path = _render_policy_marker_path(path)
+    if not marker_path.exists():
+        return False
+    try:
+        marker = json.loads(marker_path.read_text())
+        return marker == _render_policy_signature()
+    except Exception:
+        return False
+
+
+def _write_render_policy_marker(path: Path) -> None:
+    marker_path = _render_policy_marker_path(path)
+    try:
+        marker_path.write_text(json.dumps(_render_policy_signature(), sort_keys=True))
+    except OSError as exc:
+        logger.warning("[clip_render] cannot write render policy marker for %s: %s", path, exc)
 
 
 def _file_signature(path: Path) -> dict[str, int]:
@@ -295,7 +341,11 @@ def render_tracklet_clip(
     # Cache hit — clip from a previous render of the same (query, candidate,
     # tracklet) tuple is reused as-is. Async/parallel callers rely on this so
     # repeated /trace/build calls (or polling refreshes) don't redo work.
-    if out_path.exists() and validate_playable_mp4(out_path):
+    if (
+        out_path.exists()
+        and _render_policy_marker_matches(out_path)
+        and validate_playable_mp4(out_path)
+    ):
         return rel_url
 
     src = Path(source_video_path)
@@ -331,6 +381,11 @@ def render_tracklet_clip(
 
         obs_map = _build_source_frame_map(observations, float(fps))
         sorted_obs_frames = sorted(obs_map)
+        max_interp_gap_frames = (
+            max(1, int(round(_MAX_BBOX_INTERP_GAP_SECONDS * float(fps))))
+            if _MAX_BBOX_INTERP_GAP_SECONDS > 0.0
+            else None
+        )
 
         ffmpeg_writer = _open_h264_writer(tmp_path, fps=float(fps), width=width, height=height)
         cv_writer = None
@@ -350,7 +405,12 @@ def render_tracklet_clip(
                     break
 
                 if draw_bbox:
-                    bbox = obs_map.get(fi) or _interp_bbox(fi, sorted_obs_frames, obs_map)
+                    bbox = obs_map.get(fi) or _interp_bbox(
+                        fi,
+                        sorted_obs_frames,
+                        obs_map,
+                        max_gap_frames=max_interp_gap_frames,
+                    )
                     if bbox is not None:
                         x1, y1, x2, y2 = bbox
                         x1 = max(0, min(width - 1, x1))
