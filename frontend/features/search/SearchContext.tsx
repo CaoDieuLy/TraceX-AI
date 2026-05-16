@@ -145,6 +145,9 @@ export function SearchProvider({ children }: { children: ReactNode }) {
     setHasSearched(true);
     setIsLoading(true);
     setCurrentQueryId(null);
+    setResults([]);
+    setGridPage(0);
+    setHasMore(false);
     try {
       const requestLimit = Math.min(GRID_BATCH_SIZE, topK);
       const page = await searchVideos(trimmed, requestLimit, 0, buildSearchFilters(), {
