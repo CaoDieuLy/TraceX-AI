@@ -10,12 +10,17 @@ import type { VideoItem } from "@/lib/types";
 
 export function SearchResultsPanel() {
   const { results, isLoading, error, hasSearched, hasMore, loadMore, query, image } = useSearch();
-  const [selected, setSelected] = useState<{ queryId: string; candidateId: string } | null>(null);
+  const [selected, setSelected] = useState<{
+    queryId: string;
+    candidateId: string;
+    candidateLabel: string;
+  } | null>(null);
   const searchLabel = query.trim() || (image ? "ảnh đã tải lên" : "truy vấn");
 
   const handleCardClick = (item: VideoItem) => {
     if (!item.queryId) return;
-    setSelected({ queryId: item.queryId, candidateId: item.id });
+    const rank = item.rank ?? results.findIndex((result) => result.id === item.id) + 1;
+    setSelected({ queryId: item.queryId, candidateId: item.id, candidateLabel: `#${rank}` });
   };
 
   if (!hasSearched) return null;
@@ -77,6 +82,7 @@ export function SearchResultsPanel() {
         open={selected !== null}
         queryId={selected?.queryId ?? null}
         candidateId={selected?.candidateId ?? null}
+        candidateLabel={selected?.candidateLabel ?? null}
         onClose={() => setSelected(null)}
       />
     </div>
