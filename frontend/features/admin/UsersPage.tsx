@@ -69,19 +69,19 @@ export function UsersPage() {
     try {
       const response = await authFetch("/users");
       if (response.status === 401) {
-        showToast("Phien dang nhap het han. Vui long dang nhap lai.", "error");
+        showToast("Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại.", "error");
         router.replace("/login");
         return;
       }
       if (response.status === 403) {
-        showToast("Ban khong co quyen admin.", "error");
+        showToast("Bạn không có quyền admin.", "error");
         return;
       }
       if (!response.ok) throw new Error(await readApiErrorMessage(response));
       const payload = await parseJsonOrThrow<{ items: UserItem[] }>(response);
       setItems(payload.items ?? []);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Tai danh sach user that bai.";
+      const message = err instanceof Error ? err.message : "Tải danh sách user thất bại.";
       showToast(mapBackendErrorMessage(message), "error");
     } finally {
       setLoading(false);
@@ -91,7 +91,7 @@ export function UsersPage() {
   async function loadCurrentUser() {
     const response = await authFetch("/auth/me");
     if (response.status === 401) {
-      showToast("Phien dang nhap het han. Vui long dang nhap lai.", "error");
+      showToast("Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại.", "error");
       router.replace("/login");
       return null;
     }
@@ -108,13 +108,13 @@ export function UsersPage() {
         if (!me) return;
         setCurrentUser(me);
         if (!["ADMIN", "SUPER_ADMIN"].includes(me.role)) {
-          showToast("Ban khong co quyen vao trang quan ly user.", "error");
+          showToast("Bạn không có quyền vào trang quản lý user.", "error");
           router.replace("/home");
           return;
         }
         await loadUsers();
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Khong the tai thong tin nguoi dung.";
+        const message = err instanceof Error ? err.message : "Không thể tải thông tin người dùng.";
         showToast(mapBackendErrorMessage(message), "error");
       }
     })();
@@ -135,7 +135,7 @@ export function UsersPage() {
     setPassword("");
     setRole("USER");
     setIsActive(true);
-    showToast("Tao user thanh cong.", "success");
+    showToast("Tạo user thành công.", "success");
     await loadUsers();
   }
 
@@ -148,7 +148,7 @@ export function UsersPage() {
       showToast(mapBackendErrorMessage(await readApiErrorMessage(response)), "error");
       return;
     }
-    showToast("Cap nhat user thanh cong.", "success");
+    showToast("Cập nhật user thành công.", "success");
     await loadUsers();
   }
 
@@ -156,7 +156,7 @@ export function UsersPage() {
     <div className="space-y-6 text-slate-900 dark:text-slate-100">
       <section className={PANEL_CLASS}>
         <h1 className="text-xl font-semibold text-slate-950 dark:text-white">Users</h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quan ly user (ADMIN va SUPER_ADMIN).</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quản lý user (ADMIN và SUPER_ADMIN).</p>
       </section>
 
       <section className={PANEL_CLASS}>
@@ -211,7 +211,7 @@ export function UsersPage() {
       </section>
 
       <section className={PANEL_CLASS}>
-        {loading ? <p className="text-sm text-slate-500 dark:text-slate-400">Dang tai users...</p> : null}
+        {loading ? <p className="text-sm text-slate-500 dark:text-slate-400">Đang tải users...</p> : null}
         <div className="space-y-2">
           {items.map((user) => {
             const isSelf = user.id === currentUserId;

@@ -116,7 +116,7 @@ export function SettingsPage() {
         setOverview(null);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Khong the tai settings.";
+      const message = err instanceof Error ? err.message : "Không thể tải settings.";
       showToast(mapBackendErrorMessage(message), "error");
     } finally {
       setLoading(false);
@@ -132,13 +132,13 @@ export function SettingsPage() {
     <div className="space-y-6 text-ink dark:text-slate-100">
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.34)]">
         <h1 className="text-xl font-semibold text-slate-950 dark:text-white">Settings</h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quan ly tai khoan, phien dang nhap va thong tin he thong.</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quản lý tài khoản, phiên đăng nhập và thông tin hệ thống.</p>
       </section>
 
       <section className="grid gap-4 md:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.34)]">
-          <p className="text-sm font-semibold text-slate-950 dark:text-white">Thong tin tai khoan</p>
-          {loading ? <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Dang tai...</p> : null}
+          <p className="text-sm font-semibold text-slate-950 dark:text-white">Thông tin tài khoản</p>
+          {loading ? <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Đang tải...</p> : null}
           {!loading ? (
             <dl className="mt-3 space-y-2 text-sm">
               <div className="flex justify-between gap-3">
@@ -150,11 +150,11 @@ export function SettingsPage() {
                 <dd className="font-medium text-slate-950 dark:text-slate-100">{me?.role || sessionUser?.role || "--"}</dd>
               </div>
               <div className="flex justify-between gap-3">
-                <dt className="text-slate-500 dark:text-slate-400">Trang thai</dt>
+                <dt className="text-slate-500 dark:text-slate-400">Trạng thái</dt>
                 <dd className="font-medium text-slate-950 dark:text-slate-100">{me?.is_active === false ? "Inactive" : "Active"}</dd>
               </div>
               <div className="flex justify-between gap-3">
-                <dt className="text-slate-500 dark:text-slate-400">Lan dang nhap cuoi</dt>
+                <dt className="text-slate-500 dark:text-slate-400">Lần đăng nhập cuối</dt>
                 <dd className="font-medium text-slate-950 dark:text-slate-100">{formatDateTime(me?.last_login)}</dd>
               </div>
             </dl>
@@ -162,24 +162,24 @@ export function SettingsPage() {
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.34)]">
-          <p className="text-sm font-semibold text-slate-950 dark:text-white">Tac vu nhanh</p>
+          <p className="text-sm font-semibold text-slate-950 dark:text-white">Tác vụ nhanh</p>
           <div className="mt-3 flex flex-col gap-2">
             <button
               type="button"
               onClick={async () => {
                 await loadSettingsData();
-                showToast("Da refresh du lieu settings.", "success");
+                showToast("Đã refresh dữ liệu settings.", "success");
               }}
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-800 transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-200 dark:hover:bg-slate-800"
             >
-              Refresh du lieu
+              Refresh dữ liệu
             </button>
             {isAdmin ? (
               <Link
                 href="/admin/users"
                 className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-200 dark:hover:bg-slate-800"
               >
-                Mo User management
+                Mở User management
               </Link>
             ) : null}
             <button
@@ -190,7 +190,7 @@ export function SettingsPage() {
               }}
               className="rounded-xl border border-red-200 bg-white px-3 py-2 text-left text-sm text-red-600 transition hover:bg-red-50 dark:border-red-900/70 dark:bg-red-950/20 dark:text-red-300 dark:hover:bg-red-950/40"
             >
-              Dang xuat tai khoan
+              Đăng xuất tài khoản
             </button>
           </div>
         </div>
@@ -231,7 +231,7 @@ export function SettingsPage() {
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.34)]">
-        <p className="text-sm font-semibold text-slate-950 dark:text-white">Thong tin he thong</p>
+        <p className="text-sm font-semibold text-slate-950 dark:text-white">Thông tin hệ thống</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
             <p className="text-xs text-slate-500 dark:text-slate-400">Users</p>
