@@ -61,7 +61,7 @@ export function AccountMenu() {
               onClick={() => setOpen(false)}
               className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition duration-200 hover:bg-slate-100 hover:text-slate-900"
             >
-              Settings
+              Cài đặt
             </Link>
             {["ADMIN", "SUPER_ADMIN"].includes(sessionUser?.role ?? "") ? (
               <Link
@@ -69,7 +69,7 @@ export function AccountMenu() {
                 onClick={() => setOpen(false)}
                 className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition duration-200 hover:bg-slate-100 hover:text-slate-900"
               >
-                User management
+                Quản lý người dùng
               </Link>
             ) : null}
             <button

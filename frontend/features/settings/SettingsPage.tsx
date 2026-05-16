@@ -116,7 +116,7 @@ export function SettingsPage() {
         setOverview(null);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Khong the tai settings.";
+      const message = err instanceof Error ? err.message : "Không thể tải settings.";
       showToast(mapBackendErrorMessage(message), "error");
     } finally {
       setLoading(false);
@@ -132,7 +132,7 @@ export function SettingsPage() {
     <div className="space-y-6 text-ink dark:text-slate-100">
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-[0_20px_40px_rgba(2,6,23,0.34)]">
         <h1 className="text-xl font-semibold text-slate-950 dark:text-white">Settings</h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quản lý tài khoản, phiên đăng nhập và thông tin hê thống.</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quản lý tài khoản, phiên đăng nhập và thông tin hệ thống.</p>
       </section>
 
       <section className="grid gap-4 md:grid-cols-2">
@@ -150,11 +150,11 @@ export function SettingsPage() {
                 <dd className="font-medium text-slate-950 dark:text-slate-100">{me?.role || sessionUser?.role || "--"}</dd>
               </div>
               <div className="flex justify-between gap-3">
-                <dt className="text-slate-500 dark:text-slate-400">Trang thai</dt>
+                <dt className="text-slate-500 dark:text-slate-400">Trạng thái</dt>
                 <dd className="font-medium text-slate-950 dark:text-slate-100">{me?.is_active === false ? "Inactive" : "Active"}</dd>
               </div>
               <div className="flex justify-between gap-3">
-                <dt className="text-slate-500 dark:text-slate-400">Lân đăng nhập cuối</dt>
+                <dt className="text-slate-500 dark:text-slate-400">Lần đăng nhập cuối</dt>
                 <dd className="font-medium text-slate-950 dark:text-slate-100">{formatDateTime(me?.last_login)}</dd>
               </div>
             </dl>
@@ -168,7 +168,7 @@ export function SettingsPage() {
               type="button"
               onClick={async () => {
                 await loadSettingsData();
-                showToast("Da refresh du lieu settings.", "success");
+                showToast("Đã refresh dữ liệu settings.", "success");
               }}
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-800 transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950/40 dark:text-slate-200 dark:hover:bg-slate-800"
             >
@@ -234,19 +234,19 @@ export function SettingsPage() {
         <p className="text-sm font-semibold text-slate-950 dark:text-white">Thông tin hệ thống</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Users</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Người dùng</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_users ?? "--"}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Managed videos</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Video đã quản lý</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_managed_videos ?? "--"}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Queries</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Truy vấn</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_queries ?? "--"}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Queue videos</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Video trong hàng đợi</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_queue_videos ?? "--"}</p>
           </div>
         </div>
