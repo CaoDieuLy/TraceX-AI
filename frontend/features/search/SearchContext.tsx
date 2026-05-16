@@ -62,6 +62,16 @@ type SearchContextValue = {
 
 const SearchContext = createContext<SearchContextValue | null>(null);
 
+function toDatasetClockIso(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const [datePart, timePart = "00:00"] = trimmed.split("T");
+  const [hour = "00", minute = "00", second = "00"] = timePart.split(":");
+  return `${datePart}T${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}.000Z`;
+}
+
 export function SearchProvider({ children }: { children: ReactNode }) {
   const [query, setQuery] = useState("");
   const [image, setImageState] = useState<SearchImageState | null>(null);
@@ -96,8 +106,8 @@ export function SearchProvider({ children }: { children: ReactNode }) {
 
   const buildSearchFilters = useCallback(() => {
     const cameraIds = mapLocationIdsToCameraIds(locationIds);
-    const timeFromIso = timeFrom ? new Date(timeFrom).toISOString() : undefined;
-    const timeToIso = timeTo ? new Date(timeTo).toISOString() : undefined;
+    const timeFromIso = toDatasetClockIso(timeFrom);
+    const timeToIso = toDatasetClockIso(timeTo);
     return {
       camera_ids: cameraIds.length ? cameraIds : undefined,
       time_from: timeFromIso,
