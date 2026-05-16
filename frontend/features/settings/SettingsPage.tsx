@@ -234,19 +234,19 @@ export function SettingsPage() {
         <p className="text-sm font-semibold text-slate-950 dark:text-white">Thông tin hệ thống</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Users</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Người dùng</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_users ?? "--"}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Managed videos</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Video đã quản lý</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_managed_videos ?? "--"}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Queries</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Truy vấn</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_queries ?? "--"}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/45">
-            <p className="text-xs text-slate-500 dark:text-slate-400">Queue videos</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Video trong hàng đợi</p>
             <p className="text-lg font-semibold text-slate-950 dark:text-slate-100">{overview?.metrics?.total_queue_videos ?? "--"}</p>
           </div>
         </div>
