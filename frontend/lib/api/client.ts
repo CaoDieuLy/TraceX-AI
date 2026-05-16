@@ -278,7 +278,7 @@ export async function searchVideos(
   });
 
   const queryId = payload.query_id ?? null;
-  const items = payload.results.map((item) => ({
+  const items = payload.results.map((item, index) => ({
     id: item.id,
     title: "",
     description: item.description,
@@ -286,6 +286,7 @@ export async function searchVideos(
       ? resolveMediaUrl(item.thumbnail_url, apiBaseUrl)
       : placeholderThumbnail(item.id),
     queryId: item.query_id ?? queryId ?? undefined,
+    rank: offset + index + 1,
     trackletCount: item.tracklet_count,
     tracklets: item.tracklets?.map((t) => ({
       trackletId: t.tracklet_id,

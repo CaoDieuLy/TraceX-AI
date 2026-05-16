@@ -81,7 +81,11 @@ export function HomeView() {
   } = useSearch();
   const lastErrorRef = useRef<string | null>(null);
 
-  const [selectedCandidate, setSelectedCandidate] = useState<{ queryId: string; candidateId: string } | null>(null);
+  const [selectedCandidate, setSelectedCandidate] = useState<{
+    queryId: string;
+    candidateId: string;
+    candidateLabel: string;
+  } | null>(null);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
   const [isTracing, setIsTracing] = useState(false);
 
@@ -148,13 +152,18 @@ export function HomeView() {
     }
   }, [isImporting, showToast]);
 
+  const getCandidateLabel = useCallback((video: VideoItem) => {
+    const rank = video.rank ?? results.findIndex((item) => item.id === video.id) + 1;
+    return `#${rank}`;
+  }, [results]);
+
   const handleCandidateClick = useCallback((video: VideoItem) => {
     if (!video.queryId) {
       showToast("Không tìm thấy query_id cho candidate này.", "error");
       return;
     }
-    setSelectedCandidate({ queryId: video.queryId, candidateId: video.id });
-  }, [showToast]);
+    setSelectedCandidate({ queryId: video.queryId, candidateId: video.id, candidateLabel: getCandidateLabel(video) });
+  }, [getCandidateLabel, showToast]);
 
   const handleToggleCandidate = useCallback((video: VideoItem) => {
     if (!video.queryId) {
@@ -200,7 +209,12 @@ export function HomeView() {
     setIsTracing(true);
     try {
       const result = await buildTrace(queryId, traceableIds, { mergeVideos: false });
-      const candidateLabel = traceableIds.length === 1 ? traceableIds[0] : `${traceableIds.length} candidates`;
+      const candidateLabels = selectedItems
+        .filter((item) => traceableIds.includes(item.id))
+        .map(getCandidateLabel)
+      const candidateLabel = candidateLabels.length
+        ? candidateLabels.join(", ")
+        : `${traceableIds.length} candidates`;
       router.push(
         `/trace/${result.evidenceId}?query=${encodeURIComponent(queryId)}&candidate=${encodeURIComponent(candidateLabel)}`,
       );
@@ -209,7 +223,7 @@ export function HomeView() {
     } finally {
       setIsTracing(false);
     }
-  }, [router, selectedCandidateIds.length, selectedItems, showToast]);
+  }, [getCandidateLabel, router, selectedCandidateIds.length, selectedItems, showToast]);
 
   if (!hasSearched) {
     return (
@@ -446,6 +460,7 @@ export function HomeView() {
         open={selectedCandidate !== null}
         queryId={selectedCandidate?.queryId ?? null}
         candidateId={selectedCandidate?.candidateId ?? null}
+        candidateLabel={selectedCandidate?.candidateLabel ?? null}
         onClose={() => setSelectedCandidate(null)}
         onTrackletRemoved={handleTrackletRemoved}
       />
