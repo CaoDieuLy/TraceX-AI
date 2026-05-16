@@ -217,7 +217,7 @@ services:
       - PREVIEW_ROOT=/workspace/storage/candidate-previews
       - PUBLIC_API_BASE_URL=${LIGHTNINGAI_PUBLIC_URL:-}
       # Search tuning
-      - MIN_FUSION_SCORE=${MIN_FUSION_SCORE:-0.0}
+      - MIN_FUSION_SCORE=${MIN_FUSION_SCORE:-0.62}
       - MAX_CANDIDATES=${MAX_CANDIDATES:-50}
       # SigLIP2 image-image cosine clusters very tightly (~0.85-1.0 across
       # all person crops). Identity merge needs a strict cutoff — adjust at
