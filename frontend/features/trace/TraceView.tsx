@@ -70,6 +70,7 @@ export function TraceView({ evidenceId, queryId, candidateId }: Props) {
   const active = segments[activeIdx];
   const readyCount = segments.filter((segment) => Boolean(segment.videoClipUrl)).length;
   const pendingCount = Math.max(segments.length - readyCount, 0);
+  const candidateLabel = formatCandidateLabel(candidateId);
 
   return (
     <div className="flex flex-col gap-6">
@@ -78,7 +79,7 @@ export function TraceView({ evidenceId, queryId, candidateId }: Props) {
           <p className="text-xs font-semibold uppercase tracking-wide text-ink-subtle">Thông tin truy vết</p>
           <h1 className="text-2xl font-semibold text-ink">
             Evidence #{evidenceId}
-            {candidateId ? <span className="ml-2 font-mono text-sm text-slate-500">· {candidateId}</span> : null}
+            {candidateLabel ? <span className="ml-2 font-mono text-sm text-slate-500">· {candidateLabel}</span> : null}
           </h1>
         </div>
         <Link
@@ -108,6 +109,16 @@ export function TraceView({ evidenceId, queryId, candidateId }: Props) {
       ) : null}
     </div>
   );
+}
+
+function formatCandidateLabel(candidateId: string | null): string | null {
+  if (!candidateId) return null;
+  const value = candidateId.trim();
+  if (!value) return null;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    return null;
+  }
+  return value;
 }
 
 function RenderProgress({

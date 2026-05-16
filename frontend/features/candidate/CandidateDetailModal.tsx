@@ -9,6 +9,7 @@ type Props = {
   open: boolean;
   queryId: string | null;
   candidateId: string | null;
+  candidateLabel?: string | null;
   onClose: () => void;
   onTrackletRemoved?: (candidateId: string, trackletId: string, remainingTrackletCount: number) => void;
 };
@@ -17,6 +18,7 @@ export function CandidateDetailModal({
   open,
   queryId,
   candidateId,
+  candidateLabel,
   onClose,
   onTrackletRemoved,
 }: Props) {
@@ -95,6 +97,7 @@ export function CandidateDetailModal({
   };
 
   if (!open) return null;
+  const title = candidateLabel ?? (detail?.rankPosition ? `#${detail.rankPosition}` : null) ?? "—";
 
   return (
     <div
@@ -109,7 +112,7 @@ export function CandidateDetailModal({
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Candidate</p>
             <h2 className="text-lg font-semibold text-slate-900">
-              {candidateId ? candidateId : "—"}
+              {title}
             </h2>
             {detail?.appearanceSummary ? (
               <p className="mt-1 max-w-2xl text-sm text-slate-600">{detail.appearanceSummary}</p>

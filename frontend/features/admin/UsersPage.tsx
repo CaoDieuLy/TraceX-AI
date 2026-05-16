@@ -156,7 +156,7 @@ export function UsersPage() {
     <div className="space-y-6 text-slate-900 dark:text-slate-100">
       <section className={PANEL_CLASS}>
         <h1 className="text-xl font-semibold text-slate-950 dark:text-white">Users</h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quan ly user (ADMIN va SUPER_ADMIN).</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Quản lý user (ADMIN và SUPER_ADMIN).</p>
       </section>
 
       <section className={PANEL_CLASS}>
@@ -211,7 +211,7 @@ export function UsersPage() {
       </section>
 
       <section className={PANEL_CLASS}>
-        {loading ? <p className="text-sm text-slate-500 dark:text-slate-400">Dang tai users...</p> : null}
+        {loading ? <p className="text-sm text-slate-500 dark:text-slate-400">Đang tải users...</p> : null}
         <div className="space-y-2">
           {items.map((user) => {
             const isSelf = user.id === currentUserId;

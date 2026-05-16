@@ -77,7 +77,7 @@ export function AccountMenu() {
               onClick={handleLogout}
               className="rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition duration-200 hover:bg-red-50"
             >
-              Dang xuat
+              Đăng xuất
             </button>
           </div>
         </div>

@@ -25,7 +25,7 @@ export function HistoryCandidatesView({ queryId }: Props) {
   const [gridPage, setGridPage] = useState(0);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<
-    { queryId: string; candidateId: string } | null
+    { queryId: string; candidateId: string; candidateLabel: string } | null
   >(null);
 
   useEffect(() => {
@@ -108,13 +108,18 @@ export function HistoryCandidatesView({ queryId }: Props) {
     }
   }, [data, loadingMore, queryId, showToast]);
 
+  const getCandidateLabel = useCallback((video: VideoItem) => {
+    const rank = video.rank ?? (data?.items.findIndex((item) => item.id === video.id) ?? -1) + 1;
+    return `#${rank}`;
+  }, [data?.items]);
+
   const handleCandidateClick = useCallback((video: VideoItem) => {
     if (!video.queryId) {
       showToast("Không tìm thấy query_id cho candidate này.", "error");
       return;
     }
-    setSelectedCandidate({ queryId: video.queryId, candidateId: video.id });
-  }, [showToast]);
+    setSelectedCandidate({ queryId: video.queryId, candidateId: video.id, candidateLabel: getCandidateLabel(video) });
+  }, [getCandidateLabel, showToast]);
 
   const handleToggleCandidate = useCallback((video: VideoItem) => {
     if (!video.queryId) {
@@ -170,7 +175,12 @@ export function HistoryCandidatesView({ queryId }: Props) {
         return;
       }
       const result = await buildTrace(queryId, traceableIds, { mergeVideos: false });
-      const candidateLabel = traceableIds.length === 1 ? traceableIds[0] : `${traceableIds.length} candidates`;
+      const candidateLabels = selectedItems
+        .filter((item) => traceableIds.includes(item.id))
+        .map(getCandidateLabel)
+      const candidateLabel = candidateLabels.length
+        ? candidateLabels.join(", ")
+        : `${traceableIds.length} candidates`;
       router.push(
         `/trace/${result.evidenceId}?query=${encodeURIComponent(queryId)}&candidate=${encodeURIComponent(candidateLabel)}`,
       );
@@ -179,7 +189,7 @@ export function HistoryCandidatesView({ queryId }: Props) {
     } finally {
       setIsTracing(false);
     }
-  }, [data?.items, queryId, router, selectedCandidateIds, showToast]);
+  }, [data?.items, getCandidateLabel, queryId, router, selectedCandidateIds, selectedItems, showToast]);
 
   return (
     <div className="mx-auto w-full max-w-6xl text-ink dark:text-slate-100">
@@ -295,6 +305,7 @@ export function HistoryCandidatesView({ queryId }: Props) {
         open={selectedCandidate !== null}
         queryId={selectedCandidate?.queryId ?? null}
         candidateId={selectedCandidate?.candidateId ?? null}
+        candidateLabel={selectedCandidate?.candidateLabel ?? null}
         onClose={() => setSelectedCandidate(null)}
         onTrackletRemoved={handleTrackletRemoved}
       />
